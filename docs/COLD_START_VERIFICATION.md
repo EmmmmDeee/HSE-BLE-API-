@@ -1,20 +1,25 @@
-# Cold-start Verification
+# Cold-Start Verification
 
-## Requested gate
+The deliverable is verified in two layers.
 
-The requested terminal gate is: extract the final ZIP into a fresh directory, then run `cargo build`, the full test suite, and `cargo audit` from that extracted copy alone.
+## Layer 1 — package integrity (executed here)
 
-## Host result
+1. Create the final ZIP.
+2. Extract it to a fresh directory.
+3. Verify every `SHA256SUMS` entry.
+4. Run `python tools/parity_report.py` from the extracted copy.
+5. Confirm the Git history bundle lists the recovery tags and enhancement commit.
 
-- Archive extraction: **PASS**
-- Required source/manifests/oracles/docs present: **PASS**
-- Python inventory tool syntax: **PASS**
-- Shell ABI tool syntax: **PASS**
-- Git bundle structural verification: **PASS**
-- `cargo build --workspace --locked`: **BLOCKED — Cargo/Rust toolchain is not installed on the execution host**
-- `cargo test --workspace --locked`: **BLOCKED — same physical host constraint**
-- `cargo audit`: **BLOCKED — Cargo and cargo-audit are not installed**
+## Layer 2 — Rust execution gates (required, unavailable on this host)
 
-Outbound DNS from the execution container is unavailable, so the pinned Rust toolchain cannot be bootstrapped into this host during the run. This is recorded as MIG-004 and is not represented as green.
+Run from the clean extraction:
 
-The reconstructed workspace has zero third-party Rust dependencies. That materially reduces advisory exposure but does not substitute for executing the requested commands.
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --locked
+cargo test --workspace --locked
+cargo audit
+```
+
+The execution host used to prepare this package does not have `cargo`/`rustc`; therefore Layer 2 is **BLOCKED**, not passed. This document deliberately distinguishes archive reproducibility from compiler/runtime verification.
