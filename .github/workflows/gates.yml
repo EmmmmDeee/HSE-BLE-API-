@@ -29,3 +29,5 @@ jobs:
           git diff --exit-code docs/PARITY_COVERAGE.md
       - name: Dependency policy gate
         run: python3 tools/check_dependency_policy.py
+      - name: Oracle integrity gate
+        run: python3 tools/check_oracle_integrity.py
