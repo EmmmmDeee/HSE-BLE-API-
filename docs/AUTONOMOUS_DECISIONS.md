@@ -19,3 +19,11 @@
 8. **Mechanize parity status.** Observed ABI, oracle-retained implementation and source-reconstructed behavior are distinct registry states.
 9. **Preserve zero-dependency Rust core.** No external crate was introduced solely for convenience, keeping the workspace deterministic and audit-light.
 10. **Never report unavailable Cargo/Android gates as green.** Package integrity is verified locally; compile/runtime gates remain explicit blocked items.
+
+## Autonomous advancement decisions (2026-08-28)
+
+11. **Execute formerly blocked gates the moment a capable host exists.** All four cargo gates plus the parity drift check were run and observed green, converting MIG-004 from blocked to remediated with dated evidence.
+12. **Falsify before and after fixing.** The haversine NaN (COR-010) and bearing `360.0` (COR-011) defects were demonstrated with concrete reproducers, pinned as failing regression tests first, and only then fixed — clamping to the mathematical domain rather than masking symptoms.
+13. **Enforce claimed invariants at type boundaries.** `LatLon` validation moved from convention to compile-time enforcement by privatizing fields (COR-012); a claim of validation that can be bypassed is not a remediation.
+14. **Lock verification into CI.** Green-once is not green; `.github/workflows/gates.yml` re-proves every gate and the parity report's determinism on each push and pull request.
+15. **Operate future autonomous sessions under `docs/AUTONOMOUS_ENGINE.md`.** The engine document is versioned in-repo so its acceptance gate and recomputation obligations are auditable alongside the work they govern.

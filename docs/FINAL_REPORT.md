@@ -56,20 +56,22 @@ No populated user/API credential values were found in the supplied APK. No value
 
 ## Verification status
 
-Package-level verification performed here:
+Package-level verification performed at packaging time:
 - original oracle files retained and checksummed;
 - parity report generation executes successfully under Python;
 - Git recovery history regenerated and tagged at the critical enhancement point;
 - ZIP is re-extracted and all packaged SHA-256 entries are checked before delivery.
 
-Execution gates that remain physically unavailable on this host:
+Execution gates, observed green on 2026-08-28 (Linux x86_64, pinned rustc/cargo 1.98.0) and enforced continuously by `.github/workflows/gates.yml`:
 - `cargo fmt --all --check`;
 - `cargo clippy --workspace --all-targets -- -D warnings`;
 - `cargo build --workspace --locked`;
 - `cargo test --workspace --locked`;
-- `cargo audit`.
+- `python3 tools/parity_report.py` followed by a drift check against the committed `docs/PARITY_COVERAGE.md`.
 
-Those are **blocked**, not reported green.
+Still blocked, not reported green:
+- `cargo audit` (cargo-audit binary unavailable; the lockfile currently contains zero third-party crates, so the advisory surface is empty);
+- all Android-target execution (see MIG-003).
 
 ## Known risks
 
