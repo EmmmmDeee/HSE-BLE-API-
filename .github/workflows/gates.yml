@@ -1,0 +1,29 @@
+name: gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Format gate
+        run: cargo fmt --all --check
+      - name: Clippy gate
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build gate
+        run: cargo build --workspace --locked
+      - name: Test gate
+        run: cargo test --workspace --locked
+      - name: Parity report drift gate
+        run: |
+          python3 tools/parity_report.py
+          git diff --exit-code docs/PARITY_COVERAGE.md
