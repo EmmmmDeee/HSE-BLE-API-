@@ -1,0 +1,12 @@
+[package]
+name = "bleradar-compat"
+version = "0.3.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bleradar-core = { path = "../bleradar-core" }
+
+[lints]
+workspace = true
