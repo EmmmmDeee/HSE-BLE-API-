@@ -2,13 +2,14 @@
 
 use std::f64::consts::PI;
 
-/// Geographic coordinate in decimal degrees.
+/// Validated geographic coordinate in decimal degrees.
+///
+/// Fields are private so a value can only exist through [`LatLon::new`]; every
+/// instance is therefore finite and inside the geographic range.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LatLon {
-    /// Latitude, -90..=90.
-    pub lat: f64,
-    /// Longitude, -180..=180.
-    pub lon: f64,
+    lat: f64,
+    lon: f64,
 }
 
 impl LatLon {
@@ -21,6 +22,18 @@ impl LatLon {
             return Err(GeoError::OutOfRange);
         }
         Ok(Self { lat, lon })
+    }
+
+    /// Latitude in decimal degrees, -90..=90.
+    #[must_use]
+    pub const fn lat(self) -> f64 {
+        self.lat
+    }
+
+    /// Longitude in decimal degrees, -180..=180.
+    #[must_use]
+    pub const fn lon(self) -> f64 {
+        self.lon
     }
 }
 
@@ -42,7 +55,9 @@ pub fn haversine_m(a: LatLon, b: LatLon) -> f64 {
     let dlat = (b.lat - a.lat).to_radians();
     let dlon = (b.lon - a.lon).to_radians();
     let h = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    2.0 * EARTH_RADIUS_M * h.sqrt().asin()
+    // Floating error can push h a few ULP above 1.0 near antipodal points,
+    // where asin would leave its domain and return NaN; mathematically h <= 1.
+    2.0 * EARTH_RADIUS_M * h.min(1.0).sqrt().asin()
 }
 
 /// Initial bearing from `from` to `to`, normalized to [0, 360).
@@ -53,5 +68,7 @@ pub fn bearing_deg(from: LatLon, to: LatLon) -> f64 {
     let dlambda = (to.lon - from.lon).to_radians();
     let y = dlambda.sin() * phi2.cos();
     let x = phi1.cos() * phi2.sin() - phi1.sin() * phi2.cos() * dlambda.cos();
-    (y.atan2(x) * 180.0 / PI).rem_euclid(360.0)
+    // rem_euclid can round a tiny negative angle up to exactly 360.0; the
+    // second reduction folds that back so the result stays inside [0, 360).
+    (y.atan2(x) * 180.0 / PI).rem_euclid(360.0) % 360.0
 }

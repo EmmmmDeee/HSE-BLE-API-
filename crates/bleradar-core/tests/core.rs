@@ -1,9 +1,9 @@
 //! Behavioral regression tests for the reconstructed BLE Radar domain core.
 
 use bleradar_core::{
-    AddressKind, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, IdentityEvidence,
-    LatLon, ProximityBand, RssiEma, SelectedDevice, SignalTrend, TrackError, bearing_deg,
-    ble_distance_m, canonical_mac, haversine_m, is_locally_administered, signal_trend,
+    AddressKind, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, GeoError,
+    IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice, SignalTrend, TrackError,
+    bearing_deg, ble_distance_m, canonical_mac, haversine_m, is_locally_administered, signal_trend,
     wifi_channel_to_frequency, wifi_frequency_to_channel,
 };
 
@@ -11,6 +11,37 @@ use bleradar_core::{
 fn zero_distance_is_zero() {
     let p = LatLon::new(-26.8, 152.8).unwrap();
     assert_eq!(haversine_m(p, p), 0.0);
+}
+
+#[test]
+fn haversine_is_finite_at_near_antipodal_points() {
+    // Reproducer found by randomized falsification (3,525 NaN results in 60M
+    // near-antipodal samples of the unclamped formula): floating error pushes
+    // the haversine term above 1.0 and asin leaves its domain.
+    let a = LatLon::new(58.533_453_260_712_69, -79.146_585_029_992_61).unwrap();
+    let b = LatLon::new(-58.533_453_260_712_285, 100.853_414_970_007_24).unwrap();
+    let d = haversine_m(a, b);
+    assert!(d.is_finite());
+    // Near-antipodal separation is close to half the great circle.
+    assert!((d - std::f64::consts::PI * 6_371_000.0).abs() < 5_000.0);
+}
+
+#[test]
+fn bearing_stays_in_documented_range() {
+    // rem_euclid rounds a tiny negative angle up to exactly 360.0, violating
+    // the documented [0, 360) contract without the fold-back.
+    let a = LatLon::new(0.0, 0.0).unwrap();
+    let b = LatLon::new(1.0e-9, -1.0e-300).unwrap();
+    let bearing = bearing_deg(a, b);
+    assert!((0.0..360.0).contains(&bearing));
+}
+
+#[test]
+fn latlon_rejects_invalid_input() {
+    assert_eq!(LatLon::new(f64::NAN, 0.0), Err(GeoError::NonFinite));
+    assert_eq!(LatLon::new(0.0, f64::INFINITY), Err(GeoError::NonFinite));
+    assert_eq!(LatLon::new(90.1, 0.0), Err(GeoError::OutOfRange));
+    assert_eq!(LatLon::new(0.0, -180.5), Err(GeoError::OutOfRange));
 }
 
 #[test]

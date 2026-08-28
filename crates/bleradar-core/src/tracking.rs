@@ -213,8 +213,8 @@ impl DeviceTrack {
             let signal_weight = 10_f64.powf((rssi - max_rssi) / 20.0).clamp(0.05, 1.0);
             let weight = accuracy_weight * signal_weight;
             weight_sum += weight;
-            lat_sum += pos.lat * weight;
-            lon_sum += pos.lon * weight;
+            lat_sum += pos.lat() * weight;
+            lon_sum += pos.lon() * weight;
         }
         if weight_sum <= 0.0 || !weight_sum.is_finite() {
             return None;
