@@ -184,6 +184,40 @@ fn spatial_estimate_requires_multiple_positioned_observations() {
     let estimate = track.spatial_estimate().unwrap();
     assert_eq!(estimate.supporting_observations, 2);
     assert!(estimate.uncertainty_m > 0.0);
+    // The center of two ~15 m-apart observations must stay local to them.
+    assert!(haversine_m(estimate.center, a) < 1_000.0);
+}
+
+#[test]
+fn spatial_estimate_handles_antimeridian_straddling() {
+    // Two observations ~111 m apart across the ±180° meridian. A linear
+    // longitude mean places the center near lon 0 — the far side of the
+    // planet — instead of near ±180.
+    let mut track = DeviceTrack::new(0.5).unwrap();
+    let east = LatLon::new(0.0, 179.9995).unwrap();
+    let west = LatLon::new(0.0, -179.9995).unwrap();
+    track
+        .push(DeviceObservation {
+            timestamp_ms: 1,
+            observer_position: Some(east),
+            gps_accuracy_m: Some(5.0),
+            rssi_dbm: -60.0,
+            tx_power_dbm: None,
+        })
+        .unwrap();
+    track
+        .push(DeviceObservation {
+            timestamp_ms: 2,
+            observer_position: Some(west),
+            gps_accuracy_m: Some(5.0),
+            rssi_dbm: -60.0,
+            tx_power_dbm: None,
+        })
+        .unwrap();
+    let estimate = track.spatial_estimate().unwrap();
+    let true_midpoint = LatLon::new(0.0, 180.0).unwrap();
+    assert!(haversine_m(estimate.center, true_midpoint) < 1_000.0);
+    assert!(estimate.uncertainty_m < 10_000.0);
 }
 
 #[test]

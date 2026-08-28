@@ -205,21 +205,38 @@ impl DeviceTrack {
             .iter()
             .map(|(_, _, rssi)| *rssi)
             .fold(f64::NEG_INFINITY, f64::max);
+        // Longitude wraps at ±180°, so positions are averaged as weighted 3-D
+        // unit vectors on the sphere; a linear mean of straddling longitudes
+        // would place the center on the far side of the planet.
         let mut weight_sum = 0.0;
-        let mut lat_sum = 0.0;
-        let mut lon_sum = 0.0;
+        let mut x_sum = 0.0;
+        let mut y_sum = 0.0;
+        let mut z_sum = 0.0;
         for (pos, accuracy, rssi) in &positioned {
             let accuracy_weight = 1.0 / accuracy.max(1.0).powi(2);
             let signal_weight = 10_f64.powf((rssi - max_rssi) / 20.0).clamp(0.05, 1.0);
             let weight = accuracy_weight * signal_weight;
+            let lat_rad = pos.lat().to_radians();
+            let lon_rad = pos.lon().to_radians();
             weight_sum += weight;
-            lat_sum += pos.lat() * weight;
-            lon_sum += pos.lon() * weight;
+            x_sum += weight * lat_rad.cos() * lon_rad.cos();
+            y_sum += weight * lat_rad.cos() * lon_rad.sin();
+            z_sum += weight * lat_rad.sin();
         }
         if weight_sum <= 0.0 || !weight_sum.is_finite() {
             return None;
         }
-        let center = LatLon::new(lat_sum / weight_sum, lon_sum / weight_sum).ok()?;
+        let norm = (x_sum * x_sum + y_sum * y_sum + z_sum * z_sum).sqrt();
+        // A vanishing mean vector means the observations surround the sphere
+        // with no meaningful center; local BLE clusters never trigger this.
+        if norm < weight_sum * 1e-9 {
+            return None;
+        }
+        // Clamp for the same reason as haversine_m: float error must not push
+        // the asin argument outside its domain.
+        let center_lat = (z_sum / norm).clamp(-1.0, 1.0).asin().to_degrees();
+        let center_lon = y_sum.atan2(x_sum).to_degrees();
+        let center = LatLon::new(center_lat, center_lon).ok()?;
         let weighted_radius = positioned
             .iter()
             .map(|(pos, accuracy, _)| haversine_m(center, *pos) + *accuracy)
