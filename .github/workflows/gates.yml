@@ -27,3 +27,5 @@ jobs:
         run: |
           python3 tools/parity_report.py
           git diff --exit-code docs/PARITY_COVERAGE.md
+      - name: Dependency policy gate
+        run: python3 tools/check_dependency_policy.py

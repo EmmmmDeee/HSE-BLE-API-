@@ -29,7 +29,7 @@ cargo build --workspace --locked
 cargo test --workspace --locked
 ```
 
-These gates, plus a parity-report drift check, run on every push and pull request via `.github/workflows/gates.yml`. Autonomous maintenance sessions operate under `docs/AUTONOMOUS_ENGINE.md`.
+These gates, plus a parity-report drift check and a zero-third-party-dependency policy check (`tools/check_dependency_policy.py`), run on every push and pull request via `.github/workflows/gates.yml`. Autonomous maintenance sessions operate under `docs/AUTONOMOUS_ENGINE.md`.
 
 ## Parity report
 
