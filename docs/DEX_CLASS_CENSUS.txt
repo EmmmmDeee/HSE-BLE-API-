@@ -1,0 +1,2 @@
+com/huntsman/bleradar/ffi/Fxy
+com/huntsman/bleradar/ffi/Xy
