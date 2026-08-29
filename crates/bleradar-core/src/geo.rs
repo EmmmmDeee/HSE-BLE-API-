@@ -14,6 +14,18 @@ pub struct LatLon {
 
 impl LatLon {
     /// Constructs a validated coordinate.
+    ///
+    /// # Errors
+    /// Returns [`GeoError::NonFinite`] if either value is NaN or infinite, or
+    /// [`GeoError::OutOfRange`] if latitude is outside `-90..=90` or longitude
+    /// outside `-180..=180`.
+    ///
+    /// # Examples
+    /// ```
+    /// use bleradar_core::LatLon;
+    /// assert!(LatLon::new(45.0, 170.0).is_ok());
+    /// assert!(LatLon::new(91.0, 0.0).is_err());
+    /// ```
     pub fn new(lat: f64, lon: f64) -> Result<Self, GeoError> {
         if !lat.is_finite() || !lon.is_finite() {
             return Err(GeoError::NonFinite);
@@ -46,7 +58,28 @@ pub enum GeoError {
     OutOfRange,
 }
 
+impl std::fmt::Display for GeoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NonFinite => "coordinate value was NaN or infinite",
+            Self::OutOfRange => "latitude or longitude outside the valid geographic range",
+        })
+    }
+}
+
+impl std::error::Error for GeoError {}
+
 /// Great-circle distance in metres using the haversine formula.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::{LatLon, haversine_m};
+/// let a = LatLon::new(0.0, 0.0).unwrap();
+/// let b = LatLon::new(0.0, 1.0).unwrap();
+/// // One degree of longitude at the equator is ~111 km.
+/// let d = haversine_m(a, b);
+/// assert!(d > 111_000.0 && d < 111_400.0);
+/// ```
 #[must_use]
 pub fn haversine_m(a: LatLon, b: LatLon) -> f64 {
     const EARTH_RADIUS_M: f64 = 6_371_000.0;
@@ -61,6 +94,14 @@ pub fn haversine_m(a: LatLon, b: LatLon) -> f64 {
 }
 
 /// Initial bearing from `from` to `to`, normalized to [0, 360).
+///
+/// # Examples
+/// ```
+/// use bleradar_core::{LatLon, bearing_deg};
+/// let here = LatLon::new(0.0, 0.0).unwrap();
+/// let north = LatLon::new(1.0, 0.0).unwrap();
+/// assert!(bearing_deg(here, north) < 1.0);
+/// ```
 #[must_use]
 pub fn bearing_deg(from: LatLon, to: LatLon) -> f64 {
     let phi1 = from.lat.to_radians();

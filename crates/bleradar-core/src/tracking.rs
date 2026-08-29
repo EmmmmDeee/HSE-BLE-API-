@@ -87,6 +87,18 @@ pub enum TrackError {
     NonMonotonicTime,
 }
 
+impl std::fmt::Display for TrackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NonFiniteRssi => "RSSI sample was NaN or infinite",
+            Self::InvalidGpsAccuracy => "GPS accuracy must be finite and positive",
+            Self::NonMonotonicTime => "observation timestamps must not move backwards",
+        })
+    }
+}
+
+impl std::error::Error for TrackError {}
+
 /// Persistent track state for one selected device.
 #[derive(Debug, Clone)]
 pub struct DeviceTrack {
@@ -98,6 +110,25 @@ pub struct DeviceTrack {
 
 impl DeviceTrack {
     /// Creates an empty track using the supplied EMA alpha.
+    ///
+    /// # Errors
+    /// Returns [`FilterError`](crate::FilterError) if `rssi_alpha` is not within `(0, 1]`.
+    ///
+    /// # Examples
+    /// ```
+    /// use bleradar_core::{DeviceObservation, DeviceTrack, LatLon, ProximityBand};
+    /// let mut track = DeviceTrack::new(0.5).unwrap();
+    /// track
+    ///     .push(DeviceObservation {
+    ///         timestamp_ms: 0,
+    ///         observer_position: Some(LatLon::new(0.0, 0.0).unwrap()),
+    ///         gps_accuracy_m: Some(5.0),
+    ///         rssi_dbm: -45.0,
+    ///         tx_power_dbm: None,
+    ///     })
+    ///     .unwrap();
+    /// assert_eq!(track.proximity(), Some(ProximityBand::Immediate));
+    /// ```
     pub fn new(rssi_alpha: f64) -> Result<Self, crate::FilterError> {
         Ok(Self {
             observations: Vec::new(),
@@ -108,6 +139,11 @@ impl DeviceTrack {
     }
 
     /// Adds one observation and updates deterministic signal state.
+    ///
+    /// # Errors
+    /// Returns [`TrackError`] if the RSSI is non-finite, the GPS accuracy is
+    /// present but not finite and positive, or the timestamp precedes the
+    /// previous observation.
     pub fn push(&mut self, observation: DeviceObservation) -> Result<(), TrackError> {
         if !observation.rssi_dbm.is_finite() {
             return Err(TrackError::NonFiniteRssi);

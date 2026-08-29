@@ -1,6 +1,16 @@
 //! Device-address normalization and conservative identity evidence.
 
 /// Canonicalizes a MAC address to lower-case colon-separated form.
+///
+/// Returns `None` if the input is not 12 hexadecimal digits, optionally
+/// separated by `:` or `-`.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::canonical_mac;
+/// assert_eq!(canonical_mac("AA-BB-CC-DD-EE-FF").as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+/// assert_eq!(canonical_mac("not-a-mac"), None);
+/// ```
 pub fn canonical_mac(input: &str) -> Option<String> {
     let compact: String = input.chars().filter(|c| *c != ':' && *c != '-').collect();
     if compact.len() != 12 || !compact.chars().all(|c| c.is_ascii_hexdigit()) {

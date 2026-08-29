@@ -1,9 +1,11 @@
 [package]
 name = "bleradar-compat"
-version = "0.4.1"
+version = "0.4.2"
+description = "Semantic parity-status registry for the BLE Radar native ABI surface."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 bleradar-core = { path = "../bleradar-core" }

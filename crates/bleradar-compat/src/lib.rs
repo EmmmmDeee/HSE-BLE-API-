@@ -123,6 +123,13 @@ pub const CONTRACTS: &[ContractStatus] = &[
 ];
 
 /// Returns whether a contract name is in the semantic registry.
+///
+/// # Examples
+/// ```
+/// use bleradar_compat::is_observed_contract;
+/// assert!(is_observed_contract("haversine_m"));
+/// assert!(!is_observed_contract("nonexistent"));
+/// ```
 #[must_use]
 pub fn is_observed_contract(name: &str) -> bool {
     CONTRACTS.iter().any(|contract| contract.name == name)
@@ -138,6 +145,13 @@ pub fn parity_status(name: &str) -> Option<ParityStatus> {
 }
 
 /// Counts contracts by migration state as `(reconstructed, oracle_only, blocked)`.
+///
+/// # Examples
+/// ```
+/// use bleradar_compat::{CONTRACTS, coverage_counts};
+/// let (reconstructed, oracle_only, blocked) = coverage_counts();
+/// assert_eq!(reconstructed + oracle_only + blocked, CONTRACTS.len());
+/// ```
 #[must_use]
 pub fn coverage_counts() -> (usize, usize, usize) {
     CONTRACTS.iter().fold((0, 0, 0), |mut acc, contract| {
