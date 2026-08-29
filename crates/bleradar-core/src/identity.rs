@@ -26,10 +26,15 @@ pub fn canonical_mac(input: &str) -> Option<String> {
     )
 }
 
-/// Returns true when a canonical MAC address has the locally administered bit set.
+/// Returns true when a MAC address has the locally administered bit set.
 #[must_use]
 pub fn is_locally_administered(mac: &str) -> Option<bool> {
-    let canonical = canonical_mac(mac)?;
+    locally_administered_bit(&canonical_mac(mac)?)
+}
+
+/// Tests the U/L bit on an already-canonical MAC, so callers holding a
+/// canonical address avoid re-canonicalizing it.
+fn locally_administered_bit(canonical: &str) -> Option<bool> {
     let first = canonical.get(0..2)?;
     u8::from_str_radix(first, 16)
         .ok()
@@ -73,7 +78,7 @@ impl DeviceIdentity {
     /// Builds an identity from an observed MAC and evidence.
     pub fn new(address: &str, evidence: IdentityEvidence) -> Option<Self> {
         let address = canonical_mac(address)?;
-        let address_kind = if is_locally_administered(&address)? {
+        let address_kind = if locally_administered_bit(&address)? {
             AddressKind::Randomized
         } else {
             AddressKind::Public

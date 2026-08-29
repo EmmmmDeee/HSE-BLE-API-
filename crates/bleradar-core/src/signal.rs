@@ -109,6 +109,11 @@ pub enum ProximityBand {
     Far,
 }
 
+// Minimum filtered RSSI (dBm) admitted to each coarse proximity band.
+const IMMEDIATE_MIN_DBM: f64 = -50.0;
+const NEAR_MIN_DBM: f64 = -65.0;
+const MID_MIN_DBM: f64 = -80.0;
+
 /// Maps RSSI to a coarse proximity label without pretending to know exact distance.
 ///
 /// # Examples
@@ -119,11 +124,11 @@ pub enum ProximityBand {
 /// ```
 #[must_use]
 pub fn proximity_label(rssi_dbm: f64) -> ProximityBand {
-    if rssi_dbm >= -50.0 {
+    if rssi_dbm >= IMMEDIATE_MIN_DBM {
         ProximityBand::Immediate
-    } else if rssi_dbm >= -65.0 {
+    } else if rssi_dbm >= NEAR_MIN_DBM {
         ProximityBand::Near
-    } else if rssi_dbm >= -80.0 {
+    } else if rssi_dbm >= MID_MIN_DBM {
         ProximityBand::Mid
     } else {
         ProximityBand::Far
