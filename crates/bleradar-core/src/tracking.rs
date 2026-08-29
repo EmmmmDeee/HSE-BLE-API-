@@ -4,6 +4,12 @@ use crate::{
     LatLon, ProximityBand, RssiEma, SignalTrend, haversine_m, proximity_label, signal_trend,
 };
 
+/// Assumed horizontal accuracy, in metres, for an observation carrying no GPS fix.
+const DEFAULT_GPS_ACCURACY_M: f64 = 50.0;
+
+/// Deadband, in dB, below which a filtered-RSSI change is treated as stable.
+const TREND_DEADBAND_DB: f64 = 2.0;
+
 /// Normalized confidence score in the inclusive range 0..=100.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Confidence(u8);
@@ -87,6 +93,18 @@ pub enum TrackError {
     NonMonotonicTime,
 }
 
+impl std::fmt::Display for TrackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NonFiniteRssi => "RSSI sample was NaN or infinite",
+            Self::InvalidGpsAccuracy => "GPS accuracy must be finite and positive",
+            Self::NonMonotonicTime => "observation timestamps must not move backwards",
+        })
+    }
+}
+
+impl std::error::Error for TrackError {}
+
 /// Persistent track state for one selected device.
 #[derive(Debug, Clone)]
 pub struct DeviceTrack {
@@ -98,6 +116,25 @@ pub struct DeviceTrack {
 
 impl DeviceTrack {
     /// Creates an empty track using the supplied EMA alpha.
+    ///
+    /// # Errors
+    /// Returns [`FilterError`](crate::FilterError) if `rssi_alpha` is not within `(0, 1]`.
+    ///
+    /// # Examples
+    /// ```
+    /// use bleradar_core::{DeviceObservation, DeviceTrack, LatLon, ProximityBand};
+    /// let mut track = DeviceTrack::new(0.5).unwrap();
+    /// track
+    ///     .push(DeviceObservation {
+    ///         timestamp_ms: 0,
+    ///         observer_position: Some(LatLon::new(0.0, 0.0).unwrap()),
+    ///         gps_accuracy_m: Some(5.0),
+    ///         rssi_dbm: -45.0,
+    ///         tx_power_dbm: None,
+    ///     })
+    ///     .unwrap();
+    /// assert_eq!(track.proximity(), Some(ProximityBand::Immediate));
+    /// ```
     pub fn new(rssi_alpha: f64) -> Result<Self, crate::FilterError> {
         Ok(Self {
             observations: Vec::new(),
@@ -108,6 +145,11 @@ impl DeviceTrack {
     }
 
     /// Adds one observation and updates deterministic signal state.
+    ///
+    /// # Errors
+    /// Returns [`TrackError`] if the RSSI is non-finite, the GPS accuracy is
+    /// present but not finite and positive, or the timestamp precedes the
+    /// previous observation.
     pub fn push(&mut self, observation: DeviceObservation) -> Result<(), TrackError> {
         if !observation.rssi_dbm.is_finite() {
             return Err(TrackError::NonFiniteRssi);
@@ -130,7 +172,7 @@ impl DeviceTrack {
             .push(observation.rssi_dbm)
             .map_err(|_| TrackError::NonFiniteRssi)?;
         if let Some(previous) = self.filtered_rssi {
-            self.trend = signal_trend(previous, next, 2.0);
+            self.trend = signal_trend(previous, next, TREND_DEADBAND_DB);
         }
         self.filtered_rssi = Some(next);
         self.observations.push(observation);
@@ -168,7 +210,7 @@ impl DeviceTrack {
             .iter()
             .filter_map(|obs| {
                 let position = obs.observer_position?;
-                let uncertainty = obs.gps_accuracy_m.unwrap_or(50.0);
+                let uncertainty = obs.gps_accuracy_m.unwrap_or(DEFAULT_GPS_ACCURACY_M);
                 let confidence = confidence_from_accuracy(uncertainty);
                 Some(MapPoint {
                     position,
@@ -192,7 +234,7 @@ impl DeviceTrack {
             .filter_map(|obs| {
                 Some((
                     obs.observer_position?,
-                    obs.gps_accuracy_m.unwrap_or(50.0),
+                    obs.gps_accuracy_m.unwrap_or(DEFAULT_GPS_ACCURACY_M),
                     obs.rssi_dbm,
                 ))
             })
@@ -205,21 +247,36 @@ impl DeviceTrack {
             .iter()
             .map(|(_, _, rssi)| *rssi)
             .fold(f64::NEG_INFINITY, f64::max);
+        // Longitude wraps at ±180°, so positions are averaged as weighted 3-D
+        // unit vectors on the sphere; a linear mean of straddling longitudes
+        // would place the center on the far side of the planet.
         let mut weight_sum = 0.0;
-        let mut lat_sum = 0.0;
-        let mut lon_sum = 0.0;
+        let mut x_sum = 0.0;
+        let mut y_sum = 0.0;
+        let mut z_sum = 0.0;
         for (pos, accuracy, rssi) in &positioned {
-            let accuracy_weight = 1.0 / accuracy.max(1.0).powi(2);
-            let signal_weight = 10_f64.powf((rssi - max_rssi) / 20.0).clamp(0.05, 1.0);
-            let weight = accuracy_weight * signal_weight;
+            let weight = observation_weight(*accuracy, *rssi, max_rssi);
+            let lat_rad = pos.lat().to_radians();
+            let lon_rad = pos.lon().to_radians();
             weight_sum += weight;
-            lat_sum += pos.lat * weight;
-            lon_sum += pos.lon * weight;
+            x_sum += weight * lat_rad.cos() * lon_rad.cos();
+            y_sum += weight * lat_rad.cos() * lon_rad.sin();
+            z_sum += weight * lat_rad.sin();
         }
         if weight_sum <= 0.0 || !weight_sum.is_finite() {
             return None;
         }
-        let center = LatLon::new(lat_sum / weight_sum, lon_sum / weight_sum).ok()?;
+        let norm = (x_sum * x_sum + y_sum * y_sum + z_sum * z_sum).sqrt();
+        // A vanishing mean vector means the observations surround the sphere
+        // with no meaningful center; local BLE clusters never trigger this.
+        if norm < weight_sum * 1e-9 {
+            return None;
+        }
+        // Clamp for the same reason as haversine_m: float error must not push
+        // the asin argument outside its domain.
+        let center_lat = (z_sum / norm).clamp(-1.0, 1.0).asin().to_degrees();
+        let center_lon = y_sum.atan2(x_sum).to_degrees();
+        let center = LatLon::new(center_lat, center_lon).ok()?;
         let weighted_radius = positioned
             .iter()
             .map(|(pos, accuracy, _)| haversine_m(center, *pos) + *accuracy)
@@ -236,6 +293,16 @@ impl DeviceTrack {
             confidence,
         })
     }
+}
+
+/// Weight for one positioned observation: nearer-fix (smaller accuracy) and
+/// stronger-relative-signal observations contribute more to the centroid.
+fn observation_weight(accuracy_m: f64, rssi_dbm: f64, max_rssi_dbm: f64) -> f64 {
+    let accuracy_weight = 1.0 / accuracy_m.max(1.0).powi(2);
+    let signal_weight = 10_f64
+        .powf((rssi_dbm - max_rssi_dbm) / 20.0)
+        .clamp(0.05, 1.0);
+    accuracy_weight * signal_weight
 }
 
 fn confidence_from_accuracy(accuracy_m: f64) -> Confidence {

@@ -22,6 +22,14 @@ pub use tracking::{
 };
 
 /// 2.4/5 GHz Wi-Fi channel to center frequency in MHz where defined.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::wifi_channel_to_frequency;
+/// assert_eq!(wifi_channel_to_frequency(1), Some(2412));
+/// assert_eq!(wifi_channel_to_frequency(14), Some(2484));
+/// assert_eq!(wifi_channel_to_frequency(15), None);
+/// ```
 #[must_use]
 pub fn wifi_channel_to_frequency(channel: u16) -> Option<u16> {
     match channel {
@@ -33,6 +41,13 @@ pub fn wifi_channel_to_frequency(channel: u16) -> Option<u16> {
 }
 
 /// Wi-Fi center frequency in MHz to channel where unambiguous for 2.4/5 GHz.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::wifi_frequency_to_channel;
+/// assert_eq!(wifi_frequency_to_channel(2412), Some(1));
+/// assert_eq!(wifi_frequency_to_channel(2484), Some(14));
+/// ```
 #[must_use]
 pub fn wifi_frequency_to_channel(mhz: u16) -> Option<u16> {
     match mhz {
@@ -51,3 +66,15 @@ pub struct CompatibilityGap {
     /// Why reconstruction would require guessing.
     pub reason: &'static str,
 }
+
+impl std::fmt::Display for CompatibilityGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unsupported contract `{}`: {}",
+            self.contract, self.reason
+        )
+    }
+}
+
+impl std::error::Error for CompatibilityGap {}

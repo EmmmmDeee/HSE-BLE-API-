@@ -9,6 +9,17 @@ pub enum FilterError {
     NonFiniteSample,
 }
 
+impl std::fmt::Display for FilterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidAlpha => "EMA alpha must be within (0, 1]",
+            Self::NonFiniteSample => "RSSI sample was NaN or infinite",
+        })
+    }
+}
+
+impl std::error::Error for FilterError {}
+
 /// Simple exponential moving average used as a stable, deterministic RSSI filter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RssiEma {
@@ -18,6 +29,18 @@ pub struct RssiEma {
 
 impl RssiEma {
     /// Creates a filter. Alpha must be in (0, 1].
+    ///
+    /// # Errors
+    /// Returns [`FilterError::InvalidAlpha`] if `alpha` is not within `(0, 1]`.
+    ///
+    /// # Examples
+    /// ```
+    /// use bleradar_core::RssiEma;
+    /// let mut ema = RssiEma::new(0.5).unwrap();
+    /// assert_eq!(ema.push(-80.0).unwrap(), -80.0);
+    /// assert_eq!(ema.push(-60.0).unwrap(), -70.0);
+    /// assert!(RssiEma::new(0.0).is_err());
+    /// ```
     pub fn new(alpha: f64) -> Result<Self, FilterError> {
         if !alpha.is_finite() || !(0.0 < alpha && alpha <= 1.0) {
             return Err(FilterError::InvalidAlpha);
@@ -26,6 +49,9 @@ impl RssiEma {
     }
 
     /// Adds a sample and returns the filtered value.
+    ///
+    /// # Errors
+    /// Returns [`FilterError::NonFiniteSample`] if `rssi_dbm` is NaN or infinite.
     pub fn push(&mut self, rssi_dbm: f64) -> Result<f64, FilterError> {
         if !rssi_dbm.is_finite() {
             return Err(FilterError::NonFiniteSample);
@@ -83,14 +109,26 @@ pub enum ProximityBand {
     Far,
 }
 
+// Minimum filtered RSSI (dBm) admitted to each coarse proximity band.
+const IMMEDIATE_MIN_DBM: f64 = -50.0;
+const NEAR_MIN_DBM: f64 = -65.0;
+const MID_MIN_DBM: f64 = -80.0;
+
 /// Maps RSSI to a coarse proximity label without pretending to know exact distance.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::{proximity_label, ProximityBand};
+/// assert_eq!(proximity_label(-40.0), ProximityBand::Immediate);
+/// assert_eq!(proximity_label(-95.0), ProximityBand::Far);
+/// ```
 #[must_use]
 pub fn proximity_label(rssi_dbm: f64) -> ProximityBand {
-    if rssi_dbm >= -50.0 {
+    if rssi_dbm >= IMMEDIATE_MIN_DBM {
         ProximityBand::Immediate
-    } else if rssi_dbm >= -65.0 {
+    } else if rssi_dbm >= NEAR_MIN_DBM {
         ProximityBand::Near
-    } else if rssi_dbm >= -80.0 {
+    } else if rssi_dbm >= MID_MIN_DBM {
         ProximityBand::Mid
     } else {
         ProximityBand::Far
@@ -101,6 +139,14 @@ pub fn proximity_label(rssi_dbm: f64) -> ProximityBand {
 ///
 /// Returns `None` for non-finite input or a non-positive path-loss exponent. The result is an
 /// estimate only and should be displayed with an uncertainty band rather than as exact range.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::ble_distance_m;
+/// // At the reference RSSI the estimate is 1 metre.
+/// assert!((ble_distance_m(-59.0, -59.0, 2.0).unwrap() - 1.0).abs() < 1e-9);
+/// assert!(ble_distance_m(-70.0, -59.0, 0.0).is_none());
+/// ```
 #[must_use]
 pub fn ble_distance_m(rssi_dbm: f64, rssi_at_1m_dbm: f64, path_loss_exponent: f64) -> Option<f64> {
     if !rssi_dbm.is_finite()

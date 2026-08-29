@@ -1,9 +1,11 @@
 [package]
 name = "bleradar-core"
-version = "0.3.0"
+version = "0.4.2"
+description = "Safe-Rust geometry, identity, RSSI, proximity and device-tracking domain reconstructed from the BLE Radar APK."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [lib]
 crate-type = ["rlib", "cdylib"]
