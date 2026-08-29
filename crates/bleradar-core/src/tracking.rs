@@ -4,6 +4,12 @@ use crate::{
     LatLon, ProximityBand, RssiEma, SignalTrend, haversine_m, proximity_label, signal_trend,
 };
 
+/// Assumed horizontal accuracy, in metres, for an observation carrying no GPS fix.
+const DEFAULT_GPS_ACCURACY_M: f64 = 50.0;
+
+/// Deadband, in dB, below which a filtered-RSSI change is treated as stable.
+const TREND_DEADBAND_DB: f64 = 2.0;
+
 /// Normalized confidence score in the inclusive range 0..=100.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Confidence(u8);
@@ -166,7 +172,7 @@ impl DeviceTrack {
             .push(observation.rssi_dbm)
             .map_err(|_| TrackError::NonFiniteRssi)?;
         if let Some(previous) = self.filtered_rssi {
-            self.trend = signal_trend(previous, next, 2.0);
+            self.trend = signal_trend(previous, next, TREND_DEADBAND_DB);
         }
         self.filtered_rssi = Some(next);
         self.observations.push(observation);
@@ -204,7 +210,7 @@ impl DeviceTrack {
             .iter()
             .filter_map(|obs| {
                 let position = obs.observer_position?;
-                let uncertainty = obs.gps_accuracy_m.unwrap_or(50.0);
+                let uncertainty = obs.gps_accuracy_m.unwrap_or(DEFAULT_GPS_ACCURACY_M);
                 let confidence = confidence_from_accuracy(uncertainty);
                 Some(MapPoint {
                     position,
@@ -228,7 +234,7 @@ impl DeviceTrack {
             .filter_map(|obs| {
                 Some((
                     obs.observer_position?,
-                    obs.gps_accuracy_m.unwrap_or(50.0),
+                    obs.gps_accuracy_m.unwrap_or(DEFAULT_GPS_ACCURACY_M),
                     obs.rssi_dbm,
                 ))
             })
@@ -249,9 +255,7 @@ impl DeviceTrack {
         let mut y_sum = 0.0;
         let mut z_sum = 0.0;
         for (pos, accuracy, rssi) in &positioned {
-            let accuracy_weight = 1.0 / accuracy.max(1.0).powi(2);
-            let signal_weight = 10_f64.powf((rssi - max_rssi) / 20.0).clamp(0.05, 1.0);
-            let weight = accuracy_weight * signal_weight;
+            let weight = observation_weight(*accuracy, *rssi, max_rssi);
             let lat_rad = pos.lat().to_radians();
             let lon_rad = pos.lon().to_radians();
             weight_sum += weight;
@@ -289,6 +293,16 @@ impl DeviceTrack {
             confidence,
         })
     }
+}
+
+/// Weight for one positioned observation: nearer-fix (smaller accuracy) and
+/// stronger-relative-signal observations contribute more to the centroid.
+fn observation_weight(accuracy_m: f64, rssi_dbm: f64, max_rssi_dbm: f64) -> f64 {
+    let accuracy_weight = 1.0 / accuracy_m.max(1.0).powi(2);
+    let signal_weight = 10_f64
+        .powf((rssi_dbm - max_rssi_dbm) / 20.0)
+        .clamp(0.05, 1.0);
+    accuracy_weight * signal_weight
 }
 
 fn confidence_from_accuracy(accuracy_m: f64) -> Confidence {
