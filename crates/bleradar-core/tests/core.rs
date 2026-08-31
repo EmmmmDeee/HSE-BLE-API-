@@ -184,6 +184,20 @@ fn selection_lock_retains_history() {
     let mut selected = SelectedDevice::new("device-1", 0.5).unwrap();
     selected.start_tracking();
     assert!(selected.tracking);
+    selected
+        .track
+        .push(observation(1, None, None, -70.0))
+        .unwrap();
     selected.stop_tracking();
     assert!(!selected.tracking);
+    // "Releases active tracking while retaining history" (tracking.rs docs)
+    // is a claim about `track`, not just the `tracking` flag: unlocking must
+    // not discard previously observed samples.
+    assert_eq!(selected.track.observations().len(), 1);
+    // History must keep accumulating even while unlocked.
+    selected
+        .track
+        .push(observation(2, None, None, -65.0))
+        .unwrap();
+    assert_eq!(selected.track.observations().len(), 2);
 }

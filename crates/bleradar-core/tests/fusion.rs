@@ -262,6 +262,112 @@ fn falsification_removes_base_rate_support_and_reports_gaps() {
 }
 
 #[test]
+fn leading_hypothesis_survives_falsification_when_support_is_robust() {
+    // The prior falsification test only ever demonstrates rejection
+    // (`!report.survives()`). Falsification resistance is a two-sided
+    // claim: a well-supported hypothesis must also be able to withstand
+    // every adversarial scenario and still report `survives() == true`.
+    // This is that positive case: three independent, non-high-base-rate
+    // supporting groups for the leading hypothesis, none of which alone
+    // (nor high-base-rate removal, nor uncertainty perturbation) can drop
+    // it below a weakly supported alternative.
+    let leading = Hypothesis::new(
+        "hypothesis-robust",
+        "well-supported explanation",
+        HypothesisKind::Leading,
+    )
+    .unwrap();
+    let alternative = Hypothesis::new(
+        "hypothesis-weak",
+        "ordinary explanation",
+        HypothesisKind::Null,
+    )
+    .unwrap();
+    let source_a = source("source-robust-a");
+    let source_b = source("source-robust-b");
+    let source_c = source("source-robust-c");
+    let source_alt = source("source-weak");
+    let observation_a = observation("observation-robust-a", &source_a, 10);
+    let observation_b = observation("observation-robust-b", &source_b, 20);
+    let observation_c = observation("observation-robust-c", &source_c, 30);
+    let observation_alt = observation("observation-weak", &source_alt, 40);
+    let evidence_a = Evidence::new(
+        "evidence-robust-a",
+        leading.id(),
+        observation_a.id(),
+        EvidenceRole::Supporting,
+    )
+    .unwrap();
+    let evidence_b = Evidence::new(
+        "evidence-robust-b",
+        leading.id(),
+        observation_b.id(),
+        EvidenceRole::Supporting,
+    )
+    .unwrap();
+    let evidence_c = Evidence::new(
+        "evidence-robust-c",
+        leading.id(),
+        observation_c.id(),
+        EvidenceRole::Supporting,
+    )
+    .unwrap();
+    let evidence_alt = Evidence::new(
+        "evidence-weak",
+        alternative.id(),
+        observation_alt.id(),
+        EvidenceRole::Supporting,
+    )
+    .unwrap();
+
+    let mut store = EvidenceStore::new();
+    for item in [source_a, source_b, source_c, source_alt] {
+        store.add_source(item).unwrap();
+    }
+    store.add_hypothesis(leading).unwrap();
+    store.add_hypothesis(alternative).unwrap();
+    for item in [observation_a, observation_b, observation_c, observation_alt] {
+        store.add_observation(item).unwrap();
+    }
+    for item in [evidence_a, evidence_b, evidence_c, evidence_alt] {
+        store.add_evidence(item).unwrap();
+    }
+
+    let mut fusion = CalibratedEvidenceFusion::new();
+    // None of these is high-base-rate and each comes from a distinct
+    // source, so every group survives high-base-rate removal, and losing
+    // any single one still leaves the other two ahead of the alternative.
+    fusion
+        .add_assessment(uniform_assessment("evidence-robust-a", 70))
+        .unwrap();
+    fusion
+        .add_assessment(uniform_assessment("evidence-robust-b", 65))
+        .unwrap();
+    fusion
+        .add_assessment(uniform_assessment("evidence-robust-c", 60))
+        .unwrap();
+    fusion
+        .add_assessment(uniform_assessment("evidence-weak", 50))
+        .unwrap();
+
+    let result = fusion.fuse(&store).unwrap();
+    assert_eq!(result.leading_hypothesis(), "hypothesis-robust");
+    assert_eq!(result.score("hypothesis-robust").unwrap().net_score(), 195);
+
+    let report = result.falsify(&fusion, &store).unwrap();
+    // Dropping the single strongest group (70) still leaves 125 > 50.
+    assert_eq!(report.without_strongest_support().net_score(), 125);
+    // No evidence is high-base-rate, so removing it changes nothing.
+    assert_eq!(report.without_high_base_rate().net_score(), 195);
+    assert!(report.missing_expected_evidence().is_empty());
+    assert!(report.contradictory_evidence().is_empty());
+    assert!(
+        report.survives(),
+        "robustly and independently supported hypothesis should survive falsification"
+    );
+}
+
+#[test]
 fn fusion_rejects_unregistered_evidence() {
     let mut fusion = CalibratedEvidenceFusion::new();
     fusion

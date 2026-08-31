@@ -581,3 +581,146 @@ fn cmd_gates() -> Result<(), String> {
     println!("== all gates green ==");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_prefixed_runs_captures_the_run_after_a_single_prefix() {
+        let out = find_prefixed_runs("UNIFFI_META_BLERADAR_CORE_FUNC_HAVERSINE_M", "FUNC_");
+        assert_eq!(out, vec!["HAVERSINE_M".to_string()]);
+    }
+
+    #[test]
+    fn find_prefixed_runs_finds_multiple_non_overlapping_matches_in_order() {
+        let out = find_prefixed_runs("PFX_ONE garbage PFX_TWO_3 more PFX_4", "PFX_");
+        assert_eq!(
+            out,
+            vec!["ONE".to_string(), "TWO_3".to_string(), "4".to_string()]
+        );
+    }
+
+    #[test]
+    fn find_prefixed_runs_returns_empty_when_prefix_never_occurs() {
+        assert!(find_prefixed_runs("no prefixes here", "FUNC_").is_empty());
+    }
+
+    #[test]
+    fn find_prefixed_runs_returns_empty_on_empty_haystack() {
+        assert!(find_prefixed_runs("", "FUNC_").is_empty());
+    }
+
+    #[test]
+    fn find_prefixed_runs_ignores_a_prefix_with_no_run_characters_after_it() {
+        // A trailing prefix with nothing (or only non-run characters) after
+        // it is not a match, mirroring `re.findall`'s `+` requiring at least
+        // one captured character.
+        assert!(find_prefixed_runs("FUNC_", "FUNC_").is_empty());
+        assert!(find_prefixed_runs("FUNC_!not_a_run", "FUNC_").is_empty());
+    }
+
+    #[test]
+    fn find_prefixed_runs_resumes_one_byte_later_after_a_zero_length_run() {
+        // The first "ABC_" is immediately followed by '!' (not a run
+        // character), so it is not a match; the search must resume one byte
+        // past the failed match — not past the whole prefix — and go on to
+        // find the second, real occurrence.
+        let out = find_prefixed_runs("ABC_!ABC_XYZ", "ABC_");
+        assert_eq!(out, vec!["XYZ".to_string()]);
+    }
+
+    #[test]
+    fn find_quoted_name_values_extracts_a_single_value() {
+        assert_eq!(
+            find_quoted_name_values(r#"name: "bearing_deg","#),
+            vec!["bearing_deg".to_string()]
+        );
+    }
+
+    #[test]
+    fn find_quoted_name_values_extracts_multiple_values_in_original_order() {
+        let haystack = r#"name: "haversine_m", other: 1, name: "bearing_deg","#;
+        assert_eq!(
+            find_quoted_name_values(haystack),
+            vec!["haversine_m".to_string(), "bearing_deg".to_string()]
+        );
+    }
+
+    #[test]
+    fn find_quoted_name_values_returns_empty_when_never_present() {
+        assert!(find_quoted_name_values("no matches in here").is_empty());
+    }
+
+    #[test]
+    fn find_quoted_name_values_skips_empty_quotes_and_keeps_scanning() {
+        // `name: ""` captures zero characters, which is not a match; the
+        // search must still find the later, non-empty occurrence.
+        let out = find_quoted_name_values(r#"name: "" name: "bar""#);
+        assert_eq!(out, vec!["bar".to_string()]);
+    }
+
+    #[test]
+    fn find_quoted_name_values_stops_at_an_unterminated_quote() {
+        // No closing quote after the second prefix: nothing further can be
+        // extracted, but the earlier, well-formed match is still returned.
+        let out = find_quoted_name_values(r#"name: "first", name: "unterminated"#);
+        assert_eq!(out, vec!["first".to_string()]);
+    }
+
+    #[test]
+    fn dedup_sorted_sorts_and_removes_duplicates() {
+        let out = dedup_sorted(vec!["b".to_string(), "a".to_string(), "b".to_string()]);
+        assert_eq!(out, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn dedup_sorted_handles_empty_input() {
+        assert!(dedup_sorted(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn find_sha256_after_label_extracts_a_valid_hash() {
+        let hash = "0123456789abcdef".repeat(4);
+        let text = format!("Original APK SHA-256: {hash}\n");
+        assert_eq!(
+            find_sha256_after_label(&text, "Original APK SHA-256:"),
+            Some(hash)
+        );
+    }
+
+    #[test]
+    fn find_sha256_after_label_tolerates_varying_whitespace() {
+        let hash = "0123456789abcdef".repeat(4);
+        let text = format!("Label:\n   {hash}");
+        assert_eq!(find_sha256_after_label(&text, "Label:"), Some(hash));
+    }
+
+    #[test]
+    fn find_sha256_after_label_takes_only_the_first_64_hex_characters() {
+        let hash = "0123456789abcdef".repeat(4);
+        let text = format!("Label: {hash}ff extra");
+        assert_eq!(find_sha256_after_label(&text, "Label:"), Some(hash));
+    }
+
+    #[test]
+    fn find_sha256_after_label_rejects_a_short_hex_run() {
+        let short = "0123456789abcdef".repeat(3); // 48 hex chars, not 64
+        let text = format!("Label: {short}");
+        assert_eq!(find_sha256_after_label(&text, "Label:"), None);
+    }
+
+    #[test]
+    fn find_sha256_after_label_rejects_uppercase_hex() {
+        let hash = "0123456789ABCDEF".repeat(4);
+        let text = format!("Label: {hash}");
+        assert_eq!(find_sha256_after_label(&text, "Label:"), None);
+    }
+
+    #[test]
+    fn find_sha256_after_label_returns_none_when_label_is_absent() {
+        let hash = "0123456789abcdef".repeat(4);
+        let text = format!("Different label: {hash}");
+        assert_eq!(find_sha256_after_label(&text, "Label:"), None);
+    }
+}
