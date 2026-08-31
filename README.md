@@ -11,6 +11,9 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
   transformations, claims, and an authoritative evidence store.
 - `crates/bleradar-core::advancement` — evaluation-gated metamorphic software
   advancement with formula-based ranking and explicit integration state.
+- `crates/bleradar-core::osint` — execution-feedback adaptive OSINT search with
+  representation-aware pivots, provenance-preserving findings, and canonical
+  retrieval actions.
 - `crates/bleradar-compat` — semantic parity registry for high-value observed native contracts.
 - `tools/` — binary inventory, parity-report generation, and the dependency-policy and oracle-integrity gates.
 - `docs/` — audit, issue/exception ledgers, parity frontier, verification record, and the autonomous-session operating documents.
@@ -66,6 +69,17 @@ can falsify a leading hypothesis by removing high-base-rate or strongest
 support, checking contradictions, missing expected evidence, and uncertain
 assumptions; it does not claim Bayesian precision without defensible
 probabilities.
+
+`ExecutionFeedbackAdaptiveOsintSearchEngine` treats search as an executable
+frontier rather than a fixed list of expansions. It supports exact, normalized,
+alias, historical, semantic, structural, temporal, relational, technical,
+provenance, and graph-neighbor representations. Each execution records its
+query, observed feedback, classification, adaptive family statistics, generated
+or suppressed pivots, and complete control-loop phases; useful families receive
+more ranking pressure while repeated or unproductive families are penalized.
+Raw queries and source values remain separate from normalized forms, and
+source-backed findings plus retrieval actions are persisted transactionally in
+`EvidenceStore`.
 
 ## Requirements
 

@@ -18,6 +18,9 @@ Rust workspace:
 - `bleradar-core::advancement` — evaluation-gated metamorphic software
   advancement with explicit ranking factors, benchmark gates, and integration
   state.
+- `bleradar-core::osint` — execution-feedback adaptive OSINT search with
+  representation-aware pivots, adaptive ranking, and canonical provenance
+  persistence.
 - `bleradar-core::fusion` — bounded calibrated evidence scoring, dependency
   collapse, competing-hypothesis fusion, and adversarial falsification.
 - `bleradar-core::verification` — required-semantics contracts, metamorphic
@@ -54,6 +57,10 @@ Rust workspace:
     benefit/confidence/reachability/reversibility factors and rejects candidates
     without verified semantics, measurable improvement, falsification resistance,
     reproducibility, or explained regression behavior.
+16. Added execution-feedback adaptive OSINT search with eleven query
+    representations, explicit outcome classification, feedback-driven frontier
+    ranking, duplicate-pivot suppression, and transactional evidence/action
+    persistence.
 
 ## Functional parity status
 
