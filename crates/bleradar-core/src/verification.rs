@@ -132,6 +132,7 @@ impl RequiredSemantics {
 /// An execution outcome normalized for comparison across implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOutcome {
+    input_representation: Option<Vec<u8>>,
     output: Vec<u8>,
     state: Vec<u8>,
     side_effects: Vec<String>,
@@ -149,6 +150,7 @@ impl ExecutionOutcome {
     /// Creates a successful outcome with the supplied output.
     pub fn success(output: impl Into<Vec<u8>>) -> Self {
         Self {
+            input_representation: None,
             output: output.into(),
             state: Vec::new(),
             side_effects: Vec::new(),
@@ -176,6 +178,13 @@ impl ExecutionOutcome {
     #[must_use]
     pub fn with_output(mut self, output: impl Into<Vec<u8>>) -> Self {
         self.output = output.into();
+        self
+    }
+
+    /// Records the input representation accepted by the implementation.
+    #[must_use]
+    pub fn with_input_representation(mut self, input: impl Into<Vec<u8>>) -> Self {
+        self.input_representation = Some(input.into());
         self
     }
 
@@ -275,6 +284,12 @@ impl ExecutionOutcome {
         &self.output
     }
 
+    /// Input representation observed by the implementation, if captured.
+    #[must_use]
+    pub fn input_representation(&self) -> Option<&[u8]> {
+        self.input_representation.as_deref()
+    }
+
     /// Externally visible state.
     #[must_use]
     pub fn state(&self) -> &[u8] {
@@ -343,22 +358,14 @@ impl ExecutionOutcome {
         let surfaces: Vec<VerificationSurface> = if semantics.surfaces.is_empty() {
             observable_surfaces().to_vec()
         } else {
-            semantics
-                .surfaces
-                .iter()
-                .copied()
-                .filter(|surface| *surface != VerificationSurface::Inputs)
-                .collect()
-        };
-        let surfaces = if surfaces.is_empty() {
-            observable_surfaces().to_vec()
-        } else {
-            surfaces
+            semantics.surfaces.iter().copied().collect()
         };
         surfaces
             .into_iter()
             .filter(|surface| match surface {
-                VerificationSurface::Inputs => false,
+                VerificationSurface::Inputs => {
+                    self.input_representation != other.input_representation
+                }
                 VerificationSurface::Outputs => self.output != other.output,
                 VerificationSurface::State => self.state != other.state,
                 VerificationSurface::SideEffects => self.side_effects != other.side_effects,
@@ -371,6 +378,38 @@ impl ExecutionOutcome {
                 VerificationSurface::PerformanceWhenContractual => {
                     self.performance_ns != other.performance_ns
                 }
+            })
+            .collect()
+    }
+
+    fn missing_surfaces(
+        &self,
+        other: &Self,
+        semantics: &RequiredSemantics,
+    ) -> Vec<VerificationSurface> {
+        if semantics.surfaces.is_empty() {
+            return Vec::new();
+        }
+        semantics
+            .surfaces
+            .iter()
+            .copied()
+            .filter(|surface| match surface {
+                VerificationSurface::Inputs => {
+                    self.input_representation.is_none() || other.input_representation.is_none()
+                }
+                VerificationSurface::PerformanceWhenContractual => {
+                    self.performance_ns.is_none() || other.performance_ns.is_none()
+                }
+                VerificationSurface::Outputs
+                | VerificationSurface::State
+                | VerificationSurface::SideEffects
+                | VerificationSurface::Errors
+                | VerificationSurface::ExitCodes
+                | VerificationSurface::Ordering
+                | VerificationSurface::Concurrency
+                | VerificationSurface::Restart
+                | VerificationSurface::Recovery => false,
             })
             .collect()
     }
@@ -400,7 +439,9 @@ impl MetamorphicTest {
         let id = require_text(id.into(), "test id")?;
         let inputs: Vec<Vec<u8>> = inputs.into_iter().collect();
         let minimum = relation.minimum_inputs();
-        if inputs.len() < minimum {
+        let valid_count = (relation == MetamorphicRelation::Invariance && inputs.len() >= minimum)
+            || (relation != MetamorphicRelation::Invariance && inputs.len() == minimum);
+        if !valid_count {
             return Err(VerificationError::InvalidInputCount {
                 test_id: id,
                 relation,
@@ -478,12 +519,6 @@ impl MetamorphicTest {
     #[must_use]
     pub fn description(&self) -> Option<&str> {
         self.description.as_deref()
-    }
-
-    fn with_input(&self, index: usize, input: Vec<u8>) -> Self {
-        let mut test = self.clone();
-        test.inputs[index] = input;
-        test
     }
 }
 
@@ -588,7 +623,9 @@ impl RegressionLock {
         let reason = require_text(reason.into(), "regression lock reason")?;
         let inputs: Vec<Vec<u8>> = inputs.into_iter().collect();
         let minimum = relation.minimum_inputs();
-        if inputs.len() < minimum {
+        let valid_count = (relation == MetamorphicRelation::Invariance && inputs.len() >= minimum)
+            || (relation != MetamorphicRelation::Invariance && inputs.len() == minimum);
+        if !valid_count {
             return Err(VerificationError::InvalidInputCount {
                 test_id,
                 relation,
@@ -643,6 +680,8 @@ pub enum FailureCause {
     ObservableDivergence(VerificationSurface),
     /// The ordered monotonicity metric decreased.
     MonotonicityViolation,
+    /// A surface required by the contract was not captured.
+    MissingContractualMeasurement(VerificationSurface),
 }
 
 /// One failed relation comparison.
@@ -656,6 +695,7 @@ pub struct VerificationViolation {
     baseline: ExecutionOutcome,
     variant: ExecutionOutcome,
     minimized_input: Option<Vec<u8>>,
+    minimized_inputs: Option<Vec<Vec<u8>>>,
     cause: FailureCause,
 }
 
@@ -706,6 +746,12 @@ impl VerificationViolation {
     #[must_use]
     pub fn minimized_input(&self) -> Option<&[u8]> {
         self.minimized_input.as_deref()
+    }
+
+    /// Complete minimized input vector that still reproduces the violation.
+    #[must_use]
+    pub fn minimized_inputs(&self) -> Option<&[Vec<u8>]> {
+        self.minimized_inputs.as_deref()
     }
 
     /// Classified root cause.
@@ -761,9 +807,11 @@ impl FamilyStatistics {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DifferentialViolation {
     case_id: String,
+    input: Vec<u8>,
     differing_surfaces: Vec<VerificationSurface>,
     baseline: ExecutionOutcome,
     candidate: ExecutionOutcome,
+    minimized_input: Option<Vec<u8>>,
     cause: FailureCause,
 }
 
@@ -772,6 +820,12 @@ impl DifferentialViolation {
     #[must_use]
     pub fn case_id(&self) -> &str {
         &self.case_id
+    }
+
+    /// Input that produced the differential mismatch.
+    #[must_use]
+    pub fn input(&self) -> &[u8] {
+        &self.input
     }
 
     /// Observable surfaces that differed.
@@ -792,6 +846,12 @@ impl DifferentialViolation {
         &self.candidate
     }
 
+    /// Minimized input that still reproduces the mismatch, if found.
+    #[must_use]
+    pub fn minimized_input(&self) -> Option<&[u8]> {
+        self.minimized_input.as_deref()
+    }
+
     /// Classified root cause.
     #[must_use]
     pub const fn root_cause(&self) -> FailureCause {
@@ -804,6 +864,7 @@ impl DifferentialViolation {
 pub struct DifferentialReport {
     executed_cases: usize,
     passed_cases: usize,
+    inconclusive_cases: usize,
     violations: Vec<DifferentialViolation>,
 }
 
@@ -820,6 +881,12 @@ impl DifferentialReport {
         self.passed_cases
     }
 
+    /// Number of cases missing a required measurement.
+    #[must_use]
+    pub const fn inconclusive_cases(&self) -> usize {
+        self.inconclusive_cases
+    }
+
     /// Differential violations.
     #[must_use]
     pub fn violations(&self) -> &[DifferentialViolation] {
@@ -829,7 +896,7 @@ impl DifferentialReport {
     /// Whether every case passed.
     #[must_use]
     pub const fn passed(&self) -> bool {
-        self.violations.is_empty()
+        self.violations.is_empty() && self.inconclusive_cases == 0
     }
 }
 
@@ -839,6 +906,8 @@ pub struct VerificationReport {
     executed_tests: usize,
     passed_tests: usize,
     inconclusive_tests: usize,
+    executed_test_ids: Vec<String>,
+    inconclusive_test_ids: Vec<String>,
     retired_tests: Vec<String>,
     violations: Vec<VerificationViolation>,
     family_statistics: Vec<FamilyStatistics>,
@@ -863,6 +932,18 @@ impl VerificationReport {
     #[must_use]
     pub const fn inconclusive_tests(&self) -> usize {
         self.inconclusive_tests
+    }
+
+    /// Test identifiers executed during this run.
+    #[must_use]
+    pub fn executed_test_ids(&self) -> &[String] {
+        &self.executed_test_ids
+    }
+
+    /// Test identifiers that lacked a required measurement.
+    #[must_use]
+    pub fn inconclusive_test_ids(&self) -> &[String] {
+        &self.inconclusive_test_ids
     }
 
     /// Explicitly retired tests skipped by this run.
@@ -893,6 +974,46 @@ impl VerificationReport {
     #[must_use]
     pub fn regression_locks(&self) -> &[String] {
         &self.regression_locks
+    }
+
+    /// Persists one executed result as a canonical metamorphic test record.
+    ///
+    /// The supplied observation identifiers are validated by
+    /// [`crate::EvidenceStore`], so a report cannot silently create an
+    /// untraceable verification record.
+    pub fn persist_test(
+        &self,
+        store: &mut crate::EvidenceStore,
+        test_id: &str,
+        name: impl Into<String>,
+        executed_at: crate::Timestamp,
+        input_observations: impl IntoIterator<Item = String>,
+        output_observations: impl IntoIterator<Item = String>,
+    ) -> Result<(), VerificationError> {
+        if !self.executed_test_ids.iter().any(|id| id == test_id) {
+            return Err(VerificationError::MissingTest {
+                test_id: test_id.to_owned(),
+            });
+        }
+        let status = if self
+            .violations
+            .iter()
+            .any(|violation| violation.test_id() == test_id)
+        {
+            crate::TestStatus::Failed
+        } else if self.inconclusive_test_ids.iter().any(|id| id == test_id) {
+            crate::TestStatus::Inconclusive
+        } else {
+            crate::TestStatus::Passed
+        };
+        let test = crate::Test::new(test_id, name, crate::TestType::Metamorphic)
+            .map_err(|error| VerificationError::CanonicalStore { error })?
+            .with_inputs(input_observations)
+            .with_outputs(output_observations)
+            .completed(status, executed_at);
+        store
+            .add_test(test)
+            .map_err(|error| VerificationError::CanonicalStore { error })
     }
 
     /// Whether every executed test passed without inconclusive results.
@@ -955,6 +1076,11 @@ pub enum VerificationError {
         /// Transformation-provided reason.
         reason: String,
     },
+    /// The verification result could not be recorded in the canonical store.
+    CanonicalStore {
+        /// Store validation failure.
+        error: crate::ProvenanceError,
+    },
 }
 
 impl fmt::Display for VerificationError {
@@ -968,7 +1094,7 @@ impl fmt::Display for VerificationError {
                 actual,
             } => write!(
                 formatter,
-                "test `{test_id}` for {relation:?} requires at least {minimum} inputs, got {actual}"
+                "test `{test_id}` for {relation:?} requires {minimum} inputs, got {actual}"
             ),
             Self::DuplicateTest { test_id } => {
                 write!(formatter, "test `{test_id}` was registered more than once")
@@ -996,6 +1122,12 @@ impl fmt::Display for VerificationError {
                 write!(
                     formatter,
                     "transformation for test `{test_id}` failed: {reason}"
+                )
+            }
+            Self::CanonicalStore { error } => {
+                write!(
+                    formatter,
+                    "canonical verification persistence failed: {error}"
                 )
             }
         }
@@ -1144,6 +1276,8 @@ impl VerificationEngine {
         let mut executed_tests = 0;
         let mut passed_tests = 0;
         let mut inconclusive_tests = 0;
+        let mut executed_test_ids = Vec::new();
+        let mut inconclusive_test_ids = Vec::new();
         let mut violations = Vec::new();
         let mut run_feedback: BTreeMap<MetamorphicRelation, (u32, u32)> = BTreeMap::new();
 
@@ -1158,20 +1292,29 @@ impl VerificationEngine {
                 });
             }
             executed_tests += 1;
+            executed_test_ids.push(test.id().to_owned());
             let outcomes: Vec<_> = test.inputs().iter().map(|input| execute(input)).collect();
             let evaluation = evaluate_test(test, &outcomes, &self.semantics);
             let feedback = run_feedback.entry(test.relation()).or_default();
             feedback.0 += 1;
             if evaluation.inconclusive {
                 inconclusive_tests += 1;
+                inconclusive_test_ids.push(test.id().to_owned());
             }
             if evaluation.violations.is_empty() && !evaluation.inconclusive {
                 passed_tests += 1;
             }
             feedback.1 += evaluation.violations.len() as u32;
             for mut violation in evaluation.violations {
-                violation.minimized_input =
+                let minimized_inputs =
                     minimize_violation(test, &violation, &execute, &self.semantics);
+                violation.minimized_input = minimized_inputs.as_ref().and_then(|inputs| {
+                    inputs
+                        .get(violation.left_input_index)
+                        .cloned()
+                        .or_else(|| inputs.first().cloned())
+                });
+                violation.minimized_inputs = minimized_inputs;
                 violations.push(violation);
             }
         }
@@ -1182,6 +1325,8 @@ impl VerificationEngine {
             executed_tests,
             passed_tests,
             inconclusive_tests,
+            executed_test_ids,
+            inconclusive_test_ids,
             retired_tests: self.retired.iter().cloned().collect(),
             violations,
             family_statistics,
@@ -1199,11 +1344,19 @@ impl VerificationEngine {
     {
         let mut executed_cases = 0;
         let mut passed_cases = 0;
+        let mut inconclusive_cases = 0;
         let mut violations = Vec::new();
         for case in cases {
             executed_cases += 1;
             let baseline_outcome = baseline(case.input());
             let candidate_outcome = candidate(case.input());
+            if !baseline_outcome
+                .missing_surfaces(&candidate_outcome, &self.semantics)
+                .is_empty()
+            {
+                inconclusive_cases += 1;
+                continue;
+            }
             let differing_surfaces =
                 baseline_outcome.differing_surfaces(&candidate_outcome, &self.semantics);
             if differing_surfaces.is_empty() {
@@ -1212,16 +1365,29 @@ impl VerificationEngine {
                 let cause = FailureCause::ObservableDivergence(differing_surfaces[0]);
                 violations.push(DifferentialViolation {
                     case_id: case.id,
+                    input: case.input,
                     differing_surfaces,
                     baseline: baseline_outcome,
                     candidate: candidate_outcome,
+                    minimized_input: None,
                     cause,
                 });
+                let violation = violations
+                    .last_mut()
+                    .expect("the differential violation was just inserted");
+                violation.minimized_input = minimize_differential_input(
+                    &violation.input,
+                    &violation.differing_surfaces,
+                    &baseline,
+                    &candidate,
+                    &self.semantics,
+                );
             }
         }
         DifferentialReport {
             executed_cases,
             passed_cases,
+            inconclusive_cases,
             violations,
         }
     }
@@ -1306,6 +1472,7 @@ fn evaluate_test(
                     baseline: outcomes[left_index].clone(),
                     variant: outcomes[right_index].clone(),
                     minimized_input: None,
+                    minimized_inputs: None,
                     cause,
                 });
             }
@@ -1337,6 +1504,16 @@ fn evaluate_pair(
     right: &ExecutionOutcome,
     semantics: &RequiredSemantics,
 ) -> PairEvaluation {
+    let differing_surfaces = left.differing_surfaces(right, semantics);
+    if !differing_surfaces.is_empty() {
+        return PairEvaluation::Violation {
+            cause: FailureCause::ObservableDivergence(differing_surfaces[0]),
+            surfaces: differing_surfaces,
+        };
+    }
+    if !left.missing_surfaces(right, semantics).is_empty() {
+        return PairEvaluation::Inconclusive;
+    }
     if relation == MetamorphicRelation::Monotonicity {
         return match (left.monotonic_value(), right.monotonic_value()) {
             (Some(left_value), Some(right_value)) if left_value <= right_value => {
@@ -1349,15 +1526,7 @@ fn evaluate_pair(
             _ => PairEvaluation::Inconclusive,
         };
     }
-    let surfaces = left.differing_surfaces(right, semantics);
-    if surfaces.is_empty() {
-        PairEvaluation::Pass
-    } else {
-        PairEvaluation::Violation {
-            cause: FailureCause::ObservableDivergence(surfaces[0]),
-            surfaces,
-        }
-    }
+    PairEvaluation::Pass
 }
 
 fn minimize_violation<F>(
@@ -1365,49 +1534,42 @@ fn minimize_violation<F>(
     violation: &VerificationViolation,
     execute: &F,
     semantics: &RequiredSemantics,
-) -> Option<Vec<u8>>
+) -> Option<Vec<Vec<u8>>>
 where
     F: Fn(&[u8]) -> ExecutionOutcome,
 {
-    if test.inputs().iter().all(Vec::is_empty) {
-        return Some(Vec::new());
+    let mut inputs = test.inputs().to_vec();
+    for input_index in [violation.left_input_index, violation.right_input_index] {
+        inputs = minimize_input(
+            test,
+            inputs,
+            input_index,
+            (violation.left_input_index, violation.right_input_index),
+            violation.cause,
+            &violation.differing_surfaces,
+            execute,
+            semantics,
+        );
     }
-    let left = minimize_input(
-        test,
-        violation.left_input_index,
-        violation.left_input_index,
-        violation.right_input_index,
-        execute,
-        semantics,
-    );
-    let right = minimize_input(
-        test,
-        violation.right_input_index,
-        violation.left_input_index,
-        violation.right_input_index,
-        execute,
-        semantics,
-    );
-    match (left, right) {
-        (Some(left), Some(right)) if left.len() <= right.len() => Some(left),
-        (Some(_), Some(right)) => Some(right),
-        (Some(input), None) | (None, Some(input)) => Some(input),
-        (None, None) => None,
-    }
+    Some(inputs)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn minimize_input<F>(
     test: &MetamorphicTest,
+    inputs: Vec<Vec<u8>>,
     input_index: usize,
-    left_index: usize,
-    right_index: usize,
+    pair: (usize, usize),
+    cause: FailureCause,
+    surfaces: &[VerificationSurface],
     execute: &F,
     semantics: &RequiredSemantics,
-) -> Option<Vec<u8>>
+) -> Vec<Vec<u8>>
 where
     F: Fn(&[u8]) -> ExecutionOutcome,
 {
-    let mut current = test.inputs()[input_index].clone();
+    let mut current_inputs = inputs;
+    let mut current = current_inputs[input_index].clone();
     let mut granularity = 2;
     loop {
         if current.is_empty() {
@@ -1420,7 +1582,10 @@ where
             let end = (start + chunk_size).min(current.len());
             let mut candidate = current.clone();
             candidate.drain(start..end);
-            let candidate_test = test.with_input(input_index, candidate.clone());
+            let mut candidate_inputs = current_inputs.clone();
+            candidate_inputs[input_index] = candidate.clone();
+            let mut candidate_test = test.clone();
+            candidate_test.inputs = candidate_inputs.clone();
             let outcomes: Vec<_> = candidate_test
                 .inputs()
                 .iter()
@@ -1428,15 +1593,64 @@ where
                 .collect();
             let remains_violation = match evaluate_pair(
                 test.relation(),
-                &outcomes[left_index],
-                &outcomes[right_index],
+                &outcomes[pair.0],
+                &outcomes[pair.1],
                 semantics,
             ) {
-                PairEvaluation::Violation { .. } => true,
+                PairEvaluation::Violation {
+                    surfaces: candidate_surfaces,
+                    cause: candidate_cause,
+                } => candidate_cause == cause && candidate_surfaces == surfaces,
                 PairEvaluation::Pass | PairEvaluation::Inconclusive => false,
             };
             if remains_violation {
                 current = candidate;
+                current_inputs = candidate_inputs;
+                granularity = 2;
+                reduced = true;
+                break;
+            }
+            start = end;
+        }
+        if reduced {
+            continue;
+        }
+        if granularity >= current.len() {
+            break;
+        }
+        granularity = (granularity * 2).min(current.len());
+    }
+    current_inputs
+}
+
+fn minimize_differential_input<B, C>(
+    input: &[u8],
+    surfaces: &[VerificationSurface],
+    baseline: &B,
+    candidate: &C,
+    semantics: &RequiredSemantics,
+) -> Option<Vec<u8>>
+where
+    B: Fn(&[u8]) -> ExecutionOutcome,
+    C: Fn(&[u8]) -> ExecutionOutcome,
+{
+    let mut current = input.to_vec();
+    let mut granularity = 2;
+    loop {
+        if current.is_empty() {
+            break;
+        }
+        let chunk_size = current.len().div_ceil(granularity);
+        let mut reduced = false;
+        let mut start = 0;
+        while start < current.len() {
+            let end = (start + chunk_size).min(current.len());
+            let mut trial = current.clone();
+            trial.drain(start..end);
+            let baseline_outcome = baseline(&trial);
+            let candidate_outcome = candidate(&trial);
+            if baseline_outcome.differing_surfaces(&candidate_outcome, semantics) == surfaces {
+                current = trial;
                 granularity = 2;
                 reduced = true;
                 break;

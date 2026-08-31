@@ -44,7 +44,10 @@ monotonicity, reversibility, round trips, partition recombination,
 normalization, and permutation. It compares observable outputs, state, side
 effects, errors, exit codes, ordering, concurrency, restart, recovery, and
 contractual performance; failing inputs are minimized and classified, while
-family yield, repairs, and regression locks remain explicit.
+family yield, repairs, and regression locks remain explicit. Reports can be
+persisted back into the canonical store as provenance-linked metamorphic test
+records, and missing contractual measurements remain inconclusive rather than
+being treated as proof.
 
 `CalibratedEvidenceFusion` scores reliability, specificity, rarity,
 discriminative power, source independence, temporal compatibility,
