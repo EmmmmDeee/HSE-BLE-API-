@@ -6,7 +6,7 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 
 ## Repository layout
 
-- `crates/bleradar-core` — safe Rust geometry, identity, RSSI, proximity and device-tracking domain.
+- `crates/bleradar-core` — safe Rust geometry, identity, RSSI, proximity and device-tracking domain, plus a canonical evidence/provenance model (observations, sources, transformations, relationships, hypotheses, calibrated fusion and falsification).
 - `crates/bleradar-compat` — semantic parity registry for high-value observed native contracts.
 - `tools/` — binary inventory, parity-report generation, and the dependency-policy and oracle-integrity gates.
 - `docs/` — audit, issue/exception ledgers, parity frontier, verification record, and the autonomous-session operating documents.

@@ -11,8 +11,10 @@ mod signal;
 mod tracking;
 
 pub use evidence::{
-    Claim, EntityKind, Evidence, EvidenceQuality, FusionResult, Hypothesis, Observation,
-    Representation, Source, Transformation, fuse_evidence,
+    Action, ActionOutcome, Artifact, Claim, ConfidenceUpdate, EdgeType, EntityKind, Event,
+    Evidence, EvidenceQuality, Feature, FusionResult, HIGH_BASE_RATE_RARITY_THRESHOLD, Hypothesis,
+    Observation, Relationship, Representation, Source, Test, TraceError, Transformation,
+    fuse_evidence, trace_claim,
 };
 pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
 pub use identity::{

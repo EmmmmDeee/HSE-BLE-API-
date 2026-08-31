@@ -42,25 +42,36 @@ pub struct Source {
     pub retrieval_method: String,
 }
 
-/// An immutable direct observation retaining raw and normalized forms separately.
+/// A collected object, distinct from any single observation made of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Observation {
+pub struct Artifact {
     /// Stable caller-assigned identifier.
     pub id: String,
-    /// Original value exactly as collected.
-    pub raw_value: String,
-    /// Optional normalized representation; never replaces `raw_value`.
-    pub normalized_value: Option<String>,
-    /// Origin of this observation.
-    pub source: Source,
-    /// Time the value was observed, in caller-defined monotonic milliseconds.
-    pub observed_at_ms: u64,
-    /// First known observation time.
-    pub first_seen_ms: u64,
-    /// Last known observation time.
-    pub last_seen_ms: u64,
-    /// Ordered identifiers describing derivations applied to this observation.
-    pub derivation_history: Vec<String>,
+    /// Artifact category, such as `binary`, `document`, or `web_page`.
+    pub artifact_type: String,
+    /// Source the artifact was collected from.
+    pub source_id: String,
+    /// Time the artifact was collected, in caller-defined monotonic milliseconds.
+    pub collected_at_ms: u64,
+}
+
+/// An immutable direct observation retaining raw and normalized forms separately.
+///
+/// Fields are private so raw evidence can never be overwritten after
+/// construction; only additive builder methods may extend an observation, and
+/// accessors expose the immutable state. This closes the same class of gap as
+/// [`crate::LatLon`]: a claimed invariant that can be bypassed by direct field
+/// mutation is not enforced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observation {
+    id: String,
+    raw_value: String,
+    normalized_value: Option<String>,
+    source: Source,
+    observed_at_ms: u64,
+    first_seen_ms: u64,
+    last_seen_ms: u64,
+    derivation_history: Vec<String>,
 }
 
 impl Observation {
@@ -103,6 +114,67 @@ impl Observation {
         self.last_seen_ms = self.last_seen_ms.max(seen_at_ms);
         self
     }
+
+    /// Stable caller-assigned identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Original value exactly as collected; never overwritten after construction.
+    #[must_use]
+    pub fn raw_value(&self) -> &str {
+        &self.raw_value
+    }
+
+    /// Optional normalized representation; never replaces `raw_value`.
+    #[must_use]
+    pub fn normalized_value(&self) -> Option<&str> {
+        self.normalized_value.as_deref()
+    }
+
+    /// Origin of this observation.
+    #[must_use]
+    pub const fn source(&self) -> &Source {
+        &self.source
+    }
+
+    /// Time the value was observed, in caller-defined monotonic milliseconds.
+    #[must_use]
+    pub const fn observed_at_ms(&self) -> u64 {
+        self.observed_at_ms
+    }
+
+    /// First known observation time.
+    #[must_use]
+    pub const fn first_seen_ms(&self) -> u64 {
+        self.first_seen_ms
+    }
+
+    /// Last known observation time.
+    #[must_use]
+    pub const fn last_seen_ms(&self) -> u64 {
+        self.last_seen_ms
+    }
+
+    /// Ordered identifiers describing derivations applied to this observation.
+    #[must_use]
+    pub fn derivation_history(&self) -> &[String] {
+        &self.derivation_history
+    }
+}
+
+/// A stable characteristic extracted from a representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Feature {
+    /// Stable caller-assigned identifier.
+    pub id: String,
+    /// Representation this feature was extracted from.
+    pub representation_id: String,
+    /// Feature name, such as `distinctive_phrase` or `public_asset_hash`.
+    pub name: String,
+    /// Extracted feature value.
+    pub value: String,
 }
 
 /// A representation of an artifact or observation.
@@ -133,6 +205,108 @@ pub struct Transformation {
     pub changed_feature_ids: Vec<String>,
     /// Test or verification identifiers supporting this conversion.
     pub verification_ids: Vec<String>,
+}
+
+/// A verification execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Test {
+    /// Stable caller-assigned identifier.
+    pub id: String,
+    /// Identifier of the transformation, claim, or relationship under test.
+    pub subject_id: String,
+    /// Verification method or metamorphic relation name.
+    pub method: String,
+    /// Whether the subject survived this verification.
+    pub passed: bool,
+    /// Time this test executed, in caller-defined monotonic milliseconds.
+    pub executed_at_ms: u64,
+}
+
+/// A time-bounded occurrence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Event {
+    /// Stable caller-assigned identifier.
+    pub id: String,
+    /// What occurred.
+    pub description: String,
+    /// Source that recorded this event.
+    pub source_id: String,
+    /// Start time, in caller-defined monotonic milliseconds.
+    pub started_at_ms: u64,
+    /// End time, or `None` if the event is ongoing or instantaneous.
+    pub ended_at_ms: Option<u64>,
+}
+
+/// How a relationship was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeType {
+    /// Directly observed rather than derived.
+    Observed,
+    /// Computed from other observed material.
+    Derived,
+    /// Asserted from indirect indicators.
+    Inferred,
+    /// Currently disputed by contradicting evidence.
+    Contested,
+    /// Investigated and rejected.
+    Rejected,
+}
+
+/// A supported or contested connection between two entities, with full provenance.
+///
+/// Every material edge stores its source, time, method, support,
+/// contradiction and confidence so graph density can never substitute for
+/// proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relationship {
+    /// Stable caller-assigned identifier.
+    pub id: String,
+    /// Identifier of the entity the relationship originates from.
+    pub subject_id: String,
+    /// Identifier of the entity the relationship points to.
+    pub object_id: String,
+    /// Relationship category, such as `same_public_entity` or `shared_infrastructure`.
+    pub relationship_type: String,
+    /// How this relationship was established.
+    pub edge_type: EdgeType,
+    /// Source that produced this relationship.
+    pub source_id: String,
+    /// Method used to establish the relationship.
+    pub method: String,
+    /// Time this relationship was recorded, in caller-defined monotonic milliseconds.
+    pub observed_at_ms: u64,
+    /// Evidence identifiers supporting this relationship.
+    pub supporting_evidence_ids: Vec<String>,
+    /// Evidence identifiers contradicting this relationship.
+    pub contradicting_evidence_ids: Vec<String>,
+    /// Calibrated confidence in the inclusive range 0..=100, not a raw probability.
+    pub confidence: u8,
+}
+
+/// The resolved outcome of an [`Action`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionOutcome {
+    /// The action completed and had the intended effect.
+    Succeeded,
+    /// The action completed without the intended effect.
+    Failed,
+    /// The action could not be completed.
+    Aborted,
+}
+
+/// An attempted operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Action {
+    /// Stable caller-assigned identifier.
+    pub id: String,
+    /// Operation attempted, such as `verify_transformation` or `query_source`.
+    pub description: String,
+    /// Identifier of the entity this action targets.
+    pub target_id: String,
+    /// Time this action was initiated, in caller-defined monotonic milliseconds.
+    pub initiated_at_ms: u64,
+    /// Outcome once resolved; `None` while the action is still pending.
+    pub outcome: Option<ActionOutcome>,
 }
 
 /// A hypothesis competing to explain a claim.
@@ -216,6 +390,94 @@ pub struct Claim {
     pub evidence_ids: Vec<String>,
 }
 
+/// A missing or broken link in a claim's `CLAIM -> HYPOTHESIS -> EVIDENCE ->
+/// OBSERVATION -> SOURCE` provenance chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceError {
+    /// The claim's `hypothesis_id` has no matching hypothesis.
+    MissingHypothesis(String),
+    /// The claim cites no evidence, so its statement is unsupported.
+    NoEvidence,
+    /// An `evidence_ids` entry has no matching evidence record.
+    MissingEvidence(String),
+    /// An evidence record's `observation_id` has no matching observation.
+    MissingObservation(String),
+    /// An evidence record's `source_id` has no matching source record.
+    MissingSource(String),
+}
+
+impl std::fmt::Display for TraceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingHypothesis(id) => write!(f, "no hypothesis found for id `{id}`"),
+            Self::NoEvidence => f.write_str("claim cites no evidence"),
+            Self::MissingEvidence(id) => write!(f, "no evidence found for id `{id}`"),
+            Self::MissingObservation(id) => write!(f, "no observation found for id `{id}`"),
+            Self::MissingSource(id) => write!(f, "no source found for id `{id}`"),
+        }
+    }
+}
+
+impl std::error::Error for TraceError {}
+
+/// Verifies the full `CLAIM -> HYPOTHESIS -> EVIDENCE -> OBSERVATION -> SOURCE`
+/// chain a claim depends on, so a claim can never be mistaken for evidence.
+///
+/// # Errors
+/// Returns the first broken or missing link encountered.
+pub fn trace_claim(
+    claim: &Claim,
+    hypotheses: &[Hypothesis],
+    evidence: &[Evidence],
+    observations: &[Observation],
+    sources: &[Source],
+) -> Result<(), TraceError> {
+    if !hypotheses.iter().any(|h| h.id == claim.hypothesis_id) {
+        return Err(TraceError::MissingHypothesis(claim.hypothesis_id.clone()));
+    }
+    if claim.evidence_ids.is_empty() {
+        return Err(TraceError::NoEvidence);
+    }
+    for evidence_id in &claim.evidence_ids {
+        let item = evidence
+            .iter()
+            .find(|item| &item.id == evidence_id)
+            .ok_or_else(|| TraceError::MissingEvidence(evidence_id.clone()))?;
+        if !observations.iter().any(|o| o.id() == item.observation_id) {
+            return Err(TraceError::MissingObservation(item.observation_id.clone()));
+        }
+        if !sources.iter().any(|s| s.id == item.source_id) {
+            return Err(TraceError::MissingSource(item.source_id.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// An auditable record of a confidence change, so calibration can never
+/// silently inflate into an unearned conclusion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfidenceUpdate {
+    /// Stable caller-assigned identifier.
+    pub id: String,
+    /// Identifier of the claim or relationship whose confidence changed.
+    pub subject_id: String,
+    /// Confidence before this update, in the inclusive range 0..=100.
+    pub previous_confidence: u8,
+    /// Confidence after this update, in the inclusive range 0..=100.
+    pub updated_confidence: u8,
+    /// Evidence identifiers that justify this change.
+    pub evidence_ids: Vec<String>,
+    /// Why the confidence changed.
+    pub reason: String,
+    /// Time this update was recorded, in caller-defined monotonic milliseconds.
+    pub updated_at_ms: u64,
+}
+
+/// Rarity at or below this value is treated as high-base-rate (common)
+/// support: a feature this unremarkable in the relevant population should not
+/// carry the leading hypothesis on its own.
+pub const HIGH_BASE_RATE_RARITY_THRESHOLD: u8 = 50;
+
 /// Result of calibrated evidence fusion and adversarial falsification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FusionResult {
@@ -227,6 +489,8 @@ pub struct FusionResult {
     pub collapsed_dependency_keys: Vec<String>,
     /// Score after removing the strongest supporting item.
     pub without_strongest_support_score: i32,
+    /// Score after removing support at or below [`HIGH_BASE_RATE_RARITY_THRESHOLD`].
+    pub without_high_base_rate_support_score: i32,
 }
 
 /// Fuses evidence without treating repeated reporting as independent confirmation.
@@ -253,11 +517,15 @@ pub fn fuse_evidence(evidence: &[Evidence]) -> FusionResult {
     let mut supporting_score = 0_u32;
     let mut contradictory_score = 0_u32;
     let mut strongest_support = 0_u32;
-    for item in unique {
+    let mut rare_supporting_score = 0_u32;
+    for item in &unique {
         let score = u32::from(item.quality.score());
         if item.supports {
             supporting_score += score;
             strongest_support = strongest_support.max(score);
+            if item.quality.rarity > HIGH_BASE_RATE_RARITY_THRESHOLD {
+                rare_supporting_score += score;
+            }
         } else {
             contradictory_score += score;
         }
@@ -268,6 +536,8 @@ pub fn fuse_evidence(evidence: &[Evidence]) -> FusionResult {
         collapsed_dependency_keys,
         without_strongest_support_score: supporting_score as i32
             - strongest_support as i32
+            - contradictory_score as i32,
+        without_high_base_rate_support_score: rare_supporting_score as i32
             - contradictory_score as i32,
     }
 }
