@@ -18,7 +18,8 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
   correlation across domains, DNS, addresses, certificates, hosting, HTTP,
   public assets, application structure, and archived states.
 - `crates/bleradar-compat` — semantic parity registry for high-value observed native contracts.
-- `tools/` — binary inventory, parity-report generation, and the dependency-policy and oracle-integrity gates.
+- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
+- `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
 - `docs/` — audit, issue/exception ledgers, parity frontier, verification record, and the autonomous-session operating documents.
 - `benchmarks/` — benchmark harness notes.
 - `RUST_CONVERSION.md` — analysis of what is already in safe Rust and the ranked plan for converting the remaining native/Android surface.
@@ -107,8 +108,8 @@ engine never treats similarity alone as proof of common operation.
 ## Requirements
 
 - Rust toolchain **1.98.0** with `clippy` and `rustfmt` — pinned by `rust-toolchain.toml`; `rustup` installs it automatically on first `cargo` invocation in the repo.
-- Python 3 (standard library only) for the `tools/` scripts.
-- No third-party crates: the workspace is intentionally dependency-free, and CI fails if that changes without a recorded decision.
+- No third-party crates in the shipped workspace: it is intentionally dependency-free, and CI fails if that changes without a recorded decision. `xtask/` (developer tooling) and the vendored advisory database are outside that scope; see `xtask/Cargo.toml`.
+- `cargo-audit` and `cargo-deny` on `PATH` to run those two specific gates (`cargo install cargo-audit cargo-deny`); every other gate, including `cargo xtask gates` itself, needs nothing beyond the pinned toolchain.
 
 ## Installation
 
@@ -142,20 +143,52 @@ assert_eq!(track.proximity(), Some(ProximityBand::Near));
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --locked
 cargo test --workspace --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
-These gates run on every push and pull request via `.github/workflows/gates.yml`, together with a parity-report drift check, a zero-third-party-dependency policy check (`tools/check_dependency_policy.py`), and an oracle integrity check that verifies the retained APK and migration archive against their recorded SHA-256 values (`tools/check_oracle_integrity.py`). Autonomous maintenance sessions operate under `docs/AUTONOMOUS_ENGINE.md`.
+Or run every gate — the above plus the parity-report drift check, the
+zero-third-party-dependency policy check, the oracle-integrity check, and
+`cargo audit`/`cargo deny` against the vendored advisory database — with the
+single local gate runner:
+
+```sh
+cargo xtask gates
+```
+
+These same gates run on every push and pull request via
+`.github/workflows/gates.yml`. Autonomous maintenance sessions operate under
+`docs/AUTONOMOUS_ENGINE.md`.
 
 ## Parity report
 
 ```sh
-python3 tools/parity_report.py
+cargo xtask parity-report
 ```
 
 This regenerates `docs/PARITY_COVERAGE.md` from the packaged ABI census and semantic compatibility registry.
+
+## Developer tooling (`cargo xtask`)
+
+`xtask/` is a dependency-free, Rust-native replacement for the former
+`tools/*.py`/`tools/native_abi.sh` scripts — no Python or `readelf` needed.
+It is a separate Cargo workspace, so it never joins `--workspace` scope or
+the root `Cargo.lock`.
+
+```sh
+cargo xtask                        # list subcommands
+cargo xtask parity-report          # regenerate docs/PARITY_COVERAGE.md
+cargo xtask check-dependency-policy
+cargo xtask check-oracle-integrity
+cargo xtask apk-inventory <apk>
+cargo xtask native-abi <lib.so>
+cargo xtask dex-classes <classes.dex>
+cargo xtask audit                  # cargo audit, offline, vendored advisory db
+cargo xtask deny                   # cargo deny check, offline, vendored advisory db
+cargo xtask gates                  # every gate, one command
+```
 
 ## Distribution packaging
 

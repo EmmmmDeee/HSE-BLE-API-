@@ -19,23 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Format gate
-        run: cargo fmt --all --check
-      - name: Clippy gate
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Build gate
-        run: cargo build --workspace --locked
-      - name: Test gate
-        run: cargo test --workspace --locked
-      - name: Doc gate
-        run: cargo doc --workspace --no-deps --locked
-        env:
-          RUSTDOCFLAGS: -D warnings
-      - name: Parity report drift gate
-        run: |
-          python3 tools/parity_report.py
-          git diff --exit-code docs/PARITY_COVERAGE.md
-      - name: Dependency policy gate
-        run: python3 tools/check_dependency_policy.py
-      - name: Oracle integrity gate
-        run: python3 tools/check_oracle_integrity.py
+      - name: Install cargo-audit and cargo-deny
+        run: cargo install --locked cargo-audit cargo-deny
+      - name: Run every gate via the local gate runner
+        run: cargo xtask gates

@@ -39,7 +39,7 @@ Rust workspace:
 - `bleradar-core::tracking` — observations, selected-device lock state, histories, confidence, map points, GPS uncertainty and conservative spatial estimates.
 - `bleradar-compat` — semantic parity-status registry distinguishing reconstructed, oracle-only and blocked contracts.
 - `oracle/` — immutable original APK, DEX and native core.
-- `tools/` — repeatable APK/native inventory and parity-coverage generation.
+- `xtask/` — dependency-free Rust-native APK/native inventory, parity-coverage generation, and gate runner (supersedes the former `tools/*.py`).
 
 ## Material improvements over the initial reconstruction
 
@@ -90,7 +90,7 @@ See `docs/PARITY_COVERAGE.md` for the current semantic frontier.
 
 ## Security/dependencies
 
-The reconstructed Rust workspace has no third-party crate dependencies. It therefore introduces no crates.io dependency graph. A real `cargo audit` invocation still requires a host with Cargo and cargo-audit installed. The legacy Android APK dependency graph cannot be reconstructed completely from the binary metadata alone.
+The reconstructed Rust workspace has no third-party crate dependencies. It therefore introduces no crates.io dependency graph. `cargo audit` and `cargo deny` have been run (2026-08-31) fully offline against a vendored RustSec advisory database and are green with zero findings. The legacy Android APK dependency graph cannot be reconstructed completely from the binary metadata alone.
 
 ## Credentials
 
@@ -100,19 +100,19 @@ No populated user/API credential values were found in the supplied APK. No value
 
 Package-level verification performed at packaging time:
 - original oracle files retained and checksummed;
-- parity report generation executes successfully under Python;
+- parity report generation executes successfully under `cargo xtask parity-report`;
 - Git recovery history regenerated and tagged at the critical enhancement point;
 - ZIP is re-extracted and all packaged SHA-256 entries are checked before delivery.
 
-Execution gates, observed green on 2026-08-28 (Linux x86_64, pinned rustc/cargo 1.98.0) and enforced continuously by `.github/workflows/gates.yml`:
+Execution gates, observed green on 2026-08-28 (Linux x86_64, pinned rustc/cargo 1.98.0) and enforced continuously by `.github/workflows/gates.yml`, now run as one command (`cargo xtask gates`):
 - `cargo fmt --all --check`;
 - `cargo clippy --workspace --all-targets -- -D warnings`;
 - `cargo build --workspace --locked`;
 - `cargo test --workspace --locked`;
-- `python3 tools/parity_report.py` followed by a drift check against the committed `docs/PARITY_COVERAGE.md`.
+- `cargo xtask parity-report` followed by a drift check against the committed `docs/PARITY_COVERAGE.md`;
+- `cargo audit` / `cargo deny`, fully offline against the vendored RustSec advisory database (`vendor/rustsec-advisory-db/`) — closed 2026-08-31, see `docs/AUTONOMOUS_DECISIONS.md` #28.
 
 Still blocked, not reported green:
-- `cargo audit` (cargo-audit binary unavailable; the lockfile currently contains zero third-party crates, so the advisory surface is empty);
 - all Android-target execution (see MIG-003).
 
 ## Known risks
