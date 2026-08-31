@@ -1398,7 +1398,6 @@ impl ExecutionFeedbackAdaptiveOsintSearchEngine {
     }
 
     /// Returns all completed executions in stable identifier order.
-    #[must_use]
     pub fn executions(&self) -> impl Iterator<Item = &SearchExecution> {
         self.executions.values()
     }
