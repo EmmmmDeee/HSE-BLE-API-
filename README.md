@@ -93,6 +93,17 @@ collapse copied/provider-dependent support, reward rare features, independent
 sources, and temporal continuity, and run adversarial passes before persisting
 a provenance-linked relationship edge.
 
+`WebsiteLineageEcosystemAnalysisEngine` extracts normalized text, distinctive
+phrases, HTML structure, public assets, scripts, styles, identifiers, contacts,
+certificates, links, application characteristics, and archived states while
+retaining each raw capture and its source and temporal interval. It compares
+websites through competing coincidence, platform, template, reuse,
+development, and operational explanations; collapses provider-dependent
+support; and applies bounded calibration, temporal alignment, and
+support-removal falsification before persisting a canonical lineage edge.
+Website similarity can yield a possible common-operator assessment, but this
+engine never treats similarity alone as proof of common operation.
+
 ## Requirements
 
 - Rust toolchain **1.98.0** with `clippy` and `rustfmt` — pinned by `rust-toolchain.toml`; `rustup` installs it automatically on first `cargo` invocation in the repo.

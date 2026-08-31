@@ -365,7 +365,7 @@ fn temporal_gap_limits_and_ranking_are_deterministic() {
         WebsiteLineageEcosystemAnalysisEngine::with_limits(EvidenceStore::new(), limits);
     let mut second =
         WebsiteLineageEcosystemAnalysisEngine::with_limits(EvidenceStore::new(), limits);
-    let observations = vec![
+    let observations = [
         observation(
             "a",
             "site-a",

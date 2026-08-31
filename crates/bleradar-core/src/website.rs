@@ -2098,9 +2098,7 @@ fn temporal_score(
 }
 
 fn feature_signal_weight(left: &WebsiteObservation, right: &WebsiteObservation) -> u16 {
-    let kind = if left.kind() == right.kind() {
-        left.kind()
-    } else if left.kind().is_rare_signal() {
+    let kind = if left.kind() == right.kind() || left.kind().is_rare_signal() {
         left.kind()
     } else {
         right.kind()

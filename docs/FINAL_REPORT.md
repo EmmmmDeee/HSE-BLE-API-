@@ -24,6 +24,10 @@ Rust workspace:
 - `bleradar-core::infrastructure` — temporal metamorphic infrastructure
   correlation with explicit shared-infrastructure versus common-control
   classifications, temporal continuity, dependency collapse, and falsification.
+- `bleradar-core::website` — website lineage and ecosystem analysis with
+  raw-capture preservation, feature-family extraction, temporal comparison,
+  calibrated competing explanations, dependency collapse, falsification, and
+  canonical relationship persistence.
 - `bleradar-core::fusion` — bounded calibrated evidence scoring, dependency
   collapse, competing-hypothesis fusion, and adversarial falsification.
 - `bleradar-core::verification` — required-semantics contracts, metamorphic
@@ -68,6 +72,11 @@ Rust workspace:
     infrastructure observation families, with raw/normalized preservation,
     temporal intervals, source-dependency collapse, calibrated competing
     explanations, adversarial falsification, and canonical relationship edges.
+18. Added website lineage and ecosystem analysis across twelve feature
+    families, preserving raw HTML and public inputs, distinguishing content,
+    platform, asset, development, and operational explanations, collapsing
+    provider-dependent support, and preventing website similarity from being
+    represented as proof of common operator control.
 
 ## Functional parity status
 
