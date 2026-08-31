@@ -14,6 +14,9 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 - `crates/bleradar-core::osint` — execution-feedback adaptive OSINT search with
   representation-aware pivots, provenance-preserving findings, and canonical
   retrieval actions.
+- `crates/bleradar-core::infrastructure` — temporal metamorphic infrastructure
+  correlation across domains, DNS, addresses, certificates, hosting, HTTP,
+  public assets, application structure, and archived states.
 - `crates/bleradar-compat` — semantic parity registry for high-value observed native contracts.
 - `tools/` — binary inventory, parity-report generation, and the dependency-policy and oracle-integrity gates.
 - `docs/` — audit, issue/exception ledgers, parity frontier, verification record, and the autonomous-session operating documents.
@@ -80,6 +83,15 @@ more ranking pressure while repeated or unproductive families are penalized.
 Raw queries and source values remain separate from normalized forms, and
 source-backed findings plus retrieval actions are persisted transactionally in
 `EvidenceStore`.
+
+`TemporalMetamorphicInfrastructureCorrelationEngine` treats infrastructure
+relationships as competing explanations rather than proof of common control.
+It preserves raw and normalized values, source metadata, dependency groups, and
+first/last-seen intervals for eleven infrastructure observation families.
+Correlation rankings down-weight common CDN, hosting, ASN, and HTTP signals,
+collapse copied/provider-dependent support, reward rare features, independent
+sources, and temporal continuity, and run adversarial passes before persisting
+a provenance-linked relationship edge.
 
 ## Requirements
 

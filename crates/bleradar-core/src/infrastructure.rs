@@ -449,6 +449,26 @@ impl InfrastructureObservation {
         copy
     }
 
+    /// Returns a copy with an additive normalized value and derivation label.
+    ///
+    /// The label is retained as a feature signature for correlation; raw
+    /// evidence remains unchanged.
+    pub fn with_normalization(
+        &self,
+        normalized_value: impl Into<EvidenceValue>,
+        feature_key: impl Into<String>,
+    ) -> Result<Self, InfrastructureError> {
+        self.with_normalized_value(normalized_value)
+            .with_feature(feature_key)
+    }
+
+    /// Returns a copy with an explicit temporal interval.
+    #[must_use]
+    pub const fn with_interval(mut self, timeline: TemporalInterval) -> Self {
+        self.timeline = timeline;
+        self
+    }
+
     /// Returns a copy with explicit quality factors.
     #[must_use]
     pub const fn with_factors(mut self, factors: InfrastructureFactors) -> Self {
@@ -595,6 +615,18 @@ impl InfrastructureObservation {
             self.timeline.into(),
         )
         .map_err(InfrastructureError::from)
+    }
+
+    /// Creates an observation using metadata copied from a canonical source.
+    pub fn from_source(
+        id: impl Into<String>,
+        node_id: impl Into<String>,
+        kind: InfrastructureKind,
+        raw_value: impl Into<EvidenceValue>,
+        source: &Source,
+        observed_at: Timestamp,
+    ) -> Result<Self, InfrastructureError> {
+        Self::new(id, node_id, kind, raw_value, source.clone(), observed_at)
     }
 }
 
@@ -1771,10 +1803,10 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
 }
 
 fn values_match(left: &InfrastructureObservation, right: &InfrastructureObservation) -> bool {
-    if let (Some(left_feature), Some(right_feature)) = (left.feature_key(), right.feature_key()) {
-        if left_feature == right_feature {
-            return true;
-        }
+    if let (Some(left_feature), Some(right_feature)) = (left.feature_key(), right.feature_key())
+        && left_feature == right_feature
+    {
+        return true;
     }
     match (left.normalized_value(), right.normalized_value()) {
         (Some(left_value), Some(right_value)) if left_value == right_value => true,
@@ -1811,7 +1843,7 @@ fn temporal_score(
                 50
             } else {
                 let gap = left.gap(right).min(maximum_gap);
-                50 + ((maximum_gap.saturating_sub(gap) * 50) / maximum_gap) as u8
+                50 + (maximum_gap.saturating_sub(gap).saturating_mul(50) / maximum_gap) as u8
             }
         }
         TemporalRelation::Disjoint => 0,
@@ -1885,7 +1917,9 @@ fn explanations_for(
             explanations.insert(InfrastructureExplanation::SharedThirdPartyService);
         }
     }
-    if left.factors().rarity().value() >= 70
+    if !left.is_high_base_rate()
+        && !right.is_high_base_rate()
+        && left.factors().rarity().value() >= 70
         && right.factors().rarity().value() >= 70
         && left.factors().specificity().value() >= 70
         && right.factors().specificity().value() >= 70
@@ -1947,12 +1981,25 @@ fn rank_supports(supports: &[Support], mode: ScoreMode<'_>) -> Vec<CorrelationRa
         .map(|explanation| rank_explanation(supports, explanation, mode))
         .collect::<Vec<_>>();
     rankings.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.explanation.cmp(&right.explanation))
+        right.score.cmp(&left.score).then_with(|| {
+            explanation_order(left.explanation).cmp(&explanation_order(right.explanation))
+        })
     });
     rankings
+}
+
+fn explanation_order(explanation: InfrastructureExplanation) -> u8 {
+    match explanation {
+        InfrastructureExplanation::DirectTechnicalRelationship => 0,
+        InfrastructureExplanation::PossibleCommonAdministration => 1,
+        InfrastructureExplanation::CommonHost => 2,
+        InfrastructureExplanation::CommonCdn => 3,
+        InfrastructureExplanation::CommonCms => 4,
+        InfrastructureExplanation::CommonTemplate => 5,
+        InfrastructureExplanation::CommonRegistrar => 6,
+        InfrastructureExplanation::SharedThirdPartyService => 7,
+        InfrastructureExplanation::Unknown => 8,
+    }
 }
 
 fn rank_explanation(

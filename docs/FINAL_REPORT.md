@@ -21,6 +21,9 @@ Rust workspace:
 - `bleradar-core::osint` — execution-feedback adaptive OSINT search with
   representation-aware pivots, adaptive ranking, and canonical provenance
   persistence.
+- `bleradar-core::infrastructure` — temporal metamorphic infrastructure
+  correlation with explicit shared-infrastructure versus common-control
+  classifications, temporal continuity, dependency collapse, and falsification.
 - `bleradar-core::fusion` — bounded calibrated evidence scoring, dependency
   collapse, competing-hypothesis fusion, and adversarial falsification.
 - `bleradar-core::verification` — required-semantics contracts, metamorphic
@@ -61,6 +64,10 @@ Rust workspace:
     representations, explicit outcome classification, feedback-driven frontier
     ranking, duplicate-pivot suppression, and transactional evidence/action
     persistence.
+17. Added temporal metamorphic infrastructure correlation across eleven
+    infrastructure observation families, with raw/normalized preservation,
+    temporal intervals, source-dependency collapse, calibrated competing
+    explanations, adversarial falsification, and canonical relationship edges.
 
 ## Functional parity status
 
@@ -105,4 +112,4 @@ The largest remaining risk is semantic overreach. The original native binary exp
 
 ## Recommended continuation
 
-On a Rust/Android-capable host, first run the standard gates, then build a differential harness around the immutable native oracle. Promote a contract from `Blocked` or `OracleOnly` to `Reconstructed` only after generated-input comparisons prove inputs, outputs, errors and side effects. Android service/UI parity should be frozen with instrumentation tests before replacing lifecycle-sensitive behavior.
+On a Rust/Android-capable host, first run the standard gates, then build a differential harness around the immutable native oracle. Promote a contract from `Blocked` or `OracleOnly` to `Reconstructed` only after generated-input comparisons prove inputs, outputs, errors and side effects. Android service/UI parity should be frozen with instrumentation tests before replacing lifecycle-sensitive behavior. Infrastructure correlations should likewise remain provenance-linked and should not be promoted from shared infrastructure to common control without independent, temporally compatible evidence.
