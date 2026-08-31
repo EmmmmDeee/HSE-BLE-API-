@@ -2193,14 +2193,19 @@ fn explanation_weight(
         WebsiteExplanation::CommonPlatform | WebsiteExplanation::CommonTemplate => {
             base_weight.saturating_mul(3) / 5
         }
-        WebsiteExplanation::ContentReuse if rare => base_weight.saturating_add(5),
-        WebsiteExplanation::AssetReuse if rare => base_weight.saturating_add(15),
-        WebsiteExplanation::DevelopmentRelationship if rare => base_weight.saturating_add(10),
         WebsiteExplanation::OperationalRelationship
             if left.kind() == WebsiteFeatureKind::PublicAnalyticsIdentifier
                 || right.kind() == WebsiteFeatureKind::PublicAnalyticsIdentifier
                 || left.kind() == WebsiteFeatureKind::PublicContactInformation
                 || right.kind() == WebsiteFeatureKind::PublicContactInformation =>
+        {
+            base_weight.saturating_add(10)
+        }
+        WebsiteExplanation::ContentReuse if rare => base_weight.saturating_add(5),
+        WebsiteExplanation::AssetReuse if rare => base_weight.saturating_add(15),
+        WebsiteExplanation::DevelopmentRelationship
+            if left.kind() == WebsiteFeatureKind::PublicAsset
+                || right.kind() == WebsiteFeatureKind::PublicAsset =>
         {
             base_weight.saturating_add(10)
         }
