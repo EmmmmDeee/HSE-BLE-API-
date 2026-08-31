@@ -1,0 +1,12 @@
+# cargo-deny configuration.
+#
+# The workspace has zero third-party dependencies (enforced in CI by
+# `tools/check_dependency_policy.py`), so `advisories` and `bans` operate
+# over an empty external graph with upstream defaults. Both workspace crates
+# are `publish = false` (proprietary, oracle-derived reconstruction, never
+# published to crates.io); `licenses.private.ignore` scopes the license check
+# away from unpublished workspace-local crates instead of forcing the
+# non-SPDX `license = "Proprietary"` string into an SPDX expression it was
+# never meant to satisfy.
+[licenses]
+private = { ignore = true }
