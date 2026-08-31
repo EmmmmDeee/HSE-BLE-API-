@@ -5,11 +5,16 @@
 //! gaps rather than guessed legacy behavior.
 
 mod geo;
+mod evidence;
 mod identity;
 mod signal;
 mod tracking;
 
 pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
+pub use evidence::{
+    Claim, EntityKind, Evidence, EvidenceQuality, FusionResult, Hypothesis, Observation,
+    Representation, Source, Transformation, fuse_evidence,
+};
 pub use identity::{
     AddressKind, DeviceIdentity, IdentityEvidence, canonical_mac, is_locally_administered,
 };
