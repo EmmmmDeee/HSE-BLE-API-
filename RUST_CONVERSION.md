@@ -11,13 +11,13 @@ grounded in the machine-readable parity registry
 
 - **Safe Rust domain core** (`bleradar-core`): geometry, identity, RSSI
   filtering, proximity, device tracking, and spatial estimation. Zero
-  third-party crates (CI-enforced by `tools/check_dependency_policy.py`),
+  third-party crates (CI-enforced by `cargo xtask check-dependency-policy`),
   `unsafe_code = "forbid"`, clippy-clean at `-D warnings`.
 - **Semantic parity registry** (`bleradar-compat`): every high-value native
   contract is classified `Reconstructed`, `OracleOnly`, or `Blocked`.
 - **Immutable oracles**: the original APK and its `libbleradar_core.so` /
   `classes.dex` (inside the retained migration archive) are the behavioral
-  reference, integrity-locked in CI by `tools/check_oracle_integrity.py`.
+  reference, integrity-locked in CI by `cargo xtask check-oracle-integrity`.
 - **Android layer** (not in this repo as source): Compose UI and BLE service
   code exists only as R8-obfuscated DEX in the oracle APK.
 
@@ -76,9 +76,26 @@ repository already documents; the harness is what makes it executable.
    advertisements/minute) gains Rust throughput and drops JVM allocation
    churn; the UI keeps platform idioms.
 
-**Anti-recommendation:** `tools/*.py` (parity report, dependency and oracle
-gates) should stay Python. They are I/O-bound, run in seconds in CI, and
-have no safety-critical surface; converting them is negative value.
+**Superseded anti-recommendation:** an earlier revision of this document
+recommended keeping `tools/*.py` (parity report, dependency and oracle gates)
+in Python, reasoning that I/O-bound scripts with no safety-critical surface
+were negative-value conversions. A subsequent migration mandate requires
+zero non-Rust host dependencies for tooling as well as for the shipped
+crates, and the pinned-toolchain "one command from a clean extraction"
+invariant does not actually hold while a gate depends on a Python
+interpreter being present. `tools/*.py` and `tools/native_abi.sh` were
+converted to `cargo xtask` (`xtask/src/main.rs`) after proving every
+subcommand byte-identical to the script it replaces, then removed; see
+`docs/AUTONOMOUS_DECISIONS.md` #25. The risk profile assessment (low
+safety-critical surface) was correct and is exactly why the conversion was
+low-risk, not why it was skippable.
+
+**Anti-recommendation (current):** `xtask`'s ZIP reader does not implement
+DEFLATE decompression purely to auto-extract `classes.dex` from the APK for
+one-time documentation regeneration (`docs/AUTONOMOUS_DECISIONS.md` #26).
+That capability is on no gate's hot path; the new parsing surface a
+hand-rolled inflate implementation would add is not justified until a gated
+consumer actually needs it.
 
 ## Expected benefits
 

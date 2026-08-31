@@ -4,21 +4,59 @@
 //! Functions that cannot be proven from the supplied APK remain compatibility
 //! gaps rather than guessed legacy behavior.
 
+mod advancement;
 mod evidence;
+mod fusion;
 mod geo;
 mod identity;
+mod infrastructure;
+mod osint;
 mod signal;
 mod tracking;
+mod verification;
+mod website;
 
+pub use advancement::{
+    AdvancementDecision, AdvancementError, AdvancementExecution, AdvancementFactors,
+    AdvancementPhase, AdvancementPriority, AdvancementProposal, AdvancementRanking,
+    AdvancementRejection, AdvancementRun, AdvancementState, BenchmarkMetric, BenchmarkReport,
+    FalsificationCheck, FalsificationFinding, FalsificationResult, FalsificationStatus,
+    MetamorphicSoftwareAdvancementEngine, MetricDirection, SoftwareAdvancementEngine,
+};
 pub use evidence::{
-    Action, ActionOutcome, Artifact, Claim, ConfidenceUpdate, EdgeType, EntityKind, Event,
-    Evidence, EvidenceQuality, Feature, FusionResult, HIGH_BASE_RATE_RARITY_THRESHOLD, Hypothesis,
-    Observation, Relationship, Representation, Source, Test, TraceError, Transformation,
-    fuse_evidence, trace_claim,
+    Action, ActionId, ActionStatus, ActionType, Artifact, ArtifactId, ArtifactType,
+    CanonicalEvidence, Claim, ClaimId, ClaimTrace, ConfidenceTarget, ConfidenceUpdate,
+    ConfidenceUpdateId, EdgeType, Entity, EntityId, EntityKind, EntityType, Event, EventId,
+    EventType, Evidence, EvidenceId, EvidenceRole, EvidenceStore, EvidenceTrace, EvidenceValue,
+    Feature, FeatureId, Hypothesis, HypothesisId, HypothesisKind, Observation, ObservationId,
+    ObservationTimeline, ProvenanceCore, ProvenanceError, RecordId, Relationship, RelationshipId,
+    RelationshipProvenance, Representation, RepresentationId, RepresentationType, RetrievalMethod,
+    Source, SourceId, SourceType, Test, TestId, TestStatus, TestType, Timestamp, Transformation,
+    TransformationId, TransformationTrace, Value, Verification, VerificationStatus,
+};
+pub use fusion::{
+    CalibratedEvidenceFusion, DependencyKind, EvidenceAssessment, EvidenceQuality,
+    ExpectedEvidence, FalsificationReport, FusionError, FusionResult, HypothesisScore,
 };
 pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
 pub use identity::{
     AddressKind, DeviceIdentity, IdentityEvidence, canonical_mac, is_locally_administered,
+};
+pub use infrastructure::{
+    CompetingExplanation, ControlAssessment, CorrelationEdge, CorrelationFactors,
+    CorrelationFalsification, CorrelationRanking, CorrelationReport, InfrastructureCorrelationEdge,
+    InfrastructureCorrelationEngine, InfrastructureCorrelationReport, InfrastructureError,
+    InfrastructureExplanation, InfrastructureFactors, InfrastructureFalsificationReport,
+    InfrastructureKind, InfrastructureLimits, InfrastructureObservation, InfrastructurePhase,
+    InfrastructureRecord, TemporalInfrastructureCorrelationEngine, TemporalInterval,
+    TemporalMetamorphicInfrastructureCorrelationEngine, TemporalRelation,
+};
+pub use osint::{
+    AdaptiveOsintSearchEngine, AdaptiveSearchFactors, ExecutionFeedbackAdaptiveOsintSearchEngine,
+    ExecutionFeedbackAdaptiveSearchEngine, OsintSearchError, SearchError, SearchExecution,
+    SearchFamilyStatistics, SearchFeedback, SearchFinding, SearchLimits, SearchOutcome,
+    SearchPhase, SearchPivot, SearchPivotSeed, SearchPivotState, SearchPriority,
+    SearchPriorityFactors, SearchRanking, SearchRepresentation,
 };
 pub use signal::{
     FilterError, ProximityBand, RssiEma, SignalTrend, ble_distance_m, proximity_label, signal_trend,
@@ -26,6 +64,21 @@ pub use signal::{
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, MapPoint, SelectedDevice,
     SpatialEstimate, TrackError,
+};
+pub use verification::{
+    DifferentialCase, DifferentialReport, DifferentialViolation, ExecutionOutcome, FailureCause,
+    FamilyStatistics, MetamorphicRelation, MetamorphicTest, RegressionLock, RepairRecord,
+    RequiredSemantics, VerificationEngine, VerificationError, VerificationReport,
+    VerificationSurface, VerificationViolation,
+};
+pub use website::{
+    OperatorAssessment, WebsiteCorrelationEdge, WebsiteCorrelationFactors,
+    WebsiteCorrelationFalsification, WebsiteCorrelationRanking, WebsiteCorrelationReport,
+    WebsiteEcosystemAnalysisEngine, WebsiteError, WebsiteExplanation, WebsiteFactors,
+    WebsiteFalsificationReport, WebsiteFeatureKind, WebsiteLimits,
+    WebsiteLineageEcosystemAnalysisEngine, WebsiteLineageEdge, WebsiteLineageEngine,
+    WebsiteLineageReport, WebsiteObservation, WebsiteObservationKind, WebsiteObservationPair,
+    WebsitePhase, WebsiteRecord, WebsiteSnapshot, WebsiteTimeline,
 };
 
 /// 2.4/5 GHz Wi-Fi channel to center frequency in MHz where defined.

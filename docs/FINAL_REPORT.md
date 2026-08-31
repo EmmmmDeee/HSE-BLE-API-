@@ -13,13 +13,33 @@ Android Compose UI → Android BLE/location/map services → generated Kotlin Un
 ## Enhanced reconstructed architecture
 
 Rust workspace:
+- `bleradar-core::evidence` — canonical, provenance-preserving evidence records and
+  referentially validated claim/transformation traces.
+- `bleradar-core::advancement` — evaluation-gated metamorphic software
+  advancement with explicit ranking factors, benchmark gates, and integration
+  state.
+- `bleradar-core::osint` — execution-feedback adaptive OSINT search with
+  representation-aware pivots, adaptive ranking, and canonical provenance
+  persistence.
+- `bleradar-core::infrastructure` — temporal metamorphic infrastructure
+  correlation with explicit shared-infrastructure versus common-control
+  classifications, temporal continuity, dependency collapse, and falsification.
+- `bleradar-core::website` — website lineage and ecosystem analysis with
+  raw-capture preservation, feature-family extraction, temporal comparison,
+  calibrated competing explanations, dependency collapse, falsification, and
+  canonical relationship persistence.
+- `bleradar-core::fusion` — bounded calibrated evidence scoring, dependency
+  collapse, competing-hypothesis fusion, and adversarial falsification.
+- `bleradar-core::verification` — required-semantics contracts, metamorphic
+  relations, baseline/candidate differential comparison, failure minimization,
+  repair records, regression locks, and family-yield feedback.
 - `bleradar-core::geo` — validated coordinates, haversine distance, bearing.
 - `bleradar-core::identity` — canonical MAC handling, randomized/private address classification, conservative identity evidence.
 - `bleradar-core::signal` — deterministic EMA filtering, hot/cold trend, coarse proximity bands, calibrated BLE range estimation.
 - `bleradar-core::tracking` — observations, selected-device lock state, histories, confidence, map points, GPS uncertainty and conservative spatial estimates.
 - `bleradar-compat` — semantic parity-status registry distinguishing reconstructed, oracle-only and blocked contracts.
 - `oracle/` — immutable original APK, DEX and native core.
-- `tools/` — repeatable APK/native inventory and parity-coverage generation.
+- `xtask/` — dependency-free Rust-native APK/native inventory, parity-coverage generation, and gate runner (supersedes the former `tools/*.py`).
 
 ## Material improvements over the initial reconstruction
 
@@ -35,6 +55,28 @@ Rust workspace:
 10. Expanded regression coverage for identity, mapping, tracking, filtering, proximity and selection state.
 11. Replaced flat ABI-name inventory semantics with a parity-status registry.
 12. Added a generated parity coverage report to make the remaining migration frontier measurable.
+13. Added bounded calibrated evidence fusion with explicit quality dimensions,
+    dependent-source collapse, and adversarial support-removal checks.
+14. Added metamorphic and differential verification with observable-surface
+    comparison, failure minimization, explicit repair/regression state, and
+    transformation-family feedback.
+15. Added evaluation-gated software advancement that ranks changes by explicit
+    benefit/confidence/reachability/reversibility factors and rejects candidates
+    without verified semantics, measurable improvement, falsification resistance,
+    reproducibility, or explained regression behavior.
+16. Added execution-feedback adaptive OSINT search with eleven query
+    representations, explicit outcome classification, feedback-driven frontier
+    ranking, duplicate-pivot suppression, and transactional evidence/action
+    persistence.
+17. Added temporal metamorphic infrastructure correlation across eleven
+    infrastructure observation families, with raw/normalized preservation,
+    temporal intervals, source-dependency collapse, calibrated competing
+    explanations, adversarial falsification, and canonical relationship edges.
+18. Added website lineage and ecosystem analysis across twelve feature
+    families, preserving raw HTML and public inputs, distinguishing content,
+    platform, asset, development, and operational explanations, collapsing
+    provider-dependent support, and preventing website similarity from being
+    represented as proof of common operator control.
 
 ## Functional parity status
 
@@ -48,7 +90,7 @@ See `docs/PARITY_COVERAGE.md` for the current semantic frontier.
 
 ## Security/dependencies
 
-The reconstructed Rust workspace has no third-party crate dependencies. It therefore introduces no crates.io dependency graph. A real `cargo audit` invocation still requires a host with Cargo and cargo-audit installed. The legacy Android APK dependency graph cannot be reconstructed completely from the binary metadata alone.
+The reconstructed Rust workspace has no third-party crate dependencies. It therefore introduces no crates.io dependency graph. `cargo audit` and `cargo deny` have been run (2026-08-31) fully offline against a vendored RustSec advisory database and are green with zero findings. The legacy Android APK dependency graph cannot be reconstructed completely from the binary metadata alone.
 
 ## Credentials
 
@@ -58,19 +100,19 @@ No populated user/API credential values were found in the supplied APK. No value
 
 Package-level verification performed at packaging time:
 - original oracle files retained and checksummed;
-- parity report generation executes successfully under Python;
+- parity report generation executes successfully under `cargo xtask parity-report`;
 - Git recovery history regenerated and tagged at the critical enhancement point;
 - ZIP is re-extracted and all packaged SHA-256 entries are checked before delivery.
 
-Execution gates, observed green on 2026-08-28 (Linux x86_64, pinned rustc/cargo 1.98.0) and enforced continuously by `.github/workflows/gates.yml`:
+Execution gates, observed green on 2026-08-28 (Linux x86_64, pinned rustc/cargo 1.98.0) and enforced continuously by `.github/workflows/gates.yml`, now run as one command (`cargo xtask gates`):
 - `cargo fmt --all --check`;
 - `cargo clippy --workspace --all-targets -- -D warnings`;
 - `cargo build --workspace --locked`;
 - `cargo test --workspace --locked`;
-- `python3 tools/parity_report.py` followed by a drift check against the committed `docs/PARITY_COVERAGE.md`.
+- `cargo xtask parity-report` followed by a drift check against the committed `docs/PARITY_COVERAGE.md`;
+- `cargo audit` / `cargo deny`, fully offline against the vendored RustSec advisory database (`vendor/rustsec-advisory-db/`) — closed 2026-08-31, see `docs/AUTONOMOUS_DECISIONS.md` #28.
 
 Still blocked, not reported green:
-- `cargo audit` (cargo-audit binary unavailable; the lockfile currently contains zero third-party crates, so the advisory surface is empty);
 - all Android-target execution (see MIG-003).
 
 ## Known risks
@@ -79,4 +121,4 @@ The largest remaining risk is semantic overreach. The original native binary exp
 
 ## Recommended continuation
 
-On a Rust/Android-capable host, first run the standard gates, then build a differential harness around the immutable native oracle. Promote a contract from `Blocked` or `OracleOnly` to `Reconstructed` only after generated-input comparisons prove inputs, outputs, errors and side effects. Android service/UI parity should be frozen with instrumentation tests before replacing lifecycle-sensitive behavior.
+On a Rust/Android-capable host, first run the standard gates, then build a differential harness around the immutable native oracle. Promote a contract from `Blocked` or `OracleOnly` to `Reconstructed` only after generated-input comparisons prove inputs, outputs, errors and side effects. Android service/UI parity should be frozen with instrumentation tests before replacing lifecycle-sensitive behavior. Infrastructure correlations should likewise remain provenance-linked and should not be promoted from shared infrastructure to common control without independent, temporally compatible evidence.
