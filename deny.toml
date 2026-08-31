@@ -10,3 +10,19 @@
 # never meant to satisfy.
 [licenses]
 private = { ignore = true }
+
+# `cargo-deny`'s advisories check shells out to `git show -s --format=%cI HEAD`
+# against `db-path`'s resolved subdirectory, so it needs an actual git commit
+# there — but the *tracked* copy in `vendor/rustsec-advisory-db/` is
+# deliberately plain files (no `.git`), so that adding it to this repository
+# can never create a nested-repository "gitlink" that silently drops the
+# vendored content on clone (see that directory's NOTICE.md). `cargo xtask
+# gates` (and `cargo xtask deny`) materialize a single-commit git repo here,
+# under gitignored `target/`, from those tracked plain files before invoking
+# `cargo deny --offline check` — regenerable-cache-in, regenerable-cache-out,
+# per the project's "exclude regenerable caches but include everything
+# required to regenerate them" packaging rule. Running raw `cargo deny check`
+# without that materialization step first will fail with a git error; that is
+# expected, not a bug — go through `cargo xtask` instead.
+[advisories]
+db-path = "target/xtask-vendor/rustsec-advisory-db"

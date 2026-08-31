@@ -1,0 +1,25 @@
+# `xtask` is deliberately its own workspace (matching the standard cargo-xtask
+# pattern) so it never joins the `bleradar-*` dependency graph or shows up in
+# `cargo build/test/clippy --workspace` for the shipped library crates. See
+# `docs/AUTONOMOUS_DECISIONS.md` decision 24.
+[workspace]
+
+[package]
+name = "xtask"
+version = "0.1.0"
+description = "Dependency-free Rust-native developer tooling: parity report, policy/oracle gates, ABI/APK/DEX census, and the one-command local gate runner."
+edition = "2024"
+rust-version = "1.98"
+license = "Proprietary"
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "deny"
