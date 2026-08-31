@@ -5,6 +5,7 @@
 //! gaps rather than guessed legacy behavior.
 
 mod evidence;
+mod fusion;
 mod geo;
 mod identity;
 mod signal;
@@ -20,6 +21,10 @@ pub use evidence::{
     RelationshipProvenance, Representation, RepresentationId, RepresentationType, RetrievalMethod,
     Source, SourceId, SourceType, Test, TestId, TestStatus, TestType, Timestamp, Transformation,
     TransformationId, TransformationTrace, Value, Verification, VerificationStatus,
+};
+pub use fusion::{
+    CalibratedEvidenceFusion, DependencyKind, EvidenceAssessment, EvidenceQuality,
+    ExpectedEvidence, FalsificationReport, FusionError, FusionResult, HypothesisScore,
 };
 pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
 pub use identity::{
