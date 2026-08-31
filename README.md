@@ -38,6 +38,15 @@ Raw observations are immutable through the public API: normalization returns a
 new record and cannot replace the captured value. Other engines should write to
 this store rather than maintaining parallel evidence histories.
 
+`CalibratedEvidenceFusion` scores reliability, specificity, rarity,
+discriminative power, source independence, temporal compatibility,
+transformation resistance, provenance quality, and reproducibility on an
+explicit bounded calibration scale. It collapses dependent evidence groups and
+can falsify a leading hypothesis by removing high-base-rate or strongest
+support, checking contradictions, missing expected evidence, and uncertain
+assumptions; it does not claim Bayesian precision without defensible
+probabilities.
+
 ## Requirements
 
 - Rust toolchain **1.98.0** with `clippy` and `rustfmt` — pinned by `rust-toolchain.toml`; `rustup` installs it automatically on first `cargo` invocation in the repo.

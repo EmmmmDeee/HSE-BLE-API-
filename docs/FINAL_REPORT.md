@@ -15,6 +15,8 @@ Android Compose UI → Android BLE/location/map services → generated Kotlin Un
 Rust workspace:
 - `bleradar-core::evidence` — canonical, provenance-preserving evidence records and
   referentially validated claim/transformation traces.
+- `bleradar-core::fusion` — bounded calibrated evidence scoring, dependency
+  collapse, competing-hypothesis fusion, and adversarial falsification.
 - `bleradar-core::geo` — validated coordinates, haversine distance, bearing.
 - `bleradar-core::identity` — canonical MAC handling, randomized/private address classification, conservative identity evidence.
 - `bleradar-core::signal` — deterministic EMA filtering, hot/cold trend, coarse proximity bands, calibrated BLE range estimation.
@@ -37,6 +39,8 @@ Rust workspace:
 10. Expanded regression coverage for identity, mapping, tracking, filtering, proximity and selection state.
 11. Replaced flat ABI-name inventory semantics with a parity-status registry.
 12. Added a generated parity coverage report to make the remaining migration frontier measurable.
+13. Added bounded calibrated evidence fusion with explicit quality dimensions,
+    dependent-source collapse, and adversarial support-removal checks.
 
 ## Functional parity status
 

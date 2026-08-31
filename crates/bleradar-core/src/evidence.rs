@@ -154,9 +154,63 @@ impl From<i64> for EvidenceValue {
     }
 }
 
+impl From<i8> for EvidenceValue {
+    fn from(value: i8) -> Self {
+        Self::Integer(i128::from(value))
+    }
+}
+
+impl From<i16> for EvidenceValue {
+    fn from(value: i16) -> Self {
+        Self::Integer(i128::from(value))
+    }
+}
+
+impl From<i32> for EvidenceValue {
+    fn from(value: i32) -> Self {
+        Self::Integer(i128::from(value))
+    }
+}
+
+impl From<isize> for EvidenceValue {
+    fn from(value: isize) -> Self {
+        Self::Integer(value as i128)
+    }
+}
+
+impl From<u8> for EvidenceValue {
+    fn from(value: u8) -> Self {
+        Self::Integer(i128::from(value))
+    }
+}
+
+impl From<u16> for EvidenceValue {
+    fn from(value: u16) -> Self {
+        Self::Integer(i128::from(value))
+    }
+}
+
+impl From<u32> for EvidenceValue {
+    fn from(value: u32) -> Self {
+        Self::Integer(i128::from(value))
+    }
+}
+
 impl From<u64> for EvidenceValue {
     fn from(value: u64) -> Self {
         Self::Integer(i128::from(value))
+    }
+}
+
+impl From<usize> for EvidenceValue {
+    fn from(value: usize) -> Self {
+        Self::Integer(value as i128)
+    }
+}
+
+impl From<f32> for EvidenceValue {
+    fn from(value: f32) -> Self {
+        Self::Float(f64::from(value))
     }
 }
 
@@ -304,6 +358,19 @@ pub enum ProvenanceError {
         /// Most recent time the observation was seen.
         last_seen: Timestamp,
     },
+    /// A derived record was timestamped before the record it depends on.
+    TemporalViolation {
+        /// Type of the derived record.
+        record: &'static str,
+        /// Identifier of the derived record.
+        record_id: String,
+        /// Identifier of the earlier record it depends on.
+        reference: String,
+        /// Timestamp assigned to the derived record.
+        record_time: Timestamp,
+        /// Timestamp assigned to its dependency.
+        reference_time: Timestamp,
+    },
     /// An identifier is already present in a collection.
     DuplicateId {
         /// Collection containing the duplicate.
@@ -359,6 +426,16 @@ impl fmt::Display for ProvenanceError {
             } => write!(
                 formatter,
                 "observation timeline must satisfy first_seen <= observed_at <= last_seen (got {first_seen} <= {observed_at} <= {last_seen})"
+            ),
+            Self::TemporalViolation {
+                record,
+                record_id,
+                reference,
+                record_time,
+                reference_time,
+            } => write!(
+                formatter,
+                "{record} `{record_id}` at {record_time} precedes dependency `{reference}` at {reference_time}"
             ),
             Self::DuplicateId { collection, id } => {
                 write!(formatter, "duplicate {collection} identifier `{id}`")
@@ -997,6 +1074,7 @@ pub struct Feature {
     source_observation: Option<ObservationId>,
     derived_from: Vec<FeatureId>,
     confidence: Confidence,
+    created_at: Option<Timestamp>,
 }
 
 impl Feature {
@@ -1013,6 +1091,7 @@ impl Feature {
             source_observation: None,
             derived_from: Vec::new(),
             confidence: Confidence::new(0),
+            created_at: None,
         })
     }
 
@@ -1034,6 +1113,13 @@ impl Feature {
     #[must_use]
     pub const fn with_confidence(mut self, confidence: Confidence) -> Self {
         self.confidence = confidence;
+        self
+    }
+
+    /// Records the time at which the feature was extracted or derived.
+    #[must_use]
+    pub const fn created_at(mut self, timestamp: Timestamp) -> Self {
+        self.created_at = Some(timestamp);
         self
     }
 
@@ -1071,6 +1157,12 @@ impl Feature {
     #[must_use]
     pub const fn confidence(&self) -> Confidence {
         self.confidence
+    }
+
+    /// Feature extraction or derivation time, if known.
+    #[must_use]
+    pub const fn created_at_value(&self) -> Option<Timestamp> {
+        self.created_at
     }
 }
 
@@ -2359,6 +2451,21 @@ impl EvidenceStore {
                 "source observation",
                 observation_id,
             )?;
+            if let Some(created_at) = feature.created_at_value() {
+                let observation = self
+                    .observations
+                    .get(observation_id)
+                    .expect("feature observation reference was validated above");
+                if created_at < observation.observed_at() {
+                    return Err(ProvenanceError::TemporalViolation {
+                        record: "feature",
+                        record_id: feature.id().to_owned(),
+                        reference: observation.id().to_owned(),
+                        record_time: created_at,
+                        reference_time: observation.observed_at(),
+                    });
+                }
+            }
         }
         for feature_id in feature.derived_feature_ids() {
             require_ref(
@@ -2368,6 +2475,19 @@ impl EvidenceStore {
                 "derived feature",
                 feature_id,
             )?;
+            if let (Some(created_at), Some(dependency)) =
+                (feature.created_at_value(), self.features.get(feature_id))
+                && let Some(dependency_created_at) = dependency.created_at_value()
+                && created_at < dependency_created_at
+            {
+                return Err(ProvenanceError::TemporalViolation {
+                    record: "feature",
+                    record_id: feature.id().to_owned(),
+                    reference: dependency.id().to_owned(),
+                    record_time: created_at,
+                    reference_time: dependency_created_at,
+                });
+            }
         }
         let id = feature.id().to_owned();
         insert_unique(&mut self.features, "feature", &id, feature)
@@ -2411,11 +2531,13 @@ impl EvidenceStore {
             &id,
             representation,
         )?;
-        self.artifacts
+        let artifact = self
+            .artifacts
             .get_mut(&artifact_id)
-            .expect("artifact reference was validated above")
-            .representation_ids
-            .push(id);
+            .expect("artifact reference was validated above");
+        if !artifact.representation_ids.contains(&id) {
+            artifact.representation_ids.push(id);
+        }
         Ok(())
     }
 
@@ -2556,6 +2678,22 @@ impl EvidenceStore {
         &mut self,
         relationship: Relationship,
     ) -> Result<(), ProvenanceError> {
+        if !self.contains_record(relationship.subject()) {
+            return Err(ProvenanceError::MissingReference {
+                record: "relationship",
+                record_id: relationship.id().to_owned(),
+                field: "subject",
+                reference: relationship.subject().to_owned(),
+            });
+        }
+        if !self.contains_record(relationship.object()) {
+            return Err(ProvenanceError::MissingReference {
+                record: "relationship",
+                record_id: relationship.id().to_owned(),
+                field: "object",
+                reference: relationship.object().to_owned(),
+            });
+        }
         require_ref(
             &self.sources,
             "relationship",
@@ -2734,6 +2872,24 @@ impl EvidenceStore {
         }
     }
 
+    fn contains_record(&self, id: &str) -> bool {
+        self.entities.contains_key(id)
+            || self.artifacts.contains_key(id)
+            || self.observations.contains_key(id)
+            || self.features.contains_key(id)
+            || self.representations.contains_key(id)
+            || self.transformations.contains_key(id)
+            || self.sources.contains_key(id)
+            || self.events.contains_key(id)
+            || self.relationships.contains_key(id)
+            || self.hypotheses.contains_key(id)
+            || self.claims.contains_key(id)
+            || self.evidence.contains_key(id)
+            || self.tests.contains_key(id)
+            || self.actions.contains_key(id)
+            || self.confidence_updates.contains_key(id)
+    }
+
     /// Validates every stored cross-reference and provenance invariant.
     pub fn validate(&self) -> Result<(), ProvenanceError> {
         for observation in self.observations.values() {
@@ -2803,6 +2959,21 @@ impl EvidenceStore {
                     "source observation",
                     observation_id,
                 )?;
+                if let Some(created_at) = feature.created_at_value() {
+                    let observation = self
+                        .observations
+                        .get(observation_id)
+                        .expect("feature observation reference was validated above");
+                    if created_at < observation.observed_at() {
+                        return Err(ProvenanceError::TemporalViolation {
+                            record: "feature",
+                            record_id: feature.id().to_owned(),
+                            reference: observation.id().to_owned(),
+                            record_time: created_at,
+                            reference_time: observation.observed_at(),
+                        });
+                    }
+                }
             }
             for feature_id in feature.derived_feature_ids() {
                 require_ref(
@@ -2812,6 +2983,19 @@ impl EvidenceStore {
                     "derived feature",
                     feature_id,
                 )?;
+                if let (Some(created_at), Some(dependency)) =
+                    (feature.created_at_value(), self.features.get(feature_id))
+                    && let Some(dependency_created_at) = dependency.created_at_value()
+                    && created_at < dependency_created_at
+                {
+                    return Err(ProvenanceError::TemporalViolation {
+                        record: "feature",
+                        record_id: feature.id().to_owned(),
+                        reference: dependency.id().to_owned(),
+                        record_time: created_at,
+                        reference_time: dependency_created_at,
+                    });
+                }
             }
         }
 
@@ -2960,6 +3144,22 @@ impl EvidenceStore {
         }
 
         for relationship in self.relationships.values() {
+            if !self.contains_record(relationship.subject()) {
+                return Err(ProvenanceError::MissingReference {
+                    record: "relationship",
+                    record_id: relationship.id().to_owned(),
+                    field: "subject",
+                    reference: relationship.subject().to_owned(),
+                });
+            }
+            if !self.contains_record(relationship.object()) {
+                return Err(ProvenanceError::MissingReference {
+                    record: "relationship",
+                    record_id: relationship.id().to_owned(),
+                    field: "object",
+                    reference: relationship.object().to_owned(),
+                });
+            }
             require_ref(
                 &self.sources,
                 "relationship",
@@ -3187,10 +3387,43 @@ impl EvidenceStore {
         self.observations.get(id)
     }
 
+    /// Returns observations whose source identifier matches `source_id`.
+    #[must_use]
+    pub fn observations_by_source(&self, source_id: &str) -> Vec<&Observation> {
+        self.observations
+            .values()
+            .filter(|observation| observation.source() == source_id)
+            .collect()
+    }
+
+    /// Returns observations whose seen interval overlaps an inclusive window.
+    #[must_use]
+    pub fn observations_in_window(
+        &self,
+        first_seen: Timestamp,
+        last_seen: Timestamp,
+    ) -> Vec<&Observation> {
+        self.observations
+            .values()
+            .filter(|observation| {
+                observation.last_seen() >= first_seen && observation.first_seen() <= last_seen
+            })
+            .collect()
+    }
+
     /// Returns the feature with the given identifier.
     #[must_use]
     pub fn feature(&self, id: &str) -> Option<&Feature> {
         self.features.get(id)
+    }
+
+    /// Returns features directly extracted from an observation.
+    #[must_use]
+    pub fn features_from_observation(&self, observation_id: &str) -> Vec<&Feature> {
+        self.features
+            .values()
+            .filter(|feature| feature.source_observation() == Some(observation_id))
+            .collect()
     }
 
     /// Returns the representation with the given identifier.

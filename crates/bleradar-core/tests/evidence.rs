@@ -77,6 +77,33 @@ fn observation_timeline_is_ordered_and_extendable() {
 }
 
 #[test]
+fn feature_temporal_provenance_does_not_precede_observation() {
+    let source = source();
+    let observation = observation(&source);
+    let too_early = bleradar_core::Feature::new("feature-early", "digest", "raw")
+        .unwrap()
+        .from_observation(observation.id())
+        .created_at(99);
+    let valid = bleradar_core::Feature::new("feature-valid", "digest", "raw")
+        .unwrap()
+        .from_observation(observation.id())
+        .created_at(100);
+    let mut store = EvidenceStore::new();
+    store.add_source(source).unwrap();
+    store.add_observation(observation).unwrap();
+
+    assert!(matches!(
+        store.add_feature(too_early),
+        Err(ProvenanceError::TemporalViolation { .. })
+    ));
+    store.add_feature(valid).unwrap();
+    assert_eq!(store.features_from_observation("observation-1").len(), 1);
+    assert_eq!(store.observations_by_source("source-1").len(), 1);
+    assert_eq!(store.observations_in_window(100, 100).len(), 1);
+    assert_eq!(store.observations_in_window(101, 200).len(), 0);
+}
+
+#[test]
 fn claim_trace_reaches_the_authoritative_source() {
     let source = source();
     let observation = observation(&source);

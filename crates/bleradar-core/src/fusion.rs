@@ -637,13 +637,11 @@ impl CalibratedEvidenceFusion {
     }
 
     /// Read-only registered assessments.
-    #[must_use]
     pub fn assessments(&self) -> impl Iterator<Item = &EvidenceAssessment> {
         self.assessments.values()
     }
 
     /// Read-only expected-evidence requirements.
-    #[must_use]
     pub fn expected_evidence(&self) -> impl Iterator<Item = &ExpectedEvidence> {
         self.expected.values()
     }
