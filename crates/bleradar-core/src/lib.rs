@@ -9,6 +9,7 @@ mod evidence;
 mod fusion;
 mod geo;
 mod identity;
+mod osint;
 mod signal;
 mod tracking;
 mod verification;
@@ -38,6 +39,13 @@ pub use fusion::{
 pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
 pub use identity::{
     AddressKind, DeviceIdentity, IdentityEvidence, canonical_mac, is_locally_administered,
+};
+pub use osint::{
+    AdaptiveOsintSearchEngine, AdaptiveSearchFactors, ExecutionFeedbackAdaptiveOsintSearchEngine,
+    ExecutionFeedbackAdaptiveSearchEngine, OsintSearchError, SearchError, SearchExecution,
+    SearchFamilyStatistics, SearchFeedback, SearchFinding, SearchLimits, SearchOutcome,
+    SearchPhase, SearchPivot, SearchPivotSeed, SearchPivotState, SearchPriority,
+    SearchPriorityFactors, SearchRanking, SearchRepresentation,
 };
 pub use signal::{
     FilterError, ProximityBand, RssiEma, SignalTrend, ble_distance_m, proximity_label, signal_trend,
