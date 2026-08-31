@@ -13,6 +13,8 @@ Android Compose UI → Android BLE/location/map services → generated Kotlin Un
 ## Enhanced reconstructed architecture
 
 Rust workspace:
+- `bleradar-core::evidence` — canonical, provenance-preserving evidence records and
+  referentially validated claim/transformation traces.
 - `bleradar-core::geo` — validated coordinates, haversine distance, bearing.
 - `bleradar-core::identity` — canonical MAC handling, randomized/private address classification, conservative identity evidence.
 - `bleradar-core::signal` — deterministic EMA filtering, hot/cold trend, coarse proximity bands, calibrated BLE range estimation.

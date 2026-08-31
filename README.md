@@ -7,6 +7,8 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 ## Repository layout
 
 - `crates/bleradar-core` — safe Rust geometry, identity, RSSI, proximity and device-tracking domain.
+- `crates/bleradar-core::evidence` — canonical observations, provenance records, representations,
+  transformations, claims, and an authoritative evidence store.
 - `crates/bleradar-compat` — semantic parity registry for high-value observed native contracts.
 - `tools/` — binary inventory, parity-report generation, and the dependency-policy and oracle-integrity gates.
 - `docs/` — audit, issue/exception ledgers, parity frontier, verification record, and the autonomous-session operating documents.
@@ -21,6 +23,20 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 The core supports selected-device lock state, ordered observation histories, randomized-address classification, filtered RSSI/hot-cold trend, calibrated BLE distance estimates, coarse proximity bands, GPS uncertainty, confidence-scored observed map points, and a conservative weighted spatial-region estimate (spherical centroid, correct across the ±180° antimeridian).
 
 `Observed`, `Inferred`, and `Predicted` are separate evidence classes by design.
+
+## Canonical evidence and provenance
+
+The evidence core keeps raw observations separate from normalized values and
+records `source`, `source_type`, `retrieval_method`, `observed_at`, `first_seen`,
+`last_seen`, and `derivation_history` for every observation. `EvidenceStore`
+rejects missing references and exposes trace APIs for:
+
+- `claim → hypothesis → evidence → observation → source`;
+- `input representation → transformation → output representation → features → verification`.
+
+Raw observations are immutable through the public API: normalization returns a
+new record and cannot replace the captured value. Other engines should write to
+this store rather than maintaining parallel evidence histories.
 
 ## Requirements
 

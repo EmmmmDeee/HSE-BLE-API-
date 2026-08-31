@@ -4,11 +4,23 @@
 //! Functions that cannot be proven from the supplied APK remain compatibility
 //! gaps rather than guessed legacy behavior.
 
+mod evidence;
 mod geo;
 mod identity;
 mod signal;
 mod tracking;
 
+pub use evidence::{
+    Action, ActionId, ActionStatus, ActionType, Artifact, ArtifactId, ArtifactType,
+    CanonicalEvidence, Claim, ClaimId, ClaimTrace, ConfidenceTarget, ConfidenceUpdate,
+    ConfidenceUpdateId, EdgeType, Entity, EntityId, EntityKind, EntityType, Event, EventId,
+    EventType, Evidence, EvidenceId, EvidenceRole, EvidenceStore, EvidenceTrace, EvidenceValue,
+    Feature, FeatureId, Hypothesis, HypothesisId, HypothesisKind, Observation, ObservationId,
+    ObservationTimeline, ProvenanceCore, ProvenanceError, RecordId, Relationship, RelationshipId,
+    RelationshipProvenance, Representation, RepresentationId, RepresentationType, RetrievalMethod,
+    Source, SourceId, SourceType, Test, TestId, TestStatus, TestType, Timestamp, Transformation,
+    TransformationId, TransformationTrace, Value, Verification, VerificationStatus,
+};
 pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
 pub use identity::{
     AddressKind, DeviceIdentity, IdentityEvidence, canonical_mac, is_locally_administered,
