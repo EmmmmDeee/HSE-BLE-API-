@@ -9,6 +9,7 @@ mod evidence;
 mod fusion;
 mod geo;
 mod identity;
+mod infrastructure;
 mod osint;
 mod signal;
 mod tracking;
@@ -39,6 +40,15 @@ pub use fusion::{
 pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
 pub use identity::{
     AddressKind, DeviceIdentity, IdentityEvidence, canonical_mac, is_locally_administered,
+};
+pub use infrastructure::{
+    CompetingExplanation, ControlAssessment, CorrelationEdge, CorrelationFactors,
+    CorrelationFalsification, CorrelationRanking, CorrelationReport, InfrastructureCorrelationEdge,
+    InfrastructureCorrelationEngine, InfrastructureCorrelationReport, InfrastructureError,
+    InfrastructureExplanation, InfrastructureFactors, InfrastructureFalsificationReport,
+    InfrastructureKind, InfrastructureLimits, InfrastructureObservation, InfrastructurePhase,
+    InfrastructureRecord, TemporalInfrastructureCorrelationEngine, TemporalInterval,
+    TemporalMetamorphicInfrastructureCorrelationEngine, TemporalRelation,
 };
 pub use osint::{
     AdaptiveOsintSearchEngine, AdaptiveSearchFactors, ExecutionFeedbackAdaptiveOsintSearchEngine,

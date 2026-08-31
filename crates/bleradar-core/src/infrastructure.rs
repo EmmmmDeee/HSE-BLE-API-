@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::{
-    Confidence, Entity, EntityType, EdgeType, EvidenceStore, EvidenceValue, Observation,
+    Confidence, EdgeType, Entity, EntityType, EvidenceStore, EvidenceValue, Observation,
     ObservationTimeline, ProvenanceError, Relationship, RelationshipProvenance, RetrievalMethod,
     Source, SourceType, Timestamp,
 };
@@ -90,10 +90,7 @@ impl InfrastructureKind {
     pub const fn is_high_base_rate(self) -> bool {
         matches!(
             self,
-            Self::IpAddress
-                | Self::Asn
-                | Self::HostingProvider
-                | Self::HttpCharacteristic
+            Self::IpAddress | Self::Asn | Self::HostingProvider | Self::HttpCharacteristic
         )
     }
 }
@@ -446,10 +443,7 @@ impl InfrastructureObservation {
 
     /// Returns a copy with an additive normalized value.
     #[must_use]
-    pub fn with_normalized_value(
-        &self,
-        normalized_value: impl Into<EvidenceValue>,
-    ) -> Self {
+    pub fn with_normalized_value(&self, normalized_value: impl Into<EvidenceValue>) -> Self {
         let mut copy = self.clone();
         copy.normalized_value = Some(normalized_value.into());
         copy
@@ -841,7 +835,12 @@ impl CorrelationRanking {
     pub fn supporting_observation_ids(&self) -> Vec<String> {
         self.supporting_pairs
             .iter()
-            .flat_map(|pair| [pair.left_observation.clone(), pair.right_observation.clone()])
+            .flat_map(|pair| {
+                [
+                    pair.left_observation.clone(),
+                    pair.right_observation.clone(),
+                ]
+            })
             .collect()
     }
 }
@@ -1250,13 +1249,22 @@ impl fmt::Display for InfrastructureError {
                 write!(formatter, "{resource} limit of {limit} was reached")
             }
             Self::DuplicateObservation { observation_id } => {
-                write!(formatter, "duplicate infrastructure observation `{observation_id}`")
+                write!(
+                    formatter,
+                    "duplicate infrastructure observation `{observation_id}`"
+                )
             }
             Self::MissingNode { node_id } => {
-                write!(formatter, "infrastructure node `{node_id}` has no observations")
+                write!(
+                    formatter,
+                    "infrastructure node `{node_id}` has no observations"
+                )
             }
             Self::SameNode { node_id } => {
-                write!(formatter, "cannot correlate infrastructure node `{node_id}` with itself")
+                write!(
+                    formatter,
+                    "cannot correlate infrastructure node `{node_id}` with itself"
+                )
             }
             Self::NoComparableObservations {
                 left_node,
@@ -1266,7 +1274,10 @@ impl fmt::Display for InfrastructureError {
                 "no comparable infrastructure observations for `{left_node}` and `{right_node}`"
             ),
             Self::DuplicateCorrelation { correlation_id } => {
-                write!(formatter, "duplicate infrastructure correlation `{correlation_id}`")
+                write!(
+                    formatter,
+                    "duplicate infrastructure correlation `{correlation_id}`"
+                )
             }
             Self::SourceConflict { source_id } => {
                 write!(formatter, "source `{source_id}` has conflicting metadata")
@@ -1325,7 +1336,6 @@ struct ComparablePair {
     left: InfrastructureObservation,
     right: InfrastructureObservation,
     temporal_relation: TemporalRelation,
-    temporal_score: u8,
     base_weight: u16,
 }
 
@@ -1519,9 +1529,7 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
             return Err(InfrastructureError::SameNode { node_id: left_node });
         }
         if !self.node_observations.contains_key(&left_node) {
-            return Err(InfrastructureError::MissingNode {
-                node_id: left_node,
-            });
+            return Err(InfrastructureError::MissingNode { node_id: left_node });
         }
         if !self.node_observations.contains_key(&right_node) {
             return Err(InfrastructureError::MissingNode {
@@ -1549,13 +1557,12 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         }
         let supports = self.supports(&pairs);
         let rankings = rank_supports(&supports, ScoreMode::Baseline);
-        let baseline = rankings
-            .first()
-            .cloned()
-            .ok_or_else(|| InfrastructureError::NoComparableObservations {
+        let baseline = rankings.first().cloned().ok_or_else(|| {
+            InfrastructureError::NoComparableObservations {
                 left_node: left_node.clone(),
                 right_node: right_node.clone(),
-            })?;
+            }
+        })?;
         if baseline.score == 0 {
             return Err(InfrastructureError::NoComparableObservations {
                 left_node,
@@ -1690,13 +1697,20 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
                 if !values_match(&left, right) {
                     continue;
                 }
-                let temporal_relation =
-                    temporal_relation(left.timeline(), right.timeline(), self.limits.maximum_temporal_gap);
-                let temporal_score = temporal_score(temporal_relation, left.timeline(), right.timeline(), self.limits.maximum_temporal_gap);
-                let factor_weight =
-                    (u16::from(left.factors().calibrated_weight())
-                        + u16::from(right.factors().calibrated_weight()))
-                        / 2;
+                let temporal_relation = temporal_relation(
+                    left.timeline(),
+                    right.timeline(),
+                    self.limits.maximum_temporal_gap,
+                );
+                let temporal_score = temporal_score(
+                    temporal_relation,
+                    left.timeline(),
+                    right.timeline(),
+                    self.limits.maximum_temporal_gap,
+                );
+                let factor_weight = (u16::from(left.factors().calibrated_weight())
+                    + u16::from(right.factors().calibrated_weight()))
+                    / 2;
                 let mut base_weight = (factor_weight + u16::from(temporal_score)) / 2;
                 if left.is_high_base_rate() || right.is_high_base_rate() {
                     base_weight /= 2;
@@ -1705,10 +1719,9 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
                     base_weight /= 2;
                 }
                 pairs.push(ComparablePair {
-                    left,
+                    left: left.clone(),
                     right: right.clone(),
                     temporal_relation,
-                    temporal_score,
                     base_weight,
                 });
             }
@@ -1726,9 +1739,8 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         let mut supports = Vec::new();
         for pair in pairs {
             let explanations = explanations_for(&pair.left, &pair.right);
-            let group = dependency_group(&pair.left).to_owned()
-                + "|"
-                + dependency_group(&pair.right);
+            let group =
+                dependency_group(&pair.left).to_owned() + "|" + dependency_group(&pair.right);
             let uncertainty = pair
                 .left
                 .factors()
@@ -1749,8 +1761,7 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
                     group: group.clone(),
                     weight,
                     temporal_relation: pair.temporal_relation,
-                    high_base_rate: pair.left.is_high_base_rate()
-                        || pair.right.is_high_base_rate(),
+                    high_base_rate: pair.left.is_high_base_rate() || pair.right.is_high_base_rate(),
                     uncertainty,
                 });
             }
@@ -1820,15 +1831,9 @@ fn explanations_for(
             explanations.insert(InfrastructureExplanation::CommonRegistrar);
             explanations.insert(InfrastructureExplanation::DirectTechnicalRelationship);
         }
-        (
-            InfrastructureKind::IpAddress,
-            InfrastructureKind::IpAddress,
-        )
+        (InfrastructureKind::IpAddress, InfrastructureKind::IpAddress)
         | (InfrastructureKind::Asn, InfrastructureKind::Asn)
-        | (
-            InfrastructureKind::HostingProvider,
-            InfrastructureKind::HostingProvider,
-        ) => {
+        | (InfrastructureKind::HostingProvider, InfrastructureKind::HostingProvider) => {
             explanations.insert(InfrastructureExplanation::CommonHost);
             explanations.insert(InfrastructureExplanation::CommonCdn);
             explanations.insert(InfrastructureExplanation::SharedThirdPartyService);
@@ -1837,23 +1842,14 @@ fn explanations_for(
             explanations.insert(InfrastructureExplanation::DirectTechnicalRelationship);
             explanations.insert(InfrastructureExplanation::SharedThirdPartyService);
         }
-        (
-            InfrastructureKind::HttpCharacteristic,
-            InfrastructureKind::HttpCharacteristic,
-        )
-        | (
-            InfrastructureKind::ApplicationStructure,
-            InfrastructureKind::ApplicationStructure,
-        ) => {
+        (InfrastructureKind::HttpCharacteristic, InfrastructureKind::HttpCharacteristic)
+        | (InfrastructureKind::ApplicationStructure, InfrastructureKind::ApplicationStructure) => {
             explanations.insert(InfrastructureExplanation::CommonCms);
             explanations.insert(InfrastructureExplanation::CommonTemplate);
             explanations.insert(InfrastructureExplanation::SharedThirdPartyService);
         }
         (InfrastructureKind::PublicAsset, InfrastructureKind::PublicAsset)
-        | (
-            InfrastructureKind::PublicIdentifier,
-            InfrastructureKind::PublicIdentifier,
-        )
+        | (InfrastructureKind::PublicIdentifier, InfrastructureKind::PublicIdentifier)
         | (InfrastructureKind::ArchivedState, InfrastructureKind::ArchivedState) => {
             explanations.insert(InfrastructureExplanation::DirectTechnicalRelationship);
             explanations.insert(InfrastructureExplanation::CommonTemplate);
@@ -1873,15 +1869,11 @@ fn explanations_for(
         )
         | (
             InfrastructureKind::IpAddress,
-            InfrastructureKind::Domain
-            | InfrastructureKind::Dns
-            | InfrastructureKind::Certificate,
+            InfrastructureKind::Domain | InfrastructureKind::Dns | InfrastructureKind::Certificate,
         )
         | (
             InfrastructureKind::Certificate,
-            InfrastructureKind::Domain
-            | InfrastructureKind::Dns
-            | InfrastructureKind::IpAddress,
+            InfrastructureKind::Domain | InfrastructureKind::Dns | InfrastructureKind::IpAddress,
         )
         | (
             InfrastructureKind::HostingProvider,
@@ -1907,9 +1899,27 @@ fn explanations_for(
 fn dependency_group(observation: &InfrastructureObservation) -> &str {
     observation
         .dependency_group()
-        .or_else(|| observation.source().metadata().get("dependency_group").map(String::as_str))
-        .or_else(|| observation.source().metadata().get("provider").map(String::as_str))
-        .or_else(|| observation.source().metadata().get("dataset").map(String::as_str))
+        .or_else(|| {
+            observation
+                .source()
+                .metadata()
+                .get("dependency_group")
+                .map(String::as_str)
+        })
+        .or_else(|| {
+            observation
+                .source()
+                .metadata()
+                .get("provider")
+                .map(String::as_str)
+        })
+        .or_else(|| {
+            observation
+                .source()
+                .metadata()
+                .get("dataset")
+                .map(String::as_str)
+        })
         .unwrap_or_else(|| observation.source_id())
 }
 
@@ -1952,7 +1962,10 @@ fn rank_explanation(
 ) -> CorrelationRanking {
     let mut retained: BTreeMap<String, (&Support, u16)> = BTreeMap::new();
     let mut collapsed = Vec::new();
-    for support in supports.iter().filter(|support| support.explanation == explanation) {
+    for support in supports
+        .iter()
+        .filter(|support| support.explanation == explanation)
+    {
         let weight = active_weight(support, mode);
         if weight == 0 {
             continue;
@@ -2072,16 +2085,14 @@ fn build_falsification(
             .max_by_key(|support| active_weight(support, ScoreMode::Baseline))
             .map(|support| to_pair(support, active_weight(support, ScoreMode::Baseline)))
     });
-    let missing_expected_evidence = missing_expected_evidence(baseline, supports);
+    let missing_expected_evidence = missing_expected_evidence(baseline);
     let survives = baseline.score > 0
         && without_high_base_rate.score > 0
         && without_strongest_support.score > 0
         && perturbed_uncertainty.score > 0
-        && strongest_alternative.is_none_or(|alternative| baseline.score >= score_for(
-            supports,
-            alternative,
-            ScoreMode::Baseline,
-        ));
+        && strongest_alternative.is_none_or(|alternative| {
+            baseline.score >= score_for(supports, alternative, ScoreMode::Baseline)
+        });
     CorrelationFalsification {
         leading_explanation: baseline.explanation,
         strongest_alternative,
@@ -2119,27 +2130,14 @@ fn empty_ranking(explanation: InfrastructureExplanation) -> CorrelationRanking {
     }
 }
 
-fn missing_expected_evidence(
-    baseline: &CorrelationRanking,
-    supports: &[Support],
-) -> Vec<InfrastructureKind> {
-    let observed: BTreeSet<_> = baseline
-        .supporting_observation_ids()
-        .iter()
-        .flat_map(|id| {
-            supports
-                .iter()
-                .filter(move |support| {
-                    support.left_observation == *id || support.right_observation == *id
-                })
-                .flat_map(|_| std::iter::empty::<InfrastructureKind>())
-        })
-        .collect();
-    let _ = observed;
+fn missing_expected_evidence(baseline: &CorrelationRanking) -> Vec<InfrastructureKind> {
     match baseline.explanation {
         InfrastructureExplanation::PossibleCommonAdministration => {
             if baseline.independent_support < 2 {
-                vec![InfrastructureKind::Certificate, InfrastructureKind::ArchivedState]
+                vec![
+                    InfrastructureKind::Certificate,
+                    InfrastructureKind::ArchivedState,
+                ]
             } else {
                 Vec::new()
             }
@@ -2170,7 +2168,12 @@ fn control_assessment(explanation: InfrastructureExplanation) -> ControlAssessme
         InfrastructureExplanation::DirectTechnicalRelationship => {
             ControlAssessment::DirectTechnicalRelationship
         }
-        explanation if explanation.is_shared_infrastructure() => {
+        InfrastructureExplanation::CommonCdn
+        | InfrastructureExplanation::CommonHost
+        | InfrastructureExplanation::CommonCms
+        | InfrastructureExplanation::CommonRegistrar
+        | InfrastructureExplanation::CommonTemplate
+        | InfrastructureExplanation::SharedThirdPartyService => {
             ControlAssessment::SharedInfrastructure
         }
         InfrastructureExplanation::Unknown => ControlAssessment::Unknown,
@@ -2178,8 +2181,7 @@ fn control_assessment(explanation: InfrastructureExplanation) -> ControlAssessme
 }
 
 /// Alias for the architecture's shorter engine name.
-pub type InfrastructureCorrelationEngine =
-    TemporalMetamorphicInfrastructureCorrelationEngine;
+pub type InfrastructureCorrelationEngine = TemporalMetamorphicInfrastructureCorrelationEngine;
 
 /// Alias emphasizing temporal correlation.
 pub type TemporalInfrastructureCorrelationEngine =
@@ -2201,5 +2203,4 @@ pub type CorrelationEdge = InfrastructureCorrelationEdge;
 pub type CorrelationReport = InfrastructureCorrelationReport;
 
 /// Alias for adversarial correlation falsification.
-pub type FalsificationReport = CorrelationFalsification;
-
+pub type InfrastructureFalsificationReport = CorrelationFalsification;
