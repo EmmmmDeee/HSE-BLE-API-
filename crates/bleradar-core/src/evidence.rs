@@ -189,7 +189,7 @@ pub struct EvidenceQuality {
 impl EvidenceQuality {
     /// Returns the conservative mean quality score, clamping malformed inputs to 100.
     #[must_use]
-    pub const fn score(self) -> u8 {
+    pub fn score(self) -> u8 {
         let total = self.reliability.min(100) as u16
             + self.specificity.min(100) as u16
             + self.rarity.min(100) as u16
@@ -235,7 +235,9 @@ pub fn fuse_evidence(evidence: &[Evidence]) -> FusionResult {
     let mut unique: Vec<&Evidence> = Vec::new();
     let mut collapsed_dependency_keys = Vec::new();
     for item in evidence {
-        if let Some(existing) = unique.iter_mut().find(|known| known.dependency_key == item.dependency_key)
+        if let Some(existing) = unique
+            .iter_mut()
+            .find(|known| known.dependency_key == item.dependency_key)
         {
             if item.quality.score() > existing.quality.score() {
                 *existing = item;

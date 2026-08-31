@@ -29,9 +29,15 @@ fn normalization_preserves_raw_value_and_chronology() {
         .with_seen_at(30);
 
     assert_eq!(observation.raw_value, " 36-32-62-36-31-33 ");
-    assert_eq!(observation.normalized_value.as_deref(), Some("36:32:62:36:31:33"));
+    assert_eq!(
+        observation.normalized_value.as_deref(),
+        Some("36:32:62:36:31:33")
+    );
     assert_eq!(observation.derivation_history, ["canonical-mac-v1"]);
-    assert_eq!((observation.first_seen_ms, observation.last_seen_ms), (10, 30));
+    assert_eq!(
+        (observation.first_seen_ms, observation.last_seen_ms),
+        (10, 30)
+    );
 }
 
 #[test]
