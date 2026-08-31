@@ -38,6 +38,14 @@ Raw observations are immutable through the public API: normalization returns a
 new record and cannot replace the captured value. Other engines should write to
 this store rather than maintaining parallel evidence histories.
 
+`VerificationEngine` keeps required semantics separate from implementation and
+supports metamorphic relations for invariance, idempotence, commutativity,
+monotonicity, reversibility, round trips, partition recombination,
+normalization, and permutation. It compares observable outputs, state, side
+effects, errors, exit codes, ordering, concurrency, restart, recovery, and
+contractual performance; failing inputs are minimized and classified, while
+family yield, repairs, and regression locks remain explicit.
+
 `CalibratedEvidenceFusion` scores reliability, specificity, rarity,
 discriminative power, source independence, temporal compatibility,
 transformation resistance, provenance quality, and reproducibility on an

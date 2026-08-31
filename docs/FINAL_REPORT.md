@@ -17,6 +17,9 @@ Rust workspace:
   referentially validated claim/transformation traces.
 - `bleradar-core::fusion` — bounded calibrated evidence scoring, dependency
   collapse, competing-hypothesis fusion, and adversarial falsification.
+- `bleradar-core::verification` — required-semantics contracts, metamorphic
+  relations, baseline/candidate differential comparison, failure minimization,
+  repair records, regression locks, and family-yield feedback.
 - `bleradar-core::geo` — validated coordinates, haversine distance, bearing.
 - `bleradar-core::identity` — canonical MAC handling, randomized/private address classification, conservative identity evidence.
 - `bleradar-core::signal` — deterministic EMA filtering, hot/cold trend, coarse proximity bands, calibrated BLE range estimation.
@@ -41,6 +44,9 @@ Rust workspace:
 12. Added a generated parity coverage report to make the remaining migration frontier measurable.
 13. Added bounded calibrated evidence fusion with explicit quality dimensions,
     dependent-source collapse, and adversarial support-removal checks.
+14. Added metamorphic and differential verification with observable-surface
+    comparison, failure minimization, explicit repair/regression state, and
+    transformation-family feedback.
 
 ## Functional parity status
 

@@ -10,6 +10,7 @@ mod geo;
 mod identity;
 mod signal;
 mod tracking;
+mod verification;
 
 pub use evidence::{
     Action, ActionId, ActionStatus, ActionType, Artifact, ArtifactId, ArtifactType,
@@ -36,6 +37,12 @@ pub use signal::{
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, MapPoint, SelectedDevice,
     SpatialEstimate, TrackError,
+};
+pub use verification::{
+    DifferentialCase, DifferentialReport, DifferentialViolation, ExecutionOutcome, FailureCause,
+    FamilyStatistics, MetamorphicRelation, MetamorphicTest, RegressionLock, RepairRecord,
+    RequiredSemantics, VerificationEngine, VerificationError, VerificationReport,
+    VerificationSurface, VerificationViolation,
 };
 
 /// 2.4/5 GHz Wi-Fi channel to center frequency in MHz where defined.
