@@ -7,6 +7,16 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 ## Repository layout
 
 - `crates/bleradar-core` — safe Rust geometry, identity, RSSI, proximity and device-tracking domain.
+- `crates/bleradar-core::evidence` — canonical observations, provenance records, representations,
+  transformations, claims, and an authoritative evidence store.
+- `crates/bleradar-core::advancement` — evaluation-gated metamorphic software
+  advancement with formula-based ranking and explicit integration state.
+- `crates/bleradar-core::osint` — execution-feedback adaptive OSINT search with
+  representation-aware pivots, provenance-preserving findings, and canonical
+  retrieval actions.
+- `crates/bleradar-core::infrastructure` — temporal metamorphic infrastructure
+  correlation across domains, DNS, addresses, certificates, hosting, HTTP,
+  public assets, application structure, and archived states.
 - `crates/bleradar-compat` — semantic parity registry for high-value observed native contracts.
 - `tools/` — binary inventory, parity-report generation, and the dependency-policy and oracle-integrity gates.
 - `docs/` — audit, issue/exception ledgers, parity frontier, verification record, and the autonomous-session operating documents.
@@ -21,6 +31,78 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 The core supports selected-device lock state, ordered observation histories, randomized-address classification, filtered RSSI/hot-cold trend, calibrated BLE distance estimates, coarse proximity bands, GPS uncertainty, confidence-scored observed map points, and a conservative weighted spatial-region estimate (spherical centroid, correct across the ±180° antimeridian).
 
 `Observed`, `Inferred`, and `Predicted` are separate evidence classes by design.
+
+## Canonical evidence and provenance
+
+The evidence core keeps raw observations separate from normalized values and
+records `source`, `source_type`, `retrieval_method`, `observed_at`, `first_seen`,
+`last_seen`, and `derivation_history` for every observation. `EvidenceStore`
+rejects missing references and exposes trace APIs for:
+
+- `claim → hypothesis → evidence → observation → source`;
+- `input representation → transformation → output representation → features → verification`.
+
+Raw observations are immutable through the public API: normalization returns a
+new record and cannot replace the captured value. Other engines should write to
+this store rather than maintaining parallel evidence histories.
+
+`VerificationEngine` keeps required semantics separate from implementation and
+supports metamorphic relations for invariance, idempotence, commutativity,
+monotonicity, reversibility, round trips, partition recombination,
+normalization, and permutation. It compares observable outputs, state, side
+effects, errors, exit codes, ordering, concurrency, restart, recovery, and
+contractual performance; failing inputs are minimized and classified, while
+family yield, repairs, and regression locks remain explicit. Reports can be
+persisted back into the canonical store as provenance-linked metamorphic test
+records, and missing contractual measurements remain inconclusive rather than
+being treated as proof.
+
+`MetamorphicSoftwareAdvancementEngine` ranks proposed changes by expected net
+benefit × correctness confidence × reachability × reversibility, divided by
+implementation cost × regression risk. It accepts a candidate only after
+baseline/candidate verification, differential equivalence, measurable
+improvement, explained-regression review, falsification resistance, and
+reproducibility all pass; integration and ranking recomputation remain explicit.
+
+`CalibratedEvidenceFusion` scores reliability, specificity, rarity,
+discriminative power, source independence, temporal compatibility,
+transformation resistance, provenance quality, and reproducibility on an
+explicit bounded calibration scale. It collapses dependent evidence groups and
+can falsify a leading hypothesis by removing high-base-rate or strongest
+support, checking contradictions, missing expected evidence, and uncertain
+assumptions; it does not claim Bayesian precision without defensible
+probabilities.
+
+`ExecutionFeedbackAdaptiveOsintSearchEngine` treats search as an executable
+frontier rather than a fixed list of expansions. It supports exact, normalized,
+alias, historical, semantic, structural, temporal, relational, technical,
+provenance, and graph-neighbor representations. Each execution records its
+query, observed feedback, classification, adaptive family statistics, generated
+or suppressed pivots, and complete control-loop phases; useful families receive
+more ranking pressure while repeated or unproductive families are penalized.
+Raw queries and source values remain separate from normalized forms, and
+source-backed findings plus retrieval actions are persisted transactionally in
+`EvidenceStore`.
+
+`TemporalMetamorphicInfrastructureCorrelationEngine` treats infrastructure
+relationships as competing explanations rather than proof of common control.
+It preserves raw and normalized values, source metadata, dependency groups, and
+first/last-seen intervals for eleven infrastructure observation families.
+Correlation rankings down-weight common CDN, hosting, ASN, and HTTP signals,
+collapse copied/provider-dependent support, reward rare features, independent
+sources, and temporal continuity, and run adversarial passes before persisting
+a provenance-linked relationship edge.
+
+`WebsiteLineageEcosystemAnalysisEngine` extracts normalized text, distinctive
+phrases, HTML structure, public assets, scripts, styles, identifiers, contacts,
+certificates, links, application characteristics, and archived states while
+retaining each raw capture and its source and temporal interval. It compares
+websites through competing coincidence, platform, template, reuse,
+development, and operational explanations; collapses provider-dependent
+support; and applies bounded calibration, temporal alignment, and
+support-removal falsification before persisting a canonical lineage edge.
+Website similarity can yield a possible common-operator assessment, but this
+engine never treats similarity alone as proof of common operation.
 
 ## Requirements
 
