@@ -4,6 +4,7 @@
 //! Functions that cannot be proven from the supplied APK remain compatibility
 //! gaps rather than guessed legacy behavior.
 
+mod advancement;
 mod evidence;
 mod fusion;
 mod geo;
@@ -12,6 +13,13 @@ mod signal;
 mod tracking;
 mod verification;
 
+pub use advancement::{
+    AdvancementDecision, AdvancementError, AdvancementExecution, AdvancementFactors,
+    AdvancementPhase, AdvancementPriority, AdvancementProposal, AdvancementRanking,
+    AdvancementRejection, AdvancementRun, AdvancementState, BenchmarkMetric, BenchmarkReport,
+    FalsificationCheck, FalsificationFinding, FalsificationResult, FalsificationStatus,
+    MetamorphicSoftwareAdvancementEngine, MetricDirection, SoftwareAdvancementEngine,
+};
 pub use evidence::{
     Action, ActionId, ActionStatus, ActionType, Artifact, ArtifactId, ArtifactType,
     CanonicalEvidence, Claim, ClaimId, ClaimTrace, ConfidenceTarget, ConfidenceUpdate,

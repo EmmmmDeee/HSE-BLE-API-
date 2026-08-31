@@ -15,6 +15,9 @@ Android Compose UI → Android BLE/location/map services → generated Kotlin Un
 Rust workspace:
 - `bleradar-core::evidence` — canonical, provenance-preserving evidence records and
   referentially validated claim/transformation traces.
+- `bleradar-core::advancement` — evaluation-gated metamorphic software
+  advancement with explicit ranking factors, benchmark gates, and integration
+  state.
 - `bleradar-core::fusion` — bounded calibrated evidence scoring, dependency
   collapse, competing-hypothesis fusion, and adversarial falsification.
 - `bleradar-core::verification` — required-semantics contracts, metamorphic
@@ -47,6 +50,10 @@ Rust workspace:
 14. Added metamorphic and differential verification with observable-surface
     comparison, failure minimization, explicit repair/regression state, and
     transformation-family feedback.
+15. Added evaluation-gated software advancement that ranks changes by explicit
+    benefit/confidence/reachability/reversibility factors and rejects candidates
+    without verified semantics, measurable improvement, falsification resistance,
+    reproducibility, or explained regression behavior.
 
 ## Functional parity status
 

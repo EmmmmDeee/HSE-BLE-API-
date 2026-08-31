@@ -9,6 +9,8 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 - `crates/bleradar-core` — safe Rust geometry, identity, RSSI, proximity and device-tracking domain.
 - `crates/bleradar-core::evidence` — canonical observations, provenance records, representations,
   transformations, claims, and an authoritative evidence store.
+- `crates/bleradar-core::advancement` — evaluation-gated metamorphic software
+  advancement with formula-based ranking and explicit integration state.
 - `crates/bleradar-compat` — semantic parity registry for high-value observed native contracts.
 - `tools/` — binary inventory, parity-report generation, and the dependency-policy and oracle-integrity gates.
 - `docs/` — audit, issue/exception ledgers, parity frontier, verification record, and the autonomous-session operating documents.
@@ -48,6 +50,13 @@ family yield, repairs, and regression locks remain explicit. Reports can be
 persisted back into the canonical store as provenance-linked metamorphic test
 records, and missing contractual measurements remain inconclusive rather than
 being treated as proof.
+
+`MetamorphicSoftwareAdvancementEngine` ranks proposed changes by expected net
+benefit × correctness confidence × reachability × reversibility, divided by
+implementation cost × regression risk. It accepts a candidate only after
+baseline/candidate verification, differential equivalence, measurable
+improvement, explained-regression review, falsification resistance, and
+reproducibility all pass; integration and ranking recomputation remain explicit.
 
 `CalibratedEvidenceFusion` scores reliability, specificity, rarity,
 discriminative power, source independence, temporal compatibility,
