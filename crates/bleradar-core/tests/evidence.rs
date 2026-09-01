@@ -243,3 +243,80 @@ fn source_metadata_is_not_silently_changed() {
         Err(ProvenanceError::SourceMetadataMismatch { .. })
     ));
 }
+
+#[test]
+fn empty_identifiers_are_rejected() {
+    let error = Source::new("", SourceType::Sensor, RetrievalMethod::Direct).unwrap_err();
+    assert!(matches!(
+        error,
+        ProvenanceError::EmptyValue { field: "source id" }
+    ));
+
+    let error = Artifact::new("", ArtifactType::Digital).unwrap_err();
+    assert!(matches!(
+        error,
+        ProvenanceError::EmptyValue {
+            field: "artifact id"
+        }
+    ));
+}
+
+#[test]
+fn duplicate_source_id_is_rejected_on_second_insert() {
+    let mut store = EvidenceStore::new();
+    store.add_source(source()).unwrap();
+
+    let error = store.add_source(source()).unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProvenanceError::DuplicateId {
+            collection: "source",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn claim_without_any_evidence_is_rejected_by_trace_and_validate() {
+    let hypothesis =
+        Hypothesis::new("hypothesis-1", "ordinary explanation", HypothesisKind::Null).unwrap();
+    let claim = Claim::new(
+        "claim-1",
+        "the observed value has the ordinary explanation",
+        hypothesis.id(),
+    )
+    .unwrap();
+
+    let mut store = EvidenceStore::new();
+    store.add_hypothesis(hypothesis).unwrap();
+    store.add_claim(claim).unwrap();
+
+    assert!(matches!(
+        store.trace_claim("claim-1"),
+        Err(ProvenanceError::ClaimWithoutEvidence { .. })
+    ));
+    assert!(matches!(
+        store.validate(),
+        Err(ProvenanceError::ClaimWithoutEvidence { .. })
+    ));
+}
+
+#[test]
+fn artifact_referencing_an_unregistered_entity_is_rejected() {
+    let mut store = EvidenceStore::new();
+    let artifact = Artifact::new("artifact-1", ArtifactType::Digital)
+        .unwrap()
+        .for_entity("no-such-entity");
+
+    let error = store.add_artifact(artifact).unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProvenanceError::MissingReference {
+            record: "artifact",
+            field: "entity",
+            ..
+        }
+    ));
+}
