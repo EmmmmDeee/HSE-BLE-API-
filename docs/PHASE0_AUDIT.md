@@ -37,11 +37,12 @@ The reconstructed Cargo workspace is a separate source-only topology. Its
 libraries are reached by tests/library callers and are not linked from the APK.
 `xtask` is its only executable.
 
-`crates/bleradar-compat` records the complete 124-entry ABI census: 19 contracts
-were observed executing, 78 have non-generated DEX call-site evidence, and 27
-remain of unknown reachability. Every shipped ABI implementation is native
-Rust; that fact does not prove parity for reconstructed functions with similar
-names.
+`crates/bleradar-compat` records the complete 124-entry ABI census. Ninety
+contracts have non-generated DEX call-site evidence; 12 of those plus seven
+additional pure exports have stronger instrumented-trace evidence, producing
+the final buckets 19 `VERIFIED_RUNTIME`, 78 `STATICALLY_REACHABLE`, and 27
+`UNKNOWN`. Every shipped ABI implementation is native Rust; that fact does not
+prove parity for reconstructed functions with similar names.
 
 ## High-risk constructs
 

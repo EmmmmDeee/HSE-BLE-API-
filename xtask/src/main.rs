@@ -238,6 +238,44 @@ fn macro_argument_count(
         .count()
 }
 
+fn abi_contract_keys(source: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (prefix, kind) in [
+        ("UNIFFI_META_BLERADAR_CORE_FUNC_", "Function"),
+        ("UNIFFI_META_BLERADAR_CORE_METHOD_", "Method"),
+        ("UNIFFI_META_BLERADAR_CORE_CONSTRUCTOR_", "Constructor"),
+    ] {
+        keys.extend(
+            find_prefixed_runs(source, prefix)
+                .into_iter()
+                .map(|name| format!("{kind}:{}", name.to_ascii_lowercase())),
+        );
+    }
+    dedup_sorted(keys)
+}
+
+fn runtime_contract_keys(source: &str) -> Result<Vec<String>, String> {
+    let names = macro_argument_values(source, "runtime_contract!(", 0);
+    let kinds = macro_argument_values(source, "runtime_contract!(", 1);
+    if names.len() != kinds.len() {
+        return Err("runtime contracts have inconsistent name/kind arguments".to_string());
+    }
+    names
+        .into_iter()
+        .zip(kinds)
+        .map(|(name, kind)| {
+            let name = name
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .ok_or_else(|| format!("runtime contract name is not a string literal: {name}"))?;
+            if !matches!(kind.as_str(), "Function" | "Method" | "Constructor") {
+                return Err(format!("unknown runtime contract kind: {kind}"));
+            }
+            Ok(format!("{kind}:{name}"))
+        })
+        .collect()
+}
+
 /// Regenerates `docs/PARITY_COVERAGE.md` from `docs/NATIVE_ABI.txt` and the
 /// semantic compatibility/runtime registries.
 fn cmd_parity_report() -> Result<(), String> {
@@ -249,45 +287,22 @@ fn cmd_parity_report() -> Result<(), String> {
     let abi_text = read_to_string(&abi_path)?;
     let compat = read_to_string(&compat_path)?;
 
-    let mut observed_names = find_prefixed_runs(&abi_text, "UNIFFI_META_BLERADAR_CORE_FUNC_");
-    observed_names.extend(find_prefixed_runs(
-        &abi_text,
-        "UNIFFI_META_BLERADAR_CORE_METHOD_",
-    ));
-    observed_names.extend(find_prefixed_runs(
-        &abi_text,
-        "UNIFFI_META_BLERADAR_CORE_CONSTRUCTOR_",
-    ));
-    let observed_names = dedup_sorted(
-        observed_names
-            .into_iter()
-            .map(|name| name.to_ascii_lowercase())
-            .collect(),
-    );
-    let observed_count = observed_names.len();
+    let observed_contracts = abi_contract_keys(&abi_text);
+    let observed_count = observed_contracts.len();
 
     let source_contracts = array_const_body(&compat, "pub const CONTRACTS")?;
     let runtime_contracts = array_const_body(&compat, "pub const RUNTIME_CONTRACTS")?;
     let source_names = find_quoted_name_values(source_contracts);
-    let runtime_names: Vec<String> =
-        macro_argument_values(runtime_contracts, "runtime_contract!(", 0)
-            .into_iter()
-            .filter_map(|argument| {
-                argument
-                    .strip_prefix('"')
-                    .and_then(|value| value.strip_suffix('"'))
-                    .map(ToString::to_string)
-            })
-            .collect();
-    let runtime_count = runtime_names.len();
+    let runtime_keys = runtime_contract_keys(runtime_contracts)?;
+    let runtime_count = runtime_keys.len();
     if runtime_count != observed_count {
         return Err(format!(
             "runtime contract census has {} entries, expected {observed_count}",
             runtime_count
         ));
     }
-    if dedup_sorted(runtime_names) != observed_names {
-        return Err("runtime contract names differ from the native ABI census".to_string());
+    if dedup_sorted(runtime_keys) != observed_contracts {
+        return Err("runtime contract names/kinds differ from the native ABI census".to_string());
     }
     let runtime_variant_count =
         |variant| macro_argument_count(runtime_contracts, "runtime_contract!(", 2, variant);
@@ -914,6 +929,32 @@ mod tests {
         assert_eq!(macro_argument_count(source, "item!(", 2, "Wanted"), 1);
         assert_eq!(macro_argument_count(source, "item!(", 2, "Other"), 1);
         assert_eq!(macro_argument_count(source, "item!(", 2, "WantedExtra"), 1);
+    }
+
+    #[test]
+    fn contract_census_comparison_preserves_kind_and_cross_kind_names() {
+        let abi = "UNIFFI_META_BLERADAR_CORE_FUNC_SHARED\n\
+                   UNIFFI_META_BLERADAR_CORE_METHOD_SHARED\n\
+                   UNIFFI_META_BLERADAR_CORE_FUNC_ONLY_FUNCTION\n\
+                   UNIFFI_META_BLERADAR_CORE_METHOD_ONLY_METHOD\n";
+        let expected = abi_contract_keys(abi);
+        let correct = runtime_contract_keys(
+            "runtime_contract!(\"shared\", Function, Unknown, StaticReachability),\n\
+             runtime_contract!(\"shared\", Method, Unknown, StaticReachability),\n\
+             runtime_contract!(\"only_function\", Function, Unknown, StaticReachability),\n\
+             runtime_contract!(\"only_method\", Method, Unknown, StaticReachability),",
+        )
+        .unwrap();
+        let swapped = runtime_contract_keys(
+            "runtime_contract!(\"shared\", Function, Unknown, StaticReachability),\n\
+             runtime_contract!(\"shared\", Method, Unknown, StaticReachability),\n\
+             runtime_contract!(\"only_function\", Method, Unknown, StaticReachability),\n\
+             runtime_contract!(\"only_method\", Function, Unknown, StaticReachability),",
+        )
+        .unwrap();
+
+        assert_eq!(dedup_sorted(correct), expected);
+        assert_ne!(dedup_sorted(swapped), expected);
     }
 
     #[test]
