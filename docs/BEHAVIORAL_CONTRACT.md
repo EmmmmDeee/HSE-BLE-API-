@@ -20,17 +20,27 @@ Classification meanings:
 ## Executable evidence
 
 `crates/bleradar-compat/tests/oracle_characterization.rs` locks sampled oracle
-facts and prevents known source analogues from being promoted to differential
-parity. `crates/bleradar-compat/tests/contracts.rs` locks the 124-entry census,
-reachability counts, and registry semantics. These tests deliberately do not
-load the Android `.so` in normal CI.
+facts, an exact Wi-Fi mapping model, and known source gaps. Its ignored
+`wifi_frequency_oracle_parity_removal_gate` is deliberately red until the
+replacement implements the captured contract. `crates/bleradar-compat/tests/contracts.rs`
+locks the 124-entry census, reachability counts, and registry semantics. These
+tests deliberately do not load the Android `.so` in normal CI.
 
 The compatibility trace executed deterministic native functions from a copied
 oracle after changing imported Android library names and removing Android
-symbol-version metadata. It supplied only `__sF`/`__errno` compatibility
-symbols. Results used below were repeated and deterministic. Stateful store
-results are excluded from parity evidence because Bionic allocation and
-threading were not reproduced.
+symbol-version metadata. It supplied only `__sF`, `__errno`, and
+`__register_atfork` compatibility symbols. Results used below were repeated and
+deterministic. Stateful store results are excluded from parity evidence because
+Bionic allocation and threading were not reproduced.
+
+The Wi-Fi model has stronger evidence than a sampled fixture. The generated DEX
+bindings establish `Int → Int?` for channel-to-frequency and `Int? → Int?` for
+frequency-to-channel. A native sweep covered frequencies `0..=8000` and channels
+`0..=300`; a separate run covered `None`, signed extrema, negatives, and every
+transition boundary. ARM64 control flow at native offsets `0x5dce54..0x5dcea4` and
+`0x5dd318..0x5dd3ac` independently establishes the complete range checks and
+integer formulas. The extracted native oracle used for both has SHA-256
+`d14022cd113332312fb1719aafa107155a4c046c056cb9b2bcd3c94eb980b12d`.
 
 ### Captured native fixtures
 
@@ -42,7 +52,8 @@ threading were not reproduced.
 | `proximity_label(1/2/5/25)` | `immediate/near/mid/far` | `COMPATIBILITY_REQUIRED`; argument is distance, not RSSI |
 | BLE RSSI `-70` | `2.8729848333536645` m for absent or supplied tx power | `COMPATIBILITY_REQUIRED`; fixed `-59`, exponent `2.4`, 100 m cap |
 | BLE RSSI `0` | `100` m | `COMPATIBILITY_REQUIRED` sentinel behavior |
-| Wi-Fi `6000 MHz` | channel `10` | `COMPATIBILITY_REQUIRED`; missing from source analogue |
+| Wi-Fi channel → frequency | `1..=13 → 2407 + 5c`; `14 → 2484`; `32..=177 → 5000 + 5c`; otherwise `None` | `COMPATIBILITY_REQUIRED`; exact signed-input mapping |
+| Wi-Fi frequency → channel | `2412..=2472 → floor((f-2407)/5)`; `2484 → 14`; `5160..=5885 → floor((f-5000)/5)`; `5955..=7115 → floor((f-5950)/5)`; otherwise `None` | `COMPATIBILITY_REQUIRED`; `None → None`; ranges are inclusive |
 | signal bars thresholds | `<-90:0`, `-90..-72:1`, `-71..-62:2`, `-61..-52:3`, `>=-51:4` | `COMPATIBILITY_REQUIRED` |
 | `fmt_coord(1.23456789)` | `1.23457` | `COMPATIBILITY_REQUIRED` |
 | `fmt_distance(999/1000/nonfinite)` | `999 m` / `1.0 km` / `?` | `COMPATIBILITY_REQUIRED` |
@@ -124,6 +135,11 @@ must land as a named defect change rather than incidental migration drift.
 - Wi-Fi ignores null BSSID, converts Android microsecond timestamps, trims SDK
   33+ quoted SSIDs, maps null/blank to `<hidden>`, and sends frequency,
   channel-width mapping, capabilities, and timestamp to Rust.
+- Native frequency-to-channel conversion floors every in-range integer rather
+  than accepting only channel centers. Its 6 GHz range maps `5955..=7115` to
+  `1..=233`; the reverse function still maps channel `1` to 2412 MHz and rejects
+  `178..=233`, so the pair is intentionally recorded as non-bijective pending a
+  separately versioned contract decision.
 - Location updates use GPS/network providers, at least 2,000 ms and 1.5 m;
   updates without accuracy or with accuracy above the observed gate are
   ignored. The exact threshold requires a Bionic/Android fixture and is
@@ -210,7 +226,7 @@ must land as a named defect change rather than incidental migration drift.
 
 | Case family | Current executable protection | Required next evidence |
 |---|---|---|
-| valid/empty/boundary scalar inputs | pure oracle fixtures for geo, range, formatting, channels, scheduler | exhaustive boundary tables and target differential runner |
+| valid/empty/boundary scalar inputs | pure oracle fixtures for geo, range, formatting, scheduler; complete Wi-Fi integer model and source-domain sweep | exhaustive tables for remaining scalars and target differential runner |
 | invalid/non-finite inputs | selected pure fixtures; source validators | each ABI error/status and panic containment |
 | malformed import | selected oracle empty-result fixture | typed error tests, truncation/encoding/size fuzz corpus |
 | duplicate input/execution | sampled store trace, not trusted for parity | real-Bionic idempotency and callback replay |
@@ -234,12 +250,15 @@ implementation.
 | BF-001 | registry labeled source analogues `Reconstructed` despite oracle mismatches | only differential proof may produce `DifferentiallyVerified` | `no_source_analogue_is_mislabeled_as_differentially_verified` |
 | BF-002 | oracle 1° haversine differs from source by its radius constant | target explicitly chooses compatibility or a versioned correction | `oracle_haversine_fixture_exposes_radius_gap` |
 | BF-003 | oracle proximity accepts metres; source analogue accepts dBm | distinct typed APIs; no name-based substitution | `oracle_proximity_fixture_exposes_input_semantics_gap` |
-| BF-004 | oracle maps 6000 MHz to channel 10; source returns `None` | target supports verified 6 GHz behavior | `oracle_wifi_fixture_exposes_six_ghz_gap` |
+| BF-004 | source rejects 1,789 oracle-accepted `u16` frequencies: 628 off-center 2.4/5 GHz values and all 1,161 6 GHz values | target preserves the verified inclusive ranges, floor division, optional input, and asymmetric reverse mapping unless deliberately versioned | `oracle_wifi_boundary_trace_locks_ranges_and_flooring`; `oracle_wifi_frequency_gap_is_exhaustively_classified_over_source_domain`; ignored parity removal gate |
 | BF-005 | Rust store plus independently mutable JVM mirror and duplicate alias persistence | one authoritative Rust state/persistence transaction | architecture guard pending Android source |
 | BF-006 | correlation execution failure becomes empty groups in DEX fallback | failure leaves prior groups intact and is observable | fault-injection test required before migration |
 
 BF-002 through BF-004 are not silently fixed in this phase. Their tests make
-the incompatible replacement fail or remain explicitly unverified.
+the incompatible replacement fail or remain explicitly unverified. Run
+`cargo test -p bleradar-compat --test oracle_characterization
+wifi_frequency_oracle_parity_removal_gate -- --ignored` to exercise BF-004's
+currently failing removal gate directly.
 
 ## Migration ledger
 
@@ -259,4 +278,3 @@ the incompatible replacement fail or remain explicitly unverified.
 | Android component/callback/content adapters | no Rust replacement; `android-adapter` boundary | exact event/command marshalling and lifecycle/resource calls | platform-managed | instrumentation tests | retained permanently at minimum size |
 | generated UniFFI/JNI/JNA | generated `ffi` boundary | ABI ownership, error/panic mapping, cancellation | none | generated-binding and ABI checksum tests | retained or replaced only by equivalent generated glue |
 | reconstructed source-only analytical engines | one application `Runtime`/`EvidenceStore` owner | preserve existing public Rust tests while integrating state ownership | explicit store merge if adopted | workspace gates + integration topology test | no parallel live store or competing engine |
-
