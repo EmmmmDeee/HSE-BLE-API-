@@ -311,6 +311,191 @@ fn rare_features_and_independent_sources_raise_possible_administration_alternati
 }
 
 #[test]
+fn common_cms_leads_when_it_is_the_lowest_order_explanation_for_the_pair() {
+    // A same-kind `HttpCharacteristic` pair only ever proposes
+    // `CommonCms`/`CommonTemplate`/`SharedThirdPartyService` (plus the
+    // universal `Unknown` floor); `CommonCms` has the lowest
+    // `explanation_order` of that set, so it wins the resulting tie.
+    let mut engine = TemporalMetamorphicInfrastructureCorrelationEngine::new(EvidenceStore::new());
+    engine
+        .observe(observation(
+            "http-a",
+            "site-a",
+            InfrastructureKind::HttpCharacteristic,
+            "x-powered-by:acme-cms",
+            source("http-source-a", None),
+            10,
+        ))
+        .unwrap();
+    engine
+        .observe(observation(
+            "http-b",
+            "site-b",
+            InfrastructureKind::HttpCharacteristic,
+            "x-powered-by:acme-cms",
+            source("http-source-b", None),
+            10,
+        ))
+        .unwrap();
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    assert_eq!(
+        report.leading_explanation(),
+        InfrastructureExplanation::CommonCms
+    );
+    let cms = report
+        .ranking(InfrastructureExplanation::CommonCms)
+        .unwrap();
+    let template = report
+        .ranking(InfrastructureExplanation::CommonTemplate)
+        .unwrap();
+    let shared = report
+        .ranking(InfrastructureExplanation::SharedThirdPartyService)
+        .unwrap();
+    // All three are derived from the same single pair with no per-explanation
+    // weight distinction, so they tie on score; only the tie-break decides.
+    assert_eq!(cms.score(), template.score());
+    assert_eq!(cms.score(), shared.score());
+}
+
+#[test]
+fn common_cdn_and_common_registrar_are_ranked_but_structurally_never_lead() {
+    // `CommonCdn` is always co-inserted alongside `CommonHost` for the same
+    // pairs, with an identical weight/group set, so their scores always
+    // tie; `CommonHost` has the lower `explanation_order` and therefore
+    // always wins. The same relationship holds between `CommonRegistrar`
+    // and `DirectTechnicalRelationship`. Both variants are legitimately
+    // ranked, inspectable alternatives, but can never become the leading
+    // explanation while their dominating sibling is also a candidate — this
+    // is a structural property of the classifier's tie-break, not a gap.
+    let mut host_engine =
+        TemporalMetamorphicInfrastructureCorrelationEngine::new(EvidenceStore::new());
+    host_engine
+        .observe(observation(
+            "ip-a",
+            "site-a",
+            InfrastructureKind::IpAddress,
+            "203.0.113.9",
+            source("ip-source-a", None),
+            10,
+        ))
+        .unwrap();
+    host_engine
+        .observe(observation(
+            "ip-b",
+            "site-b",
+            InfrastructureKind::IpAddress,
+            "203.0.113.9",
+            source("ip-source-b", None),
+            10,
+        ))
+        .unwrap();
+    let host_report = host_engine.correlate("site-a", "site-b").unwrap();
+    assert_eq!(
+        host_report.leading_explanation(),
+        InfrastructureExplanation::CommonHost
+    );
+    let host = host_report
+        .ranking(InfrastructureExplanation::CommonHost)
+        .unwrap();
+    let cdn = host_report
+        .ranking(InfrastructureExplanation::CommonCdn)
+        .unwrap();
+    assert_eq!(host.score(), cdn.score());
+
+    let mut registrar_engine =
+        TemporalMetamorphicInfrastructureCorrelationEngine::new(EvidenceStore::new());
+    registrar_engine
+        .observe(observation(
+            "domain-a",
+            "site-a",
+            InfrastructureKind::Domain,
+            "shared.example",
+            source("domain-source-a", None),
+            10,
+        ))
+        .unwrap();
+    registrar_engine
+        .observe(observation(
+            "domain-b",
+            "site-b",
+            InfrastructureKind::Domain,
+            "shared.example",
+            source("domain-source-b", None),
+            10,
+        ))
+        .unwrap();
+    let registrar_report = registrar_engine.correlate("site-a", "site-b").unwrap();
+    assert_eq!(
+        registrar_report.leading_explanation(),
+        InfrastructureExplanation::DirectTechnicalRelationship
+    );
+    let direct = registrar_report
+        .ranking(InfrastructureExplanation::DirectTechnicalRelationship)
+        .unwrap();
+    let registrar = registrar_report
+        .ranking(InfrastructureExplanation::CommonRegistrar)
+        .unwrap();
+    assert_eq!(direct.score(), registrar.score());
+    let unknown = registrar_report
+        .ranking(InfrastructureExplanation::Unknown)
+        .unwrap();
+    assert!(unknown.score() < registrar.score());
+}
+
+#[test]
+fn shared_third_party_service_leads_for_cross_kind_pairs_outside_the_named_families() {
+    // An IpAddress/Asn pair is not one of the explicitly modeled kind
+    // combinations (unlike same-kind Ip/Ip, Asn/Asn, or the Domain/Dns/
+    // Certificate/HostingProvider technical-relationship families), so it
+    // falls through to the generic catch-all, which only ever proposes
+    // `SharedThirdPartyService` (plus the universal `Unknown` floor).
+    let mut engine = TemporalMetamorphicInfrastructureCorrelationEngine::new(EvidenceStore::new());
+    engine
+        .observe(observation(
+            "ip-a",
+            "site-a",
+            InfrastructureKind::IpAddress,
+            "shared-indicator",
+            source("ip-source-a", None),
+            10,
+        ))
+        .unwrap();
+    engine
+        .observe(observation(
+            "asn-b",
+            "site-b",
+            InfrastructureKind::Asn,
+            "shared-indicator",
+            source("asn-source-b", None),
+            10,
+        ))
+        .unwrap();
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    assert_eq!(
+        report.leading_explanation(),
+        InfrastructureExplanation::SharedThirdPartyService
+    );
+    let leading = report
+        .ranking(InfrastructureExplanation::SharedThirdPartyService)
+        .unwrap();
+    assert!(leading.score() > 0);
+    let unknown = report.ranking(InfrastructureExplanation::Unknown).unwrap();
+    assert!(unknown.score() < leading.score());
+    assert!(
+        report
+            .ranking(InfrastructureExplanation::CommonCdn)
+            .is_none()
+    );
+    assert!(
+        report
+            .ranking(InfrastructureExplanation::CommonHost)
+            .is_none()
+    );
+}
+
+#[test]
 fn correlation_persistence_is_transactional_on_source_conflict() {
     let mut evidence = EvidenceStore::new();
     evidence

@@ -1,4 +1,4 @@
-# Phase 0 Audit and Execution Plan
+# Phase 0 Audit
 
 ## Authoritative input
 
@@ -20,15 +20,30 @@ The Rust core exposes a large, named UniFFI ABI including `RadarStore`, BLE/Wi-F
 
 ## Dependency graph
 
-Observed high-level graph:
+Verified high-level shipped graph:
 
-`Android MainActivity/Compose UI`
-→ `BLE scan foreground service + Android Bluetooth/Location APIs`
+`BleRadarApp / MainActivity / BleScanService`
+→ `Android radio, location, GATT, content and lifecycle callbacks`
+→ `DEX parsing, normalization, scheduling, candidate generation and UI policy`
 → `generated UniFFI/JNA Kotlin bridge`
 → `libbleradar_core.so (Rust)`
-→ `RadarStore / sessions / correlation / geo / export / OSINT domain`
+→ `RadarStore / sessions / correlation / geo / export / OSINT`.
 
-Map UI additionally depends on osmdroid and Android location/network APIs.
+Map UI additionally depends on osmdroid and Android location/network APIs. The
+DEX also maintains a competing device mirror and duplicate alias persistence;
+not all state/control flows through `RadarStore`.
+
+The reconstructed Cargo workspace is a separate source-only topology. Its
+libraries are reached by tests/library callers and are not linked from the APK.
+`xtask` is its only executable.
+
+`crates/bleradar-compat` records the complete 124-entry ABI census. Ninety
+contracts have non-generated DEX call-site evidence; 12 of those have stronger
+instrumented-trace evidence. Twenty-nine additional stateless exports without
+such callers were also traced, producing the current buckets 41
+`VERIFIED_RUNTIME`, 78 `STATICALLY_REACHABLE`, and 5 `UNKNOWN`. Every shipped
+ABI implementation is native Rust; that fact does not prove parity for
+reconstructed functions with similar names.
 
 ## High-risk constructs
 
@@ -46,19 +61,31 @@ No evidence of `eval`-style dynamic code generation was found in the supplied bi
 
 Target reconstruction toolchain is pinned to Rust 1.98.0, edition 2024. The reconstructed crates intentionally use no crates.io dependencies, minimizing supply-chain exposure and allowing deterministic offline builds once the pinned Rust toolchain is present.
 
-## Batch order
+## Phase 0 result
 
-1. Preserve binary oracle and census ABI/classes/dependencies.
-2. Reconstruct mathematically unambiguous pure functions and types.
-3. Build compatibility inventory around the observed Rust ABI.
-4. Characterize Android-facing behavior only where a runnable Android environment exists.
-5. Replace platform UI/service behavior only after characterization tests exist.
-6. Remediate ledger issues only after parity is demonstrated.
+The verified path map and migration boundary are in
+`VERIFIED_RUNTIME_TOPOLOGY.md`. Required observable semantics and removal gates
+are in `BEHAVIORAL_CONTRACT.md`. Authoritative target ownership is in
+`RUST_TARGET_ARCHITECTURE.md`.
+
+Pure native functions were provisionally exercised under QEMU with
+compatibility shims. Stateful results were discarded after allocator
+incompatibility was observed. Real Android/Bionic characterization remains
+required for state, persistence, lifecycle, callback, GATT, concurrency, and
+network behavior.
 
 ## Interop strategy
 
-The original `libbleradar_core.so` is retained as a behavior oracle, not linked into the reconstructed portable crates. A future Android migration can run old and new implementations side-by-side behind a narrow adapter and differential-test each UniFFI contract before switching callers.
+The original `libbleradar_core.so` is retained as a behavior oracle, not linked
+into the reconstructed portable crates. A differential harness may run isolated
+old/new cases against the same fixture. The production migration must switch
+one responsibility at a time and immediately remove its competing writer or
+scheduler; it must not operate parallel live application cores.
 
 ## Critical limitation
 
-Strict whole-codebase functional parity cannot be proved from an obfuscated release APK alone. Compiled code is not an information-preserving representation of the original source. Unknown behavior is therefore logged as an exception instead of guessed.
+Strict whole-codebase functional parity cannot be proved from an obfuscated
+release APK alone. Compiled code is not an information-preserving
+representation of the original source. Unknown behavior is classified and
+blocks old-implementation removal rather than being guessed or treated as a
+permanent non-Rust exception.

@@ -188,8 +188,96 @@ fn dedup_sorted(mut values: Vec<String>) -> Vec<String> {
     values
 }
 
-/// Port of `tools/parity_report.py`: regenerates `docs/PARITY_COVERAGE.md`
-/// from `docs/NATIVE_ABI.txt` and the semantic compatibility registry.
+/// Returns the initializer body of a public array constant in Rust source.
+fn array_const_body<'a>(source: &'a str, declaration: &str) -> Result<&'a str, String> {
+    let (_, after_declaration) = source
+        .split_once(declaration)
+        .ok_or_else(|| format!("missing declaration `{declaration}`"))?;
+    let (_, initializer) = after_declaration
+        .split_once('=')
+        .ok_or_else(|| format!("missing initializer for `{declaration}`"))?;
+    let initializer = initializer.trim_start();
+    let body = initializer
+        .strip_prefix("&[")
+        .or_else(|| initializer.strip_prefix('['))
+        .ok_or_else(|| format!("initializer for `{declaration}` is not an array"))?;
+    let (body, _) = body
+        .split_once("\n];")
+        .ok_or_else(|| format!("unterminated initializer for `{declaration}`"))?;
+    Ok(body)
+}
+
+fn variant_count(source: &str, enum_name: &str, variant: &str) -> usize {
+    source.matches(&format!("{enum_name}::{variant}")).count()
+}
+
+fn macro_argument_values(source: &str, macro_prefix: &str, argument_index: usize) -> Vec<String> {
+    let mut rest = source;
+    let mut values = Vec::new();
+    while let Some((_, after_prefix)) = rest.split_once(macro_prefix) {
+        let Some((arguments, after_invocation)) = after_prefix.split_once(')') else {
+            break;
+        };
+        if let Some(argument) = arguments.split(',').nth(argument_index) {
+            values.push(argument.trim().to_string());
+        }
+        rest = after_invocation;
+    }
+    values
+}
+
+fn macro_argument_count(
+    source: &str,
+    macro_prefix: &str,
+    argument_index: usize,
+    expected: &str,
+) -> usize {
+    macro_argument_values(source, macro_prefix, argument_index)
+        .iter()
+        .filter(|argument| argument.as_str() == expected)
+        .count()
+}
+
+fn abi_contract_keys(source: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (prefix, kind) in [
+        ("UNIFFI_META_BLERADAR_CORE_FUNC_", "Function"),
+        ("UNIFFI_META_BLERADAR_CORE_METHOD_", "Method"),
+        ("UNIFFI_META_BLERADAR_CORE_CONSTRUCTOR_", "Constructor"),
+    ] {
+        keys.extend(
+            find_prefixed_runs(source, prefix)
+                .into_iter()
+                .map(|name| format!("{kind}:{}", name.to_ascii_lowercase())),
+        );
+    }
+    dedup_sorted(keys)
+}
+
+fn runtime_contract_keys(source: &str) -> Result<Vec<String>, String> {
+    let names = macro_argument_values(source, "runtime_contract!(", 0);
+    let kinds = macro_argument_values(source, "runtime_contract!(", 1);
+    if names.len() != kinds.len() {
+        return Err("runtime contracts have inconsistent name/kind arguments".to_string());
+    }
+    names
+        .into_iter()
+        .zip(kinds)
+        .map(|(name, kind)| {
+            let name = name
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .ok_or_else(|| format!("runtime contract name is not a string literal: {name}"))?;
+            if !matches!(kind.as_str(), "Function" | "Method" | "Constructor") {
+                return Err(format!("unknown runtime contract kind: {kind}"));
+            }
+            Ok(format!("{kind}:{name}"))
+        })
+        .collect()
+}
+
+/// Regenerates `docs/PARITY_COVERAGE.md` from `docs/NATIVE_ABI.txt` and the
+/// semantic compatibility/runtime registries.
 fn cmd_parity_report() -> Result<(), String> {
     let root = repo_root()?;
     let abi_path = root.join("docs/NATIVE_ABI.txt");
@@ -199,49 +287,101 @@ fn cmd_parity_report() -> Result<(), String> {
     let abi_text = read_to_string(&abi_path)?;
     let compat = read_to_string(&compat_path)?;
 
-    let mut observed_count = 0usize;
-    observed_count += dedup_sorted(find_prefixed_runs(
-        &abi_text,
-        "UNIFFI_META_BLERADAR_CORE_FUNC_",
-    ))
-    .len();
-    let mut method_or_ctor = find_prefixed_runs(&abi_text, "UNIFFI_META_BLERADAR_CORE_METHOD_");
-    method_or_ctor.extend(find_prefixed_runs(
-        &abi_text,
-        "UNIFFI_META_BLERADAR_CORE_CONSTRUCTOR_",
-    ));
-    observed_count += dedup_sorted(method_or_ctor).len();
+    let observed_contracts = abi_contract_keys(&abi_text);
+    let observed_count = observed_contracts.len();
 
-    let registered = find_quoted_name_values(&compat);
+    let source_contracts = array_const_body(&compat, "pub const CONTRACTS")?;
+    let runtime_contracts = array_const_body(&compat, "pub const RUNTIME_CONTRACTS")?;
+    let source_names = find_quoted_name_values(source_contracts);
+    let runtime_keys = runtime_contract_keys(runtime_contracts)?;
+    let runtime_count = runtime_keys.len();
+    if runtime_count != observed_count {
+        return Err(format!(
+            "runtime contract census has {} entries, expected {observed_count}",
+            runtime_count
+        ));
+    }
+    if dedup_sorted(runtime_keys) != observed_contracts {
+        return Err("runtime contract names/kinds differ from the native ABI census".to_string());
+    }
+    let runtime_variant_count =
+        |variant| macro_argument_count(runtime_contracts, "runtime_contract!(", 2, variant);
+    let verified_runtime = runtime_variant_count("VerifiedRuntime");
+    let statically_reachable = runtime_variant_count("StaticallyReachable");
+    let conditionally_reachable = runtime_variant_count("ConditionallyReachable");
+    let unreachable = runtime_variant_count("Unreachable");
+    let unknown = runtime_variant_count("Unknown");
+    if verified_runtime + statically_reachable + conditionally_reachable + unreachable + unknown
+        != runtime_count
+    {
+        return Err("runtime contract reachability census is incomplete".to_string());
+    }
 
     let mut lines: Vec<String> = vec![
         "# Parity Coverage".to_string(),
         String::new(),
-        "Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility registry.".to_string(),
+        "Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility/runtime registries."
+            .to_string(),
         String::new(),
         format!("- Observed UniFFI function/method/constructor symbols: **{observed_count}**"),
         format!(
-            "- Contracts with explicit semantic migration status: **{}**",
-            registered.len()
+            "- Contracts with runtime implementation/reachability classification: **{}**",
+            runtime_count
         ),
         format!(
-            "- Remaining observed symbols requiring semantic registration/characterization: **{}**",
-            observed_count.saturating_sub(registered.len())
+            "- Remaining observed symbols requiring runtime classification: **{}**",
+            observed_count.saturating_sub(runtime_count)
         ),
         String::new(),
-        "## Registered semantic frontier".to_string(),
+        "## Shipped implementation".to_string(),
+        String::new(),
+        format!("- `RUST_NATIVE`: **{runtime_count}**"),
+        "- `RUST_MIGRATION_REQUIRED`: **0**".to_string(),
+        "- `NON_RUST_JUSTIFIED_BOUNDARY`: **0**".to_string(),
+        "- `UNKNOWN`: **0**".to_string(),
+        String::new(),
+        "## Reachability".to_string(),
+        String::new(),
+        format!("- `VERIFIED_RUNTIME`: **{verified_runtime}**"),
+        format!("- `STATICALLY_REACHABLE`: **{statically_reachable}**"),
+        format!("- `CONDITIONALLY_REACHABLE`: **{conditionally_reachable}**"),
+        format!("- `UNREACHABLE`: **{unreachable}**"),
+        format!("- `UNKNOWN`: **{unknown}**"),
+        String::new(),
+        "## Source-replacement parity frontier".to_string(),
+        String::new(),
+        format!(
+            "- Differentially verified: **{}**",
+            variant_count(source_contracts, "ParityStatus", "DifferentiallyVerified")
+        ),
+        format!(
+            "- Source analogue only: **{}**",
+            variant_count(source_contracts, "ParityStatus", "SourceAnalog")
+        ),
+        format!(
+            "- Oracle only: **{}**",
+            variant_count(source_contracts, "ParityStatus", "OracleOnly")
+        ),
+        format!(
+            "- Blocked: **{}**",
+            variant_count(source_contracts, "ParityStatus", "Blocked")
+        ),
+        String::new(),
+        "Registered source-replacement contracts:".to_string(),
         String::new(),
     ];
-    for name in &registered {
+    for name in &source_names {
         lines.push(format!("- `{name}`"));
     }
     lines.push(String::new());
     lines.push("## Interpretation".to_string());
     lines.push(String::new());
     lines.push(
-        "A symbol appearing in the APK is not automatically considered migrated. Exact parity \
-         requires characterization of inputs, outputs, side effects, and errors against the \
-         immutable oracle. The registry intentionally records that distinction."
+        "The shipped implementations behind all 124 ABI contracts are Rust-native; this does not \
+         establish parity for similarly named functions in the reconstructed source workspace. \
+         Exact source-replacement parity requires characterization of inputs, outputs, side \
+         effects, state, termination, and errors against the immutable oracle. Reachability and \
+         evidence details are recorded in `docs/VERIFIED_RUNTIME_TOPOLOGY.md`."
             .to_string(),
     );
 
@@ -251,15 +391,15 @@ fn cmd_parity_report() -> Result<(), String> {
     Ok(())
 }
 
-/// Port of `tools/check_dependency_policy.py`: fails when the root
-/// `Cargo.lock` contains any crate outside the audited workspace set.
-fn cmd_check_dependency_policy() -> Result<(), String> {
-    let root = repo_root()?;
-    let lock_path = root.join("Cargo.lock");
-    let text = read_to_string(&lock_path)?;
+/// Names of the only crates this workspace is allowed to depend on
+/// (`docs/AUTONOMOUS_DECISIONS.md`, decision 9).
+const ALLOWED: [&str; 2] = ["bleradar-core", "bleradar-compat"];
 
-    const ALLOWED: [&str; 2] = ["bleradar-core", "bleradar-compat"];
-
+/// Extracts every `name = "..."` package name from `Cargo.lock` text, in
+/// file order. Pure text scan (no filesystem access), so it is directly
+/// unit-testable against fixture lockfile content, including unparsable
+/// input that yields no names at all.
+fn parse_lockfile_package_names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("name = \"")
@@ -268,41 +408,84 @@ fn cmd_check_dependency_policy() -> Result<(), String> {
             names.push(inner.to_string());
         }
     }
+    names
+}
 
+/// Outcome of comparing a lockfile's parsed package names against the
+/// allowed set, decoupled from filesystem access and `println!` side
+/// effects so every branch — not just the one exercised by the real
+/// `Cargo.lock` on every gate run — is directly unit-testable with fixture
+/// input.
+#[derive(Debug, PartialEq, Eq)]
+enum DependencyPolicyOutcome {
+    /// No package names could be parsed at all (empty/unparsable lockfile).
+    EmptyLockfile,
+    /// One or more crates outside `allowed` were found (sorted, deduped).
+    ForeignCrates(Vec<String>),
+    /// Every parsed name is in `allowed` (sorted copy of `allowed`, for the
+    /// success message).
+    Compliant(Vec<String>),
+}
+
+fn evaluate_dependency_policy(names: &[String], allowed: &[&str]) -> DependencyPolicyOutcome {
     if names.is_empty() {
-        println!("Dependency policy gate could not parse any package names from Cargo.lock;");
-        println!("refusing to pass silently on an unreadable lockfile.");
-        return Err("empty package name set".to_string());
+        return DependencyPolicyOutcome::EmptyLockfile;
     }
 
-    let mut foreign: Vec<&String> = names
+    let mut foreign: Vec<String> = names
         .iter()
-        .filter(|n| !ALLOWED.contains(&n.as_str()))
+        .filter(|n| !allowed.contains(&n.as_str()))
+        .cloned()
         .collect();
     foreign.sort();
     foreign.dedup();
     if !foreign.is_empty() {
-        println!("Dependency policy violation: third-party crates present in Cargo.lock:");
-        for name in &foreign {
-            println!("  - {name}");
-        }
-        println!(
-            "The workspace is intentionally third-party-free (docs/AUTONOMOUS_DECISIONS.md, decision 9)."
-        );
-        println!("Adding a dependency is a deliberate decision: record it in the decision log and");
-        println!(
-            "update ALLOWED in xtask/src/main.rs (cmd_check_dependency_policy) in the same change."
-        );
-        return Err("foreign crates present".to_string());
+        return DependencyPolicyOutcome::ForeignCrates(foreign);
     }
 
-    let mut allowed_sorted = ALLOWED.to_vec();
+    let mut allowed_sorted: Vec<String> = allowed.iter().map(|s| (*s).to_string()).collect();
     allowed_sorted.sort_unstable();
-    println!(
-        "Cargo.lock contains only the audited workspace crates: {}",
-        allowed_sorted.join(", ")
-    );
-    Ok(())
+    DependencyPolicyOutcome::Compliant(allowed_sorted)
+}
+
+/// Port of `tools/check_dependency_policy.py`: fails when the root
+/// `Cargo.lock` contains any crate outside the audited workspace set.
+fn cmd_check_dependency_policy() -> Result<(), String> {
+    let root = repo_root()?;
+    let lock_path = root.join("Cargo.lock");
+    let text = read_to_string(&lock_path)?;
+    let names = parse_lockfile_package_names(&text);
+
+    match evaluate_dependency_policy(&names, &ALLOWED) {
+        DependencyPolicyOutcome::EmptyLockfile => {
+            println!("Dependency policy gate could not parse any package names from Cargo.lock;");
+            println!("refusing to pass silently on an unreadable lockfile.");
+            Err("empty package name set".to_string())
+        }
+        DependencyPolicyOutcome::ForeignCrates(foreign) => {
+            println!("Dependency policy violation: third-party crates present in Cargo.lock:");
+            for name in &foreign {
+                println!("  - {name}");
+            }
+            println!(
+                "The workspace is intentionally third-party-free (docs/AUTONOMOUS_DECISIONS.md, decision 9)."
+            );
+            println!(
+                "Adding a dependency is a deliberate decision: record it in the decision log and"
+            );
+            println!(
+                "update ALLOWED in xtask/src/main.rs (cmd_check_dependency_policy) in the same change."
+            );
+            Err("foreign crates present".to_string())
+        }
+        DependencyPolicyOutcome::Compliant(allowed_sorted) => {
+            println!(
+                "Cargo.lock contains only the audited workspace crates: {}",
+                allowed_sorted.join(", ")
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Port of `tools/check_oracle_integrity.py`: fails when a retained binary
@@ -314,44 +497,46 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
     let zip_path = root.join("BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip");
     const ZIP_BASELINE: &str = "07d2d80ce7e6c43f4c6ccc2496d30faafb77342e7bf196b894d32c7528cf3f76";
 
-    let mut failures = Vec::new();
+    let apk_name = apk_path.file_name().unwrap().to_string_lossy().into_owned();
+    let input_sha_name = input_sha_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let zip_name = zip_path.file_name().unwrap().to_string_lossy().into_owned();
 
     let input_sha_text = fs::read_to_string(&input_sha_path).unwrap_or_default();
     let expected_apk_sha = find_sha256_after_label(&input_sha_text, "Original APK SHA-256:");
-    match expected_apk_sha {
-        None => failures.push(format!(
-            "could not parse an APK SHA-256 from {}",
-            input_sha_path.file_name().unwrap().to_string_lossy()
-        )),
-        Some(_) if !apk_path.exists() => failures.push(format!(
-            "missing oracle file: {}",
-            apk_path.file_name().unwrap().to_string_lossy()
-        )),
-        Some(expected) => {
-            let actual = sha256::to_hex(&sha256::sha256(&read_bytes(&apk_path)?));
-            if actual != expected {
-                failures.push(format!(
-                    "{}: expected {expected}, observed {actual}",
-                    apk_path.file_name().unwrap().to_string_lossy()
-                ));
-            }
-        }
-    }
-
-    if !zip_path.exists() {
-        failures.push(format!(
-            "missing oracle archive: {}",
-            zip_path.file_name().unwrap().to_string_lossy()
-        ));
+    let actual_apk_sha = if apk_path.exists() {
+        Some(sha256::to_hex(&sha256::sha256(&read_bytes(&apk_path)?)))
     } else {
-        let actual = sha256::to_hex(&sha256::sha256(&read_bytes(&zip_path)?));
-        if actual != ZIP_BASELINE {
-            failures.push(format!(
-                "{}: expected {ZIP_BASELINE}, observed {actual}",
-                zip_path.file_name().unwrap().to_string_lossy()
-            ));
-        }
-    }
+        None
+    };
+    let apk_result = evaluate_oracle_hash(
+        expected_apk_sha.as_deref(),
+        actual_apk_sha.as_deref(),
+        format!("could not parse an APK SHA-256 from {input_sha_name}"),
+        format!("missing oracle file: {apk_name}"),
+        &apk_name,
+    );
+
+    let actual_zip_sha = if zip_path.exists() {
+        Some(sha256::to_hex(&sha256::sha256(&read_bytes(&zip_path)?)))
+    } else {
+        None
+    };
+    let zip_result = evaluate_oracle_hash(
+        Some(ZIP_BASELINE),
+        actual_zip_sha.as_deref(),
+        String::new(), // unreachable: the zip's expected hash is a constant, never unparsable
+        format!("missing oracle archive: {zip_name}"),
+        &zip_name,
+    );
+
+    let failures: Vec<String> = [apk_result, zip_result]
+        .into_iter()
+        .filter_map(Result::err)
+        .collect();
 
     if !failures.is_empty() {
         println!("Oracle integrity violation — immutable behavioral oracles must never change:");
@@ -365,6 +550,36 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
         "Oracle integrity verified: APK matches docs/INPUT_SHA256.txt; migration archive matches its recorded baseline."
     );
     Ok(())
+}
+
+/// Evaluates one oracle file's SHA-256 against its expected value, without
+/// touching the filesystem, so every failure branch is directly
+/// unit-testable with fixture input instead of only ever being exercised
+/// against the one real committed oracle: `expected == None` models an
+/// unparsable/absent expected-hash record, `actual == None` models a missing
+/// oracle file, and a `Some != Some` mismatch models tampering/drift.
+fn evaluate_oracle_hash(
+    expected: Option<&str>,
+    actual: Option<&str>,
+    unparsable_message: String,
+    missing_message: String,
+    mismatch_label: &str,
+) -> Result<(), String> {
+    match expected {
+        None => Err(unparsable_message),
+        Some(_) if actual.is_none() => Err(missing_message),
+        Some(expected) => {
+            let actual =
+                actual.expect("checked above: Some(_) arm only reached when actual is Some");
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{mismatch_label}: expected {expected}, observed {actual}"
+                ))
+            }
+        }
+    }
 }
 
 /// Finds a 64-character lowercase-hex run immediately after (whitespace
@@ -669,6 +884,80 @@ mod tests {
     }
 
     #[test]
+    fn array_const_body_extracts_only_the_named_initializer() {
+        let source = "pub const FIRST: [Item; 1] = [\nItem::A,\n];\n\
+                      pub const SECOND: &[Item] = &[\nItem::B,\n];\n";
+        assert_eq!(
+            array_const_body(source, "pub const SECOND"),
+            Ok("\nItem::B,")
+        );
+    }
+
+    #[test]
+    fn array_const_body_reports_missing_or_unterminated_initializers() {
+        assert_eq!(
+            array_const_body("pub const OTHER: [Item; 0] = [\n];", "pub const WANTED"),
+            Err("missing declaration `pub const WANTED`".to_string())
+        );
+        assert_eq!(
+            array_const_body("pub const WANTED: [Item; 1] = [Item::A", "pub const WANTED"),
+            Err("unterminated initializer for `pub const WANTED`".to_string())
+        );
+    }
+
+    #[test]
+    fn variant_count_matches_only_the_requested_variant() {
+        let source = "Kind::One Kind::Two Other::One Kind::One";
+        assert_eq!(variant_count(source, "Kind", "One"), 2);
+        assert_eq!(variant_count(source, "Kind", "Two"), 1);
+        assert_eq!(variant_count(source, "Other", "One"), 1);
+    }
+
+    #[test]
+    fn macro_argument_count_handles_single_and_multiline_invocations() {
+        let source = "item!(\"one\", Function, Wanted, Evidence),\n\
+                      item!(\n\"two\",\nMethod,\nOther,\nEvidence\n),\n\
+                      item!(\"three\", Function, WantedExtra, Evidence),";
+        assert_eq!(
+            macro_argument_values(source, "item!(", 0),
+            vec![
+                "\"one\"".to_string(),
+                "\"two\"".to_string(),
+                "\"three\"".to_string()
+            ]
+        );
+        assert_eq!(macro_argument_count(source, "item!(", 2, "Wanted"), 1);
+        assert_eq!(macro_argument_count(source, "item!(", 2, "Other"), 1);
+        assert_eq!(macro_argument_count(source, "item!(", 2, "WantedExtra"), 1);
+    }
+
+    #[test]
+    fn contract_census_comparison_preserves_kind_and_cross_kind_names() {
+        let abi = "UNIFFI_META_BLERADAR_CORE_FUNC_SHARED\n\
+                   UNIFFI_META_BLERADAR_CORE_METHOD_SHARED\n\
+                   UNIFFI_META_BLERADAR_CORE_FUNC_ONLY_FUNCTION\n\
+                   UNIFFI_META_BLERADAR_CORE_METHOD_ONLY_METHOD\n";
+        let expected = abi_contract_keys(abi);
+        let correct = runtime_contract_keys(
+            "runtime_contract!(\"shared\", Function, Unknown, StaticReachability),\n\
+             runtime_contract!(\"shared\", Method, Unknown, StaticReachability),\n\
+             runtime_contract!(\"only_function\", Function, Unknown, StaticReachability),\n\
+             runtime_contract!(\"only_method\", Method, Unknown, StaticReachability),",
+        )
+        .unwrap();
+        let swapped = runtime_contract_keys(
+            "runtime_contract!(\"shared\", Function, Unknown, StaticReachability),\n\
+             runtime_contract!(\"shared\", Method, Unknown, StaticReachability),\n\
+             runtime_contract!(\"only_function\", Method, Unknown, StaticReachability),\n\
+             runtime_contract!(\"only_method\", Function, Unknown, StaticReachability),",
+        )
+        .unwrap();
+
+        assert_eq!(dedup_sorted(correct), expected);
+        assert_ne!(dedup_sorted(swapped), expected);
+    }
+
+    #[test]
     fn dedup_sorted_sorts_and_removes_duplicates() {
         let out = dedup_sorted(vec!["b".to_string(), "a".to_string(), "b".to_string()]);
         assert_eq!(out, vec!["a".to_string(), "b".to_string()]);
@@ -722,5 +1011,115 @@ mod tests {
         let hash = "0123456789abcdef".repeat(4);
         let text = format!("Different label: {hash}");
         assert_eq!(find_sha256_after_label(&text, "Label:"), None);
+    }
+
+    #[test]
+    fn parse_lockfile_package_names_extracts_every_name_line_in_order() {
+        let text = "[[package]]\nname = \"bleradar-core\"\nversion = \"0.4.2\"\n\n\
+                     [[package]]\nname = \"bleradar-compat\"\n";
+        assert_eq!(
+            parse_lockfile_package_names(text),
+            vec!["bleradar-core".to_string(), "bleradar-compat".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_lockfile_package_names_returns_empty_on_unparsable_lockfile() {
+        assert!(parse_lockfile_package_names("this is not a Cargo.lock at all").is_empty());
+        assert!(parse_lockfile_package_names("").is_empty());
+    }
+
+    #[test]
+    fn evaluate_dependency_policy_reports_empty_lockfile() {
+        let names: Vec<String> = Vec::new();
+        assert_eq!(
+            evaluate_dependency_policy(&names, &ALLOWED),
+            DependencyPolicyOutcome::EmptyLockfile
+        );
+    }
+
+    #[test]
+    fn evaluate_dependency_policy_reports_sorted_deduplicated_foreign_crates() {
+        // "serde" appears twice and out of sorted order, alongside one
+        // in-policy crate: the outcome must name only the foreign crates,
+        // sorted, deduplicated.
+        let names = vec![
+            "bleradar-core".to_string(),
+            "serde".to_string(),
+            "libc".to_string(),
+            "serde".to_string(),
+        ];
+        assert_eq!(
+            evaluate_dependency_policy(&names, &ALLOWED),
+            DependencyPolicyOutcome::ForeignCrates(vec!["libc".to_string(), "serde".to_string()])
+        );
+    }
+
+    #[test]
+    fn evaluate_dependency_policy_reports_compliant_when_every_name_is_allowed() {
+        let names = vec!["bleradar-compat".to_string(), "bleradar-core".to_string()];
+        assert_eq!(
+            evaluate_dependency_policy(&names, &ALLOWED),
+            DependencyPolicyOutcome::Compliant(vec![
+                "bleradar-compat".to_string(),
+                "bleradar-core".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn evaluate_oracle_hash_fails_when_expected_is_unparsable() {
+        assert_eq!(
+            evaluate_oracle_hash(
+                None,
+                Some("deadbeef"),
+                "could not parse expected hash".to_string(),
+                "missing".to_string(),
+                "label",
+            ),
+            Err("could not parse expected hash".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluate_oracle_hash_fails_when_file_is_missing() {
+        assert_eq!(
+            evaluate_oracle_hash(
+                Some("abc123"),
+                None,
+                "unparsable".to_string(),
+                "missing oracle file: x.apk".to_string(),
+                "x.apk",
+            ),
+            Err("missing oracle file: x.apk".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluate_oracle_hash_fails_on_mismatch_naming_both_hashes() {
+        assert_eq!(
+            evaluate_oracle_hash(
+                Some("expected_hash"),
+                Some("actual_hash"),
+                String::new(),
+                String::new(),
+                "oracle.apk",
+            ),
+            Err("oracle.apk: expected expected_hash, observed actual_hash".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluate_oracle_hash_passes_when_hashes_match() {
+        assert_eq!(
+            evaluate_oracle_hash(
+                Some("same_hash"),
+                Some("same_hash"),
+                String::new(),
+                String::new(),
+                "oracle.apk",
+            ),
+            Ok(())
+        );
     }
 }

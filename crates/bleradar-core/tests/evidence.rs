@@ -243,3 +243,228 @@ fn source_metadata_is_not_silently_changed() {
         Err(ProvenanceError::SourceMetadataMismatch { .. })
     ));
 }
+
+#[test]
+fn unverified_transformation_is_stored_and_distinguishable_from_a_verified_one() {
+    let source = source();
+    let observation = observation(&source);
+    let feature = bleradar_core::Feature::new("feature-1", "digest", "deadbeef")
+        .unwrap()
+        .from_observation(observation.id())
+        .created_at(100);
+    let artifact = Artifact::new("artifact-1", ArtifactType::Digital).unwrap();
+    let input = Representation::new("representation-raw", artifact.id(), RepresentationType::Raw)
+        .unwrap()
+        .with_feature(feature.id());
+    let output = Representation::new(
+        "representation-normalized",
+        artifact.id(),
+        RepresentationType::Normalized,
+    )
+    .unwrap()
+    .with_feature(feature.id());
+    let unverified = Transformation::new(
+        "transformation-unverified",
+        input.id(),
+        output.id(),
+        vec![feature.id().to_owned()],
+        Vec::<String>::new(),
+        Verification::unverified(),
+    )
+    .unwrap();
+    let test = Test::new(
+        "test-1",
+        "normalization preserves digest",
+        TestType::Provenance,
+    )
+    .unwrap()
+    .completed(bleradar_core::TestStatus::Passed, 200);
+    let verified = Transformation::new(
+        "transformation-verified",
+        input.id(),
+        output.id(),
+        vec![feature.id().to_owned()],
+        Vec::<String>::new(),
+        Verification::passed(vec!["test-1".to_owned()]).unwrap(),
+    )
+    .unwrap();
+
+    let mut store = EvidenceStore::new();
+    store.add_source(source).unwrap();
+    store.add_observation(observation).unwrap();
+    store.add_artifact(artifact).unwrap();
+    store.add_feature(feature).unwrap();
+    store.add_representation(input).unwrap();
+    store.add_representation(output).unwrap();
+    store.add_test(test).unwrap();
+    // An unverified transformation is accepted without any verification
+    // tests attached — it must not be rejected as if it were an incomplete
+    // "verified" transformation.
+    store.add_transformation(unverified).unwrap();
+    store.add_transformation(verified).unwrap();
+
+    let unverified_trace = store
+        .trace_transformation("transformation-unverified")
+        .unwrap();
+    let verified_trace = store
+        .trace_transformation("transformation-verified")
+        .unwrap();
+
+    assert_eq!(
+        unverified_trace.transformation.verification().status(),
+        bleradar_core::VerificationStatus::Unverified
+    );
+    assert!(
+        unverified_trace
+            .transformation
+            .verification()
+            .test_ids()
+            .is_empty()
+    );
+    assert!(unverified_trace.verification_tests.is_empty());
+    assert_eq!(
+        verified_trace.transformation.verification().status(),
+        bleradar_core::VerificationStatus::Passed
+    );
+    assert_eq!(verified_trace.verification_tests[0].id(), "test-1");
+    assert_ne!(
+        unverified_trace.transformation.verification().status(),
+        verified_trace.transformation.verification().status()
+    );
+}
+
+#[test]
+fn verification_passed_and_failed_reject_empty_test_ids() {
+    assert_eq!(
+        Verification::passed(Vec::<String>::new()),
+        Err(ProvenanceError::EmptyValue {
+            field: "verification test ids"
+        })
+    );
+    assert_eq!(
+        Verification::failed(Vec::<String>::new()),
+        Err(ProvenanceError::EmptyValue {
+            field: "verification test ids"
+        })
+    );
+}
+
+#[test]
+fn verification_failed_records_status_and_optional_notes() {
+    let verification = Verification::failed(vec!["test-2".to_owned()])
+        .unwrap()
+        .with_notes("normalization altered the checksum");
+
+    assert_eq!(
+        verification.status(),
+        bleradar_core::VerificationStatus::Failed
+    );
+    assert_eq!(verification.test_ids(), ["test-2".to_owned()]);
+    assert_eq!(
+        verification.notes(),
+        Some("normalization altered the checksum")
+    );
+    assert_eq!(Verification::unverified().notes(), None);
+}
+
+#[test]
+fn constructors_reject_empty_and_whitespace_only_identifiers() {
+    assert_eq!(
+        Source::new("", SourceType::Sensor, RetrievalMethod::Direct),
+        Err(ProvenanceError::EmptyValue { field: "source id" })
+    );
+    assert_eq!(
+        Source::new("   ", SourceType::Sensor, RetrievalMethod::Direct),
+        Err(ProvenanceError::EmptyValue { field: "source id" })
+    );
+    assert!(matches!(
+        Observation::new(
+            "",
+            "raw",
+            None,
+            "source-1",
+            SourceType::Sensor,
+            RetrievalMethod::Direct,
+            100,
+        ),
+        Err(ProvenanceError::EmptyValue {
+            field: "observation id"
+        })
+    ));
+    assert!(matches!(
+        Observation::new(
+            "observation-1",
+            "raw",
+            None,
+            "",
+            SourceType::Sensor,
+            RetrievalMethod::Direct,
+            100,
+        ),
+        Err(ProvenanceError::EmptyValue {
+            field: "observation source"
+        })
+    ));
+    assert!(matches!(
+        Hypothesis::new("", "ordinary explanation", HypothesisKind::Null),
+        Err(ProvenanceError::EmptyValue {
+            field: "hypothesis id"
+        })
+    ));
+    assert!(matches!(
+        Hypothesis::new("hypothesis-1", "", HypothesisKind::Null),
+        Err(ProvenanceError::EmptyValue {
+            field: "hypothesis label"
+        })
+    ));
+    assert!(matches!(
+        Claim::new("", "statement", "hypothesis-1"),
+        Err(ProvenanceError::EmptyValue { field: "claim id" })
+    ));
+    assert!(matches!(
+        Evidence::new(
+            "",
+            "hypothesis-1",
+            "observation-1",
+            EvidenceRole::Supporting
+        ),
+        Err(ProvenanceError::EmptyValue {
+            field: "evidence id"
+        })
+    ));
+    assert!(matches!(
+        Artifact::new("", ArtifactType::Digital),
+        Err(ProvenanceError::EmptyValue {
+            field: "artifact id"
+        })
+    ));
+    assert!(matches!(
+        Representation::new("", "artifact-1", RepresentationType::Raw),
+        Err(ProvenanceError::EmptyValue {
+            field: "representation id"
+        })
+    ));
+    assert!(matches!(
+        Test::new("", "name", TestType::Provenance),
+        Err(ProvenanceError::EmptyValue { field: "test id" })
+    ));
+    assert!(matches!(
+        bleradar_core::Feature::new("", "name", "value"),
+        Err(ProvenanceError::EmptyValue {
+            field: "feature id"
+        })
+    ));
+    assert!(matches!(
+        Transformation::new(
+            "",
+            "input",
+            "output",
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+            Verification::unverified(),
+        ),
+        Err(ProvenanceError::EmptyValue {
+            field: "transformation id"
+        })
+    ));
+}

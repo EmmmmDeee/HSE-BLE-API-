@@ -17,15 +17,35 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 - `crates/bleradar-core::infrastructure` — temporal metamorphic infrastructure
   correlation across domains, DNS, addresses, certificates, hosting, HTTP,
   public assets, application structure, and archived states.
-- `crates/bleradar-compat` — semantic parity registry for high-value observed native contracts.
+- `crates/bleradar-compat` — complete native ABI runtime/reachability census plus a separate source-replacement parity registry.
 - `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
-- `docs/` — audit, issue/exception ledgers, parity frontier, verification record, and the autonomous-session operating documents.
+- `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, and verification records.
 - `benchmarks/` — benchmark harness notes.
-- `RUST_CONVERSION.md` — analysis of what is already in safe Rust and the ranked plan for converting the remaining native/Android surface.
+- `RUST_CONVERSION.md` — Rust-first migration boundary and consolidation prerequisites.
 - `.github/workflows/gates.yml` — CI enforcement of every gate below.
 - `BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk` — original APK oracle.
 - `BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip` — original migration archive; also retains the extracted native oracles (`oracle/libbleradar_core.so`, `oracle/classes.dex`) and the migration `git-history.bundle` for differential testing.
+
+## Verified runtime status
+
+The shipped APK and this reconstructed workspace are separate execution
+topologies. In the APK, Android DEX owns lifecycle, scheduling, platform-event
+normalization, candidate generation, UI projection, and fallbacks; generated
+bindings call 124 ABI contracts implemented by the shipped Rust native core.
+The workspace libraries are reached by Cargo callers/tests and are not linked
+into that APK.
+
+The runtime registry classifies all 124 contracts: 41 observed executing, 78
+statically reached from non-generated DEX call sites, and 5 of unknown
+reachability. The five unknowns are read-only `RadarStore` methods that require
+trustworthy Android/Bionic state. All shipped ABI implementations are
+Rust-native, but none of the similarly named workspace replacements is yet
+differentially verified across its complete observable contract.
+
+See `docs/VERIFIED_RUNTIME_TOPOLOGY.md`,
+`docs/BEHAVIORAL_CONTRACT.md`, and `docs/RUST_TARGET_ARCHITECTURE.md` before
+changing runtime ownership.
 
 ## High-value tracking capabilities represented in Rust
 
@@ -168,7 +188,8 @@ These same gates run on every push and pull request via
 cargo xtask parity-report
 ```
 
-This regenerates `docs/PARITY_COVERAGE.md` from the packaged ABI census and semantic compatibility registry.
+This regenerates `docs/PARITY_COVERAGE.md` from the packaged ABI census and
+the semantic source-parity/runtime registries.
 
 ## Developer tooling (`cargo xtask`)
 
@@ -202,10 +223,13 @@ Proprietary (see the `license` field in `Cargo.toml`). All rights reserved by th
 
 Read, in order:
 
-1. `docs/FINAL_REPORT.md`
-2. `docs/ISSUE_LEDGER.md`
-3. `docs/REQUIREMENTS_LEDGER.md`
-4. `docs/PARITY_COVERAGE.md`
+1. `docs/VERIFIED_RUNTIME_TOPOLOGY.md`
+2. `docs/BEHAVIORAL_CONTRACT.md`
+3. `docs/RUST_TARGET_ARCHITECTURE.md`
+4. `docs/ISSUE_LEDGER.md`
 5. `docs/EXCEPTION_LEDGER.md`
-6. `docs/COLD_START_VERIFICATION.md`
+6. `docs/PARITY_COVERAGE.md`
 7. `RUST_CONVERSION.md`
+8. `docs/FINAL_REPORT.md`
+9. `docs/REQUIREMENTS_LEDGER.md`
+10. `docs/COLD_START_VERIFICATION.md`
