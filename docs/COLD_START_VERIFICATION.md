@@ -23,11 +23,13 @@ cargo xtask gates
 ```
 
 Observed on Linux x86_64 with the pinned toolchain (rustc/cargo 1.98.0, per
-`rust-toolchain.toml`): the four cargo gates exit 0, with 15 integration tests
-passing in `bleradar-core` and 3 in `bleradar-compat`. The same gates plus a
-parity-report drift check now run continuously in CI
-(`.github/workflows/gates.yml`), so Layer 2 is re-proven on every push and
-pull request rather than asserted once.
+`rust-toolchain.toml`): the four cargo gates exit 0. Test counts grow with the
+workspace and are intentionally not re-asserted as a fixed number here (that
+would itself drift silently); the authoritative count on any given commit is
+whatever `cargo test --workspace --locked` and
+`cargo test --manifest-path xtask/Cargo.toml --locked` report, re-proven on
+every push and pull request by `.github/workflows/gates.yml`'s
+`cargo xtask gates`, which runs both plus the parity-report drift check.
 
 `cargo audit` and `cargo deny` now run fully offline against the vendored
 RustSec advisory database (`vendor/rustsec-advisory-db/`, materialized into a
