@@ -188,8 +188,58 @@ fn dedup_sorted(mut values: Vec<String>) -> Vec<String> {
     values
 }
 
-/// Port of `tools/parity_report.py`: regenerates `docs/PARITY_COVERAGE.md`
-/// from `docs/NATIVE_ABI.txt` and the semantic compatibility registry.
+/// Returns the initializer body of a public array constant in Rust source.
+fn array_const_body<'a>(source: &'a str, declaration: &str) -> Result<&'a str, String> {
+    let (_, after_declaration) = source
+        .split_once(declaration)
+        .ok_or_else(|| format!("missing declaration `{declaration}`"))?;
+    let (_, initializer) = after_declaration
+        .split_once('=')
+        .ok_or_else(|| format!("missing initializer for `{declaration}`"))?;
+    let initializer = initializer.trim_start();
+    let body = initializer
+        .strip_prefix("&[")
+        .or_else(|| initializer.strip_prefix('['))
+        .ok_or_else(|| format!("initializer for `{declaration}` is not an array"))?;
+    let (body, _) = body
+        .split_once("\n];")
+        .ok_or_else(|| format!("unterminated initializer for `{declaration}`"))?;
+    Ok(body)
+}
+
+fn variant_count(source: &str, enum_name: &str, variant: &str) -> usize {
+    source.matches(&format!("{enum_name}::{variant}")).count()
+}
+
+fn macro_argument_values(source: &str, macro_prefix: &str, argument_index: usize) -> Vec<String> {
+    let mut rest = source;
+    let mut values = Vec::new();
+    while let Some((_, after_prefix)) = rest.split_once(macro_prefix) {
+        let Some((arguments, after_invocation)) = after_prefix.split_once(')') else {
+            break;
+        };
+        if let Some(argument) = arguments.split(',').nth(argument_index) {
+            values.push(argument.trim().to_string());
+        }
+        rest = after_invocation;
+    }
+    values
+}
+
+fn macro_argument_count(
+    source: &str,
+    macro_prefix: &str,
+    argument_index: usize,
+    expected: &str,
+) -> usize {
+    macro_argument_values(source, macro_prefix, argument_index)
+        .iter()
+        .filter(|argument| argument.as_str() == expected)
+        .count()
+}
+
+/// Regenerates `docs/PARITY_COVERAGE.md` from `docs/NATIVE_ABI.txt` and the
+/// semantic compatibility/runtime registries.
 fn cmd_parity_report() -> Result<(), String> {
     let root = repo_root()?;
     let abi_path = root.join("docs/NATIVE_ABI.txt");
@@ -199,49 +249,124 @@ fn cmd_parity_report() -> Result<(), String> {
     let abi_text = read_to_string(&abi_path)?;
     let compat = read_to_string(&compat_path)?;
 
-    let mut observed_count = 0usize;
-    observed_count += dedup_sorted(find_prefixed_runs(
+    let mut observed_names = find_prefixed_runs(&abi_text, "UNIFFI_META_BLERADAR_CORE_FUNC_");
+    observed_names.extend(find_prefixed_runs(
         &abi_text,
-        "UNIFFI_META_BLERADAR_CORE_FUNC_",
-    ))
-    .len();
-    let mut method_or_ctor = find_prefixed_runs(&abi_text, "UNIFFI_META_BLERADAR_CORE_METHOD_");
-    method_or_ctor.extend(find_prefixed_runs(
+        "UNIFFI_META_BLERADAR_CORE_METHOD_",
+    ));
+    observed_names.extend(find_prefixed_runs(
         &abi_text,
         "UNIFFI_META_BLERADAR_CORE_CONSTRUCTOR_",
     ));
-    observed_count += dedup_sorted(method_or_ctor).len();
+    let observed_names = dedup_sorted(
+        observed_names
+            .into_iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect(),
+    );
+    let observed_count = observed_names.len();
 
-    let registered = find_quoted_name_values(&compat);
+    let source_contracts = array_const_body(&compat, "pub const CONTRACTS")?;
+    let runtime_contracts = array_const_body(&compat, "pub const RUNTIME_CONTRACTS")?;
+    let source_names = find_quoted_name_values(source_contracts);
+    let runtime_names: Vec<String> =
+        macro_argument_values(runtime_contracts, "runtime_contract!(", 0)
+            .into_iter()
+            .filter_map(|argument| {
+                argument
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .map(ToString::to_string)
+            })
+            .collect();
+    let runtime_count = runtime_names.len();
+    if runtime_count != observed_count {
+        return Err(format!(
+            "runtime contract census has {} entries, expected {observed_count}",
+            runtime_count
+        ));
+    }
+    if dedup_sorted(runtime_names) != observed_names {
+        return Err("runtime contract names differ from the native ABI census".to_string());
+    }
+    let runtime_variant_count =
+        |variant| macro_argument_count(runtime_contracts, "runtime_contract!(", 2, variant);
+    let verified_runtime = runtime_variant_count("VerifiedRuntime");
+    let statically_reachable = runtime_variant_count("StaticallyReachable");
+    let conditionally_reachable = runtime_variant_count("ConditionallyReachable");
+    let unreachable = runtime_variant_count("Unreachable");
+    let unknown = runtime_variant_count("Unknown");
+    if verified_runtime + statically_reachable + conditionally_reachable + unreachable + unknown
+        != runtime_count
+    {
+        return Err("runtime contract reachability census is incomplete".to_string());
+    }
 
     let mut lines: Vec<String> = vec![
         "# Parity Coverage".to_string(),
         String::new(),
-        "Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility registry.".to_string(),
+        "Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility/runtime registries."
+            .to_string(),
         String::new(),
         format!("- Observed UniFFI function/method/constructor symbols: **{observed_count}**"),
         format!(
-            "- Contracts with explicit semantic migration status: **{}**",
-            registered.len()
+            "- Contracts with runtime implementation/reachability classification: **{}**",
+            runtime_count
         ),
         format!(
-            "- Remaining observed symbols requiring semantic registration/characterization: **{}**",
-            observed_count.saturating_sub(registered.len())
+            "- Remaining observed symbols requiring runtime classification: **{}**",
+            observed_count.saturating_sub(runtime_count)
         ),
         String::new(),
-        "## Registered semantic frontier".to_string(),
+        "## Shipped implementation".to_string(),
+        String::new(),
+        format!("- `RUST_NATIVE`: **{runtime_count}**"),
+        "- `RUST_MIGRATION_REQUIRED`: **0**".to_string(),
+        "- `NON_RUST_JUSTIFIED_BOUNDARY`: **0**".to_string(),
+        "- `UNKNOWN`: **0**".to_string(),
+        String::new(),
+        "## Reachability".to_string(),
+        String::new(),
+        format!("- `VERIFIED_RUNTIME`: **{verified_runtime}**"),
+        format!("- `STATICALLY_REACHABLE`: **{statically_reachable}**"),
+        format!("- `CONDITIONALLY_REACHABLE`: **{conditionally_reachable}**"),
+        format!("- `UNREACHABLE`: **{unreachable}**"),
+        format!("- `UNKNOWN`: **{unknown}**"),
+        String::new(),
+        "## Source-replacement parity frontier".to_string(),
+        String::new(),
+        format!(
+            "- Differentially verified: **{}**",
+            variant_count(source_contracts, "ParityStatus", "DifferentiallyVerified")
+        ),
+        format!(
+            "- Source analogue only: **{}**",
+            variant_count(source_contracts, "ParityStatus", "SourceAnalog")
+        ),
+        format!(
+            "- Oracle only: **{}**",
+            variant_count(source_contracts, "ParityStatus", "OracleOnly")
+        ),
+        format!(
+            "- Blocked: **{}**",
+            variant_count(source_contracts, "ParityStatus", "Blocked")
+        ),
+        String::new(),
+        "Registered source-replacement contracts:".to_string(),
         String::new(),
     ];
-    for name in &registered {
+    for name in &source_names {
         lines.push(format!("- `{name}`"));
     }
     lines.push(String::new());
     lines.push("## Interpretation".to_string());
     lines.push(String::new());
     lines.push(
-        "A symbol appearing in the APK is not automatically considered migrated. Exact parity \
-         requires characterization of inputs, outputs, side effects, and errors against the \
-         immutable oracle. The registry intentionally records that distinction."
+        "The shipped implementations behind all 124 ABI contracts are Rust-native; this does not \
+         establish parity for similarly named functions in the reconstructed source workspace. \
+         Exact source-replacement parity requires characterization of inputs, outputs, side \
+         effects, state, termination, and errors against the immutable oracle. Reachability and \
+         evidence details are recorded in `docs/VERIFIED_RUNTIME_TOPOLOGY.md`."
             .to_string(),
     );
 
@@ -741,6 +866,54 @@ mod tests {
         // extracted, but the earlier, well-formed match is still returned.
         let out = find_quoted_name_values(r#"name: "first", name: "unterminated"#);
         assert_eq!(out, vec!["first".to_string()]);
+    }
+
+    #[test]
+    fn array_const_body_extracts_only_the_named_initializer() {
+        let source = "pub const FIRST: [Item; 1] = [\nItem::A,\n];\n\
+                      pub const SECOND: &[Item] = &[\nItem::B,\n];\n";
+        assert_eq!(
+            array_const_body(source, "pub const SECOND"),
+            Ok("\nItem::B,")
+        );
+    }
+
+    #[test]
+    fn array_const_body_reports_missing_or_unterminated_initializers() {
+        assert_eq!(
+            array_const_body("pub const OTHER: [Item; 0] = [\n];", "pub const WANTED"),
+            Err("missing declaration `pub const WANTED`".to_string())
+        );
+        assert_eq!(
+            array_const_body("pub const WANTED: [Item; 1] = [Item::A", "pub const WANTED"),
+            Err("unterminated initializer for `pub const WANTED`".to_string())
+        );
+    }
+
+    #[test]
+    fn variant_count_matches_only_the_requested_variant() {
+        let source = "Kind::One Kind::Two Other::One Kind::One";
+        assert_eq!(variant_count(source, "Kind", "One"), 2);
+        assert_eq!(variant_count(source, "Kind", "Two"), 1);
+        assert_eq!(variant_count(source, "Other", "One"), 1);
+    }
+
+    #[test]
+    fn macro_argument_count_handles_single_and_multiline_invocations() {
+        let source = "item!(\"one\", Function, Wanted, Evidence),\n\
+                      item!(\n\"two\",\nMethod,\nOther,\nEvidence\n),\n\
+                      item!(\"three\", Function, WantedExtra, Evidence),";
+        assert_eq!(
+            macro_argument_values(source, "item!(", 0),
+            vec![
+                "\"one\"".to_string(),
+                "\"two\"".to_string(),
+                "\"three\"".to_string()
+            ]
+        );
+        assert_eq!(macro_argument_count(source, "item!(", 2, "Wanted"), 1);
+        assert_eq!(macro_argument_count(source, "item!(", 2, "Other"), 1);
+        assert_eq!(macro_argument_count(source, "item!(", 2, "WantedExtra"), 1);
     }
 
     #[test]

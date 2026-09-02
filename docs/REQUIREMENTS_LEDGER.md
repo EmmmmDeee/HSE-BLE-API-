@@ -231,18 +231,20 @@ scenario within it.
 
 ---
 
-## REQ-COMPAT — Android-parity compatibility registry
+## REQ-COMPAT — Runtime topology and source-replacement registry
 
 `crates/bleradar-compat/src/lib.rs`, `crates/bleradar-compat/tests/contracts.rs`
 
 | ID | Requirement | Inputs → Outputs | Side effects / Failure behavior | Location | Tests | Status |
 |---|---|---|---|---|---|---|
-| REQ-COMPAT-001 | Every tracked native symbol is registered with an explicit `ParityStatus::{Reconstructed,OracleOnly,Blocked}` | — → `CONTRACTS: [Contract; 18]` | Pure static registry | `lib.rs::CONTRACTS` | `tests/contracts.rs` (3 tests) | VERIFIED |
-| REQ-COMPAT-002 | The registry never confuses "observed in the APK" with "reconstructed with verified semantics" | registry read | — | `lib.rs::ParityStatus` | contracts.rs | VERIFIED |
-| REQ-COMPAT-003 | Coverage-count totals equal the registry length (no silent drift) | registry → coverage counts | — | `lib.rs` | contracts.rs | VERIFIED |
-| REQ-COMPAT-004 | Every native symbol observed in the shipped APK eventually gets a status + characterized behavior (106 of 124 currently unregistered, per `docs/PARITY_COVERAGE.md`) | full native ABI surface → full registry | — | `docs/PARITY_COVERAGE.md` (generated) | tracked, not closable here | PARTIAL — **explicitly and defensibly out of scope for this session.** Closing this requires an aarch64 Android execution/emulation harness (MIG-003 in `docs/ISSUE_LEDGER.md`; entries 1-4 in `docs/EXCEPTION_LEDGER.md`) that does not exist in this environment, and decision #1 in `docs/AUTONOMOUS_DECISIONS.md` forbids inferring behavior from the obfuscated DEX/stripped `.so` alone. This is a physical constraint, not a deferred task. |
+| REQ-COMPAT-001 | Every observed native function/method/constructor has implementation, reachability, and evidence classifications | ABI census → `RUNTIME_CONTRACTS: [RuntimeContract; 124]` | Pure static registry; generation fails on count drift | `lib.rs::RUNTIME_CONTRACTS` | `tests/contracts.rs` | VERIFIED |
+| REQ-COMPAT-002 | Runtime implementation language is never confused with source-replacement parity | registry read → independent `Implementation` and `ParityStatus` | No `SourceAnalog` can imply differential proof | `lib.rs::{Implementation,ParityStatus}` | contracts + oracle_characterization | VERIFIED |
+| REQ-COMPAT-003 | Coverage/status totals equal their registry lengths (no silent drift) | registry → coverage/reachability counts | — | `lib.rs` | contracts.rs | VERIFIED |
+| REQ-COMPAT-004 | Every observed native symbol has characterized behavior sufficient to remove the oracle implementation | full ABI and Android paths → executable contract corpus | Unknown/failure/state/side effects must remain distinct | `docs/BEHAVIORAL_CONTRACT.md`, generated `docs/PARITY_COVERAGE.md` | provisional pure fixtures; Android harness pending | PARTIAL — all 124 are classified, but 27 retain unknown reachability and 0 source replacements are differentially verified over their full observable contract |
+| REQ-COMPAT-005 | Known oracle/source gaps cannot be silently promoted to parity | sampled inputs → explicit mismatch evidence | Pure/no persistent side effects | `tests/oracle_characterization.rs` | haversine, proximity, BLE range, 6 GHz channel and registry guards | VERIFIED for captured samples only |
 
-**Runtime verification evidence:** `cargo test -p bleradar-compat --locked` → 3 passed, 0 failed; 2 doctests passed (2026-08-31).
+**Runtime verification evidence:** use `cargo test -p bleradar-compat --locked`;
+test counts are intentionally not frozen in this ledger.
 
 ---
 
@@ -307,7 +309,10 @@ and close it without re-deriving this audit.
 - **Infrastructure**: `CommonCdn`/`CommonCms`/`CommonRegistrar`/`SharedThirdPartyService`/`Unknown` as a test's leading-outcome scenario (REQ-INFRA-002).
 - **Website**: `CommonTemplate`/`ContentReuse`/`DevelopmentRelationship`/`Coincidence`/`Unknown` as a test's leading-outcome scenario; multi-observation mid-extraction rollback ordering (REQ-WEB-002, 004).
 - **xtask**: `check-dependency-policy`/`check-oracle-integrity` command-level failure branches — closing these fully would need the commands refactored to accept injectable paths for in-process fixture testing, which is a larger change than this pass's scope, not a same-session fix; `repo_root()` (REQ-XTASK-002, 003 command-level, 008).
-- **Compat**: the 106-symbol Android-parity frontier (REQ-COMPAT-004) — **explicitly and defensibly out of scope**, not merely deferred: it requires an aarch64 Android execution/emulation harness (MIG-003) absent from this and every prior session's environment, and the project's own decision #1 forbids inferring behavior from the obfuscated DEX/stripped `.so` alone. This is a physical constraint external to engineering effort, not unfinished work.
+- **Compat/runtime**: all 124 ABI contracts are registered, but 27 have unknown
+  reachability and the stateful/lifecycle/network behavior needed for
+  replacement parity requires an ARM64 Android/Bionic harness (MIG-003). This is
+  an open evidence and migration backlog, not a non-Rust exception.
 
 ## Termination statement
 
@@ -315,10 +320,7 @@ Every requirement audited in this pass is now either `VERIFIED`, or is
 `IMPLEMENTED_UNVERIFIED`/`PARTIAL` with its specific missing test scenario
 named above — a bounded, traceable backlog. No `BROKEN` and no silently
 `MISSING` requirement was found anywhere in the seven engine modules, the
-four original core modules, `bleradar-compat`, or `xtask`, across an
-exhaustive read of every source and test file. The one requirement group
-that is genuinely blocked (REQ-COMPAT-004, the Android-parity frontier) is
-blocked by a documented physical constraint external to this session, not by
-unfinished engineering work. This satisfies the termination condition for
-the scope reachable within one session; the deferred list above is the
-traceable starting point for the next.
+four original core modules, `bleradar-compat`, or `xtask`, across the original
+audit scope. REQ-COMPAT-004 remains open until Android/Bionic characterization
+and target differential verification satisfy the per-component removal gates
+in `BEHAVIORAL_CONTRACT.md`.

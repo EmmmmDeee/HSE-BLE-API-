@@ -38,6 +38,8 @@ workspace's `Cargo.lock` contains zero third-party crates, so the advisory
 surface is empty, and both tools confirm it rather than leaving the command
 unrun. See `docs/AUTONOMOUS_DECISIONS.md` #28.
 
-Android-target execution (device/emulator characterization) remains outside
-this environment; see MIG-003. This document continues to distinguish archive
-reproducibility from compiler/runtime verification.
+Android SDK packaging tools are available in the current environment, but the
+original Android source/Gradle project, ARM64 emulator or device, and signing
+key are not. Android/Bionic characterization therefore remains open under
+MIG-003. This document continues to distinguish archive reproducibility from
+compiler/runtime verification.

@@ -1,10 +1,26 @@
 # Exception Ledger
 
-1. **Android UI migration** — original Compose/Kotlin source is absent and R8-obfuscated. Recreating it from names/strings would be a new implementation, not strict parity.
-2. **Android BLE service migration** — callback timing, permission behavior and lifecycle side effects require characterization on Android hardware/emulator.
-3. **Exact UniFFI record layouts/private logic** — public record names are observable, but the stripped Rust source and all original type definitions are not.
-4. **Signing identity** — no private signing key is present. Any modified APK signed with another key is a different application identity for update purposes.
-5. **Cargo cold-start gate** — *superseded 2026-08-28, fully closed 2026-08-31*: a Rust-capable execution host became available; all four cargo gates were executed green with the pinned 1.98.0 toolchain and are now CI-enforced (`.github/workflows/gates.yml`). `cargo audit` and `cargo deny` were subsequently installed and now run fully offline against the vendored RustSec advisory database (`vendor/rustsec-advisory-db/`), confirming zero advisories against the zero-third-party-crate lockfile; see `docs/AUTONOMOUS_DECISIONS.md` #28.
-6. **Legacy dependency audit** — APK metadata records some AndroidX versions but does not contain complete source package-manager lock data needed to reproduce every transitive dependency/advisory state.
+Only hard external boundaries qualify here. Missing source, effort, missing
+fixtures, and unknown behavior are migration risks, not permission to retain
+core logic outside Rust.
 
-These are physical/evidentiary constraints, not deferred claims of completion.
+| ID | Non-Rust remainder | Precise external blocker | Thinnest permitted boundary |
+|---|---|---|---|
+| EXT-001 | Android `Application`, `Activity`, `Service`, receiver/listener classes | Android's manifest, class loader, Binder/lifecycle dispatcher, and public SDK instantiate and invoke JVM classes/interfaces | Component/callback methods copy fields into generated FFI events and execute Rust-returned platform commands; no policy, scheduling, validation, or state |
+| EXT-002 | Android radio, location, GATT, permission, intent, content-URI, notification, and wake-lock calls | These capabilities expose framework-owned Java objects, callbacks, tokens, and thread-affine APIs | Adapter retains opaque handles and executes typed operations selected by Rust; all normalization, retry, resource, and success policy remains Rust |
+| EXT-003 | Compose/view rendering, accessibility, navigation, and Android resources | The shipped Android rendering/runtime and generated `R` resources execute as JVM/platform APIs | Render immutable Rust view models and relay user events; filtering, sorting, labels, action eligibility, and error state remain Rust |
+| EXT-004 | Manifest/resources/Gradle/package/signing declarations | Android packaging consumes declarative XML/resources, build-system syntax, and cryptographic signing material rather than Rust application code | Metadata/build glue only; no application behavior |
+| EXT-005 | Generated UniFFI/JNI/JNA platform binding code | Cross-language ABI marshalling and JVM-visible wrapper classes are required by the Android toolchain/calling convention | Generated wrappers only, with version/ownership/error tests; no handwritten domain decisions |
+| EXT-006 | Original update signing identity | The original private signing key is absent; Android rejects an update signed by another identity | Never modify or re-sign the oracle; a future package must explicitly use a new distribution identity |
+| EXT-007 | Complete legacy dependency audit | An APK does not preserve the original Gradle lockfiles and all source dependency declarations | Report only evidenced metadata; audit every dependency in a future reproducible source build |
+
+The absent original source and stripped/private native implementation are
+evidentiary limitations, not runtime exceptions. Exact lifecycle, callback,
+record-layout, state, persistence, and network semantics remain
+`UNKNOWN`/blocked until characterized; the target ownership remains Rust.
+
+The former Cargo-host exception is closed: the pinned Rust toolchain and
+offline `cargo audit`/`cargo deny` gates are available and CI-enforced. Android
+SDK build tools are available in the current sandbox, but no original Android
+source/Gradle project, emulator, physical device, or original signing key is
+present.

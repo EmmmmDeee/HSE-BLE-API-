@@ -2,8 +2,7 @@
 
 use bleradar_compat::{ParityStatus, parity_status};
 use bleradar_core::{
-    LatLon, ProximityBand, ble_distance_m, haversine_m, proximity_label,
-    wifi_frequency_to_channel,
+    LatLon, ProximityBand, ble_distance_m, haversine_m, proximity_label, wifi_frequency_to_channel,
 };
 
 const ORACLE_EQUATORIAL_DEGREE_M: f64 = 111_195.080_233_532_91;

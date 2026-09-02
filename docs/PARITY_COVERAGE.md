@@ -1,12 +1,34 @@
 # Parity Coverage
 
-Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility registry.
+Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility/runtime registries.
 
 - Observed UniFFI function/method/constructor symbols: **124**
-- Contracts with explicit semantic migration status: **18**
-- Remaining observed symbols requiring semantic registration/characterization: **106**
+- Contracts with runtime implementation/reachability classification: **124**
+- Remaining observed symbols requiring runtime classification: **0**
 
-## Registered semantic frontier
+## Shipped implementation
+
+- `RUST_NATIVE`: **124**
+- `RUST_MIGRATION_REQUIRED`: **0**
+- `NON_RUST_JUSTIFIED_BOUNDARY`: **0**
+- `UNKNOWN`: **0**
+
+## Reachability
+
+- `VERIFIED_RUNTIME`: **19**
+- `STATICALLY_REACHABLE`: **78**
+- `CONDITIONALLY_REACHABLE`: **0**
+- `UNREACHABLE`: **0**
+- `UNKNOWN`: **27**
+
+## Source-replacement parity frontier
+
+- Differentially verified: **0**
+- Source analogue only: **6**
+- Oracle only: **5**
+- Blocked: **7**
+
+Registered source-replacement contracts:
 
 - `bearing_deg`
 - `haversine_m`
@@ -29,4 +51,4 @@ Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility registry.
 
 ## Interpretation
 
-A symbol appearing in the APK is not automatically considered migrated. Exact parity requires characterization of inputs, outputs, side effects, and errors against the immutable oracle. The registry intentionally records that distinction.
+The shipped implementations behind all 124 ABI contracts are Rust-native; this does not establish parity for similarly named functions in the reconstructed source workspace. Exact source-replacement parity requires characterization of inputs, outputs, side effects, state, termination, and errors against the immutable oracle. Reachability and evidence details are recorded in `docs/VERIFIED_RUNTIME_TOPOLOGY.md`.

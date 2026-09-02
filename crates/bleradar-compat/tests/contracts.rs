@@ -1,8 +1,8 @@
 //! Contract-registry regression tests for the semantic parity frontier.
 
 use bleradar_compat::{
-    ImplementationClass, ParityStatus, RUNTIME_CONTRACTS, Reachability, coverage_counts,
-    is_observed_contract, parity_status, reachability_counts, runtime_contract,
+    ContractKind, ImplementationClass, ParityStatus, RUNTIME_CONTRACTS, Reachability,
+    coverage_counts, is_observed_contract, parity_status, reachability_counts, runtime_contract,
 };
 
 #[test]
@@ -37,8 +37,28 @@ fn all_status_buckets_are_exercised() {
 #[test]
 fn complete_runtime_map_matches_native_census() {
     assert_eq!(RUNTIME_CONTRACTS.len(), 124);
-    let (verified, statically_reachable, conditional, unreachable, unknown) =
-        reachability_counts();
+    assert_eq!(
+        RUNTIME_CONTRACTS
+            .iter()
+            .filter(|contract| contract.kind == ContractKind::Function)
+            .count(),
+        99
+    );
+    assert_eq!(
+        RUNTIME_CONTRACTS
+            .iter()
+            .filter(|contract| contract.kind == ContractKind::Method)
+            .count(),
+        24
+    );
+    assert_eq!(
+        RUNTIME_CONTRACTS
+            .iter()
+            .filter(|contract| contract.kind == ContractKind::Constructor)
+            .count(),
+        1
+    );
+    let (verified, statically_reachable, conditional, unreachable, unknown) = reachability_counts();
     assert_eq!(
         (
             verified,

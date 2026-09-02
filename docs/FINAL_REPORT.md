@@ -37,8 +37,8 @@ Rust workspace:
 - `bleradar-core::identity` — canonical MAC handling, randomized/private address classification, conservative identity evidence.
 - `bleradar-core::signal` — deterministic EMA filtering, hot/cold trend, coarse proximity bands, calibrated BLE range estimation.
 - `bleradar-core::tracking` — observations, selected-device lock state, histories, confidence, map points, GPS uncertainty and conservative spatial estimates.
-- `bleradar-compat` — semantic parity-status registry distinguishing reconstructed, oracle-only and blocked contracts.
-- `oracle/` — immutable original APK, DEX and native core.
+- `bleradar-compat` — complete ABI implementation/reachability/evidence census plus a source-parity registry distinguishing differential proof, source analogues, oracle-only behavior and blocked contracts.
+- root APK and retained migration archive — immutable oracle, including the archived extracted DEX and native core.
 - `xtask/` — dependency-free Rust-native APK/native inventory, parity-coverage generation, and gate runner (supersedes the former `tools/*.py`).
 
 ## Material improvements over the initial reconstruction
@@ -77,14 +77,21 @@ Rust workspace:
     platform, asset, development, and operational explanations, collapsing
     provider-dependent support, and preventing website similarity from being
     represented as proof of common operator control.
+19. Reconstructed the actual material runtime paths, classified all 124 native
+    ABI contracts, froze sampled oracle semantics and known gaps in executable
+    tests, and assigned a single Rust-first target owner to every core
+    responsibility.
 
 ## Functional parity status
 
 - Native Rust core: original compiled artifact preserved exactly as oracle.
-- High-confidence pure geometry/address utilities: reconstructed in safe Rust.
+- Pure geometry/address utilities: available as safe-Rust source analogues, but
+  not labeled parity where sampled oracle behavior differs.
 - Device-centric tracking/map domain: implemented as an enhancement layer; not falsely labeled exact legacy parity where coefficients or UI semantics are unknown.
-- Generated Kotlin bridge: contract names inventoried; exact private record layouts are not guessed.
-- Android Compose UI / BLE lifecycle / permission timing: cannot be proven source-identical from R8 output alone.
+- Generated Kotlin bridge: all 124 function/method/constructor contracts are
+  classified; exact private record layouts are not guessed.
+- Android Compose UI / BLE lifecycle / permission timing: material call paths
+  are statically mapped, but exact behavior still requires Android traces.
 
 See `docs/PARITY_COVERAGE.md` for the current semantic frontier.
 
@@ -117,8 +124,17 @@ Still blocked, not reported green:
 
 ## Known risks
 
-The largest remaining risk is semantic overreach. The original native binary exports a much larger UniFFI surface than can be faithfully reconstructed from symbol names alone. The package now makes that limitation mechanically visible instead of burying it in prose.
+The largest remaining risk is semantic overreach. The 124-contract surface is
+fully registered, but registration and Rust-native oracle implementation do
+not prove that workspace source preserves behavior. DEX-owned control logic,
+competing state, and 27 unknown-reachability contracts remain explicit
+migration defects/unknowns.
 
 ## Recommended continuation
 
-On a Rust/Android-capable host, first run the standard gates, then build a differential harness around the immutable native oracle. Promote a contract from `Blocked` or `OracleOnly` to `Reconstructed` only after generated-input comparisons prove inputs, outputs, errors and side effects. Android service/UI parity should be frozen with instrumentation tests before replacing lifecycle-sensitive behavior. Infrastructure correlations should likewise remain provenance-linked and should not be promoted from shared infrastructure to common control without independent, temporally compatible evidence.
+On an ARM64 Android/Bionic host, first run the standard gates, then execute the
+differential harness around the immutable native oracle. Promote a source
+contract to `DifferentiallyVerified` only after generated-input comparisons
+prove inputs, outputs, errors, state, persistence, side effects, ordering,
+resources, and termination. Follow the removal gates in
+`BEHAVIORAL_CONTRACT.md`; never leave parallel live writers or schedulers.
