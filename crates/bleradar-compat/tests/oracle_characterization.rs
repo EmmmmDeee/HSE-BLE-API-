@@ -5,7 +5,7 @@ use bleradar_core::{
     LatLon, ProximityBand, ble_distance_m, haversine_m, proximity_label, wifi_frequency_to_channel,
 };
 
-const ORACLE_EQUATORIAL_DEGREE_M: f64 = 111_195.080_233_532_91;
+const ORACLE_EQUATORIAL_DEGREE_M: f64 = 111_195.080_233_532_9;
 const ORACLE_BLE_MINUS_70_DBM_M: f64 = 2.872_984_833_353_664_5;
 
 #[test]
