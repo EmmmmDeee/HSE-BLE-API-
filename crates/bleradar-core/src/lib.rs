@@ -100,20 +100,28 @@ pub fn wifi_channel_to_frequency(channel: u16) -> Option<u16> {
     }
 }
 
-/// Wi-Fi center frequency in MHz to channel where unambiguous for 2.4/5 GHz.
+/// Wi-Fi center frequency in MHz to channel where unambiguous for 2.4/5/6 GHz.
+///
+/// Channel numbers are recovered by floor division within each inclusive
+/// range, not only at exact 5 MHz grid points: this matches the immutable
+/// native oracle's verified behavior (`docs/BEHAVIORAL_CONTRACT.md` BF-004),
+/// including the 6 GHz band (IEEE 802.11ax-2021).
 ///
 /// # Examples
 /// ```
 /// use bleradar_core::wifi_frequency_to_channel;
 /// assert_eq!(wifi_frequency_to_channel(2412), Some(1));
 /// assert_eq!(wifi_frequency_to_channel(2484), Some(14));
+/// assert_eq!(wifi_frequency_to_channel(5955), Some(1));
+/// assert_eq!(wifi_frequency_to_channel(7115), Some(233));
 /// ```
 #[must_use]
 pub fn wifi_frequency_to_channel(mhz: u16) -> Option<u16> {
     match mhz {
-        2412..=2472 if (mhz - 2407).is_multiple_of(5) => Some((mhz - 2407) / 5),
+        2412..=2472 => Some((mhz - 2407) / 5),
         2484 => Some(14),
-        5160..=5885 if (mhz - 5000).is_multiple_of(5) => Some((mhz - 5000) / 5),
+        5160..=5885 => Some((mhz - 5000) / 5),
+        5955..=7115 => Some((mhz - 5950) / 5),
         _ => None,
     }
 }

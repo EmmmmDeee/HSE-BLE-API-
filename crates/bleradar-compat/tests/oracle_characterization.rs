@@ -124,6 +124,13 @@ fn source_wifi_channel_mapping_matches_captured_model_over_its_domain() {
 
 #[test]
 fn oracle_wifi_frequency_gap_is_exhaustively_classified_over_source_domain() {
+    // BF-004 (docs/BEHAVIORAL_CONTRACT.md, docs/AUTONOMOUS_DECISIONS.md
+    // decision 34) previously reproduced here as exactly 1,789 mismatches
+    // (628 off-center 2.4/5 GHz values plus all 1,161 6 GHz values). The
+    // fix widened `wifi_frequency_to_channel` to floor division across the
+    // verified inclusive ranges plus the 6 GHz band, so this exhaustive
+    // sweep over the complete `u16` domain must now find zero mismatches;
+    // this test remains a permanent regression lock for the closed gap.
     let mismatches = (u16::MIN..=u16::MAX)
         .filter(|&mhz| {
             wifi_frequency_to_channel(mhz).map(i32::from)
@@ -131,32 +138,7 @@ fn oracle_wifi_frequency_gap_is_exhaustively_classified_over_source_domain() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(mismatches.len(), 1_789);
-    assert_eq!(
-        mismatches
-            .iter()
-            .filter(|&&mhz| (2412..=2472).contains(&mhz))
-            .count(),
-        48
-    );
-    assert_eq!(
-        mismatches
-            .iter()
-            .filter(|&&mhz| (5160..=5885).contains(&mhz))
-            .count(),
-        580
-    );
-    assert_eq!(
-        mismatches
-            .iter()
-            .filter(|&&mhz| (5955..=7115).contains(&mhz))
-            .count(),
-        1_161
-    );
-    assert!(mismatches.iter().all(|&mhz| {
-        wifi_frequency_to_channel(mhz).is_none()
-            && oracle_wifi_frequency_to_channel(Some(i32::from(mhz))).is_some()
-    }));
+    assert_eq!(mismatches.len(), 0, "unexpected mismatches: {mismatches:?}");
     assert_eq!(
         parity_status("wifi_frequency_to_channel"),
         Some(ParityStatus::SourceAnalog)
@@ -164,7 +146,6 @@ fn oracle_wifi_frequency_gap_is_exhaustively_classified_over_source_domain() {
 }
 
 #[test]
-#[ignore = "the source replacement does not yet implement the captured oracle contract"]
 fn wifi_frequency_oracle_parity_removal_gate() {
     for mhz in u16::MIN..=u16::MAX {
         assert_eq!(

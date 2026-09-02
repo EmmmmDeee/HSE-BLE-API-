@@ -20,9 +20,10 @@ Classification meanings:
 ## Executable evidence
 
 `crates/bleradar-compat/tests/oracle_characterization.rs` locks sampled oracle
-facts, an exact Wi-Fi mapping model, and known source gaps. Its ignored
-`wifi_frequency_oracle_parity_removal_gate` is deliberately red until the
-replacement implements the captured contract.
+facts, an exact Wi-Fi mapping model, and known source gaps.
+`wifi_frequency_oracle_parity_removal_gate` (BF-004) now passes: the source
+was corrected to implement the captured contract, and the gate is a
+permanent regression lock rather than an ignored expected failure.
 `crates/bleradar-compat/tests/stateless_oracle_characterization.rs` locks exact
 Bluetooth bitfields, text normalization, projection math, and the expanded
 trace census. `crates/bleradar-compat/tests/contracts.rs` locks the 124-entry
@@ -285,7 +286,7 @@ implementation.
 | BF-001 | registry labeled source analogues `Reconstructed` despite oracle mismatches | only differential proof may produce `DifferentiallyVerified` | `no_source_analogue_is_mislabeled_as_differentially_verified` |
 | BF-002 | oracle 1° haversine differs from source by its radius constant | target explicitly chooses compatibility or a versioned correction | `oracle_haversine_fixture_exposes_radius_gap` |
 | BF-003 | oracle proximity accepts metres; source analogue accepts dBm | distinct typed APIs; no name-based substitution | `oracle_proximity_fixture_exposes_input_semantics_gap` |
-| BF-004 | source rejects 1,789 oracle-accepted `u16` frequencies: 628 off-center 2.4/5 GHz values and all 1,161 6 GHz values | target preserves the verified inclusive ranges, floor division, optional input, and asymmetric reverse mapping unless deliberately versioned | `oracle_wifi_boundary_trace_locks_ranges_and_flooring`; `oracle_wifi_frequency_gap_is_exhaustively_classified_over_source_domain`; ignored parity removal gate |
+| BF-004 (fixed 2026-09-02) | source previously rejected 1,789 oracle-accepted `u16` frequencies: 628 off-center 2.4/5 GHz values and all 1,161 6 GHz values | target preserves the verified inclusive ranges, floor division, optional input, and asymmetric reverse mapping unless deliberately versioned — now the source's actual behavior (`bleradar-core` 0.4.3) | `oracle_wifi_boundary_trace_locks_ranges_and_flooring`; `oracle_wifi_frequency_gap_is_exhaustively_classified_over_source_domain` (now asserts zero mismatches); `wifi_frequency_oracle_parity_removal_gate` (passing, no longer ignored) |
 | BF-005 | Rust store plus independently mutable JVM mirror and duplicate alias persistence | one authoritative Rust state/persistence transaction | architecture guard pending Android source |
 | BF-006 | correlation execution failure becomes empty groups in DEX fallback | failure leaves prior groups intact and is observable | fault-injection test required before migration |
 | BF-007 | ISO/WiGLE parsers normalize impossible calendar/time components | reject invalid components with a typed error before persistence/state mutation | QEMU trace observation; executable target rejection test required |
@@ -293,10 +294,17 @@ implementation.
 
 No defect is silently fixed or promoted to desired compatibility in this
 phase. Existing guards lock the reproducer; corrected-target gates remain
-mandatory where no replacement exists yet. Run
+mandatory where no replacement exists yet. BF-004 is the one exception: the
+source implementation itself was corrected (not merely characterized) because
+the oracle's formula is an objective, real-world-correct Wi-Fi channel
+mapping, not a deliberately divergent design choice like BF-002/BF-003. It
+remains classified `ParityStatus::SourceAnalog`, not promoted to
+`DifferentiallyVerified`, because the oracle's true domain is signed `i32`
+(including values the `u16` Rust API cannot represent) — the same reasoning
+`wifi_channel_to_frequency` already used. Run
 `cargo test -p bleradar-compat --test oracle_characterization
-wifi_frequency_oracle_parity_removal_gate -- --ignored` to exercise BF-004's
-currently failing removal gate directly.
+wifi_frequency_oracle_parity_removal_gate` to exercise BF-004's removal gate
+directly; it now passes unconditionally (no `--ignored` needed).
 
 ## Migration ledger
 

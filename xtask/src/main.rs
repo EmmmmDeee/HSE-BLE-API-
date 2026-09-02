@@ -90,7 +90,17 @@ fn print_usage() {
 /// which together are specific enough to avoid false positives from an
 /// unrelated ancestor `Cargo.toml`).
 fn repo_root() -> Result<PathBuf, String> {
-    let mut dir = env::current_dir().map_err(|e| format!("current_dir: {e}"))?;
+    let start = env::current_dir().map_err(|e| format!("current_dir: {e}"))?;
+    repo_root_from(start)
+}
+
+/// Pure upward-walk core of [`repo_root`], parameterized on a starting
+/// directory instead of reading process-global current-directory state, so
+/// both the "found at or above `start`" and "no ancestor qualifies" branches
+/// are directly unit-testable against a disposable fixture tree instead of
+/// only ever being exercised against this process's real working directory.
+fn repo_root_from(start: PathBuf) -> Result<PathBuf, String> {
+    let mut dir = start;
     loop {
         if dir.join("Cargo.toml").is_file() && dir.join("docs/NATIVE_ABI.txt").is_file() {
             return Ok(dir);
@@ -1121,5 +1131,64 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    /// Builds a fresh, uniquely named scratch directory under the OS temp
+    /// directory for a single test, so parallel test threads and repeated
+    /// CI runs never share or collide on the same path.
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "xtask-repo-root-test-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn repo_root_from_finds_a_directory_that_already_has_both_markers() {
+        let dir = unique_temp_dir("finds_a_directory_that_already_has_both_markers");
+        fs::create_dir_all(dir.join("docs")).unwrap();
+        fs::write(dir.join("Cargo.toml"), "").unwrap();
+        fs::write(dir.join("docs/NATIVE_ABI.txt"), "").unwrap();
+
+        assert_eq!(repo_root_from(dir.clone()), Ok(dir.clone()));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn repo_root_from_walks_upward_through_marker_free_subdirectories() {
+        let root = unique_temp_dir("walks_upward_through_marker_free_subdirectories");
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("Cargo.toml"), "").unwrap();
+        fs::write(root.join("docs/NATIVE_ABI.txt"), "").unwrap();
+        let nested = root.join("a").join("b").join("c");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(repo_root_from(nested), Ok(root.clone()));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn repo_root_from_rejects_a_tree_with_no_qualifying_ancestor() {
+        // Only `Cargo.toml` exists in this disposable tree, never paired
+        // with `docs/NATIVE_ABI.txt`: the walk must exhaust every ancestor
+        // up to the filesystem root and return `Err`, not falsely match an
+        // unrelated ancestor `Cargo.toml`.
+        let root = unique_temp_dir("rejects_a_tree_with_no_qualifying_ancestor");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), "").unwrap();
+
+        assert_eq!(
+            repo_root_from(root.clone()),
+            Err(
+                "could not locate repository root (no ancestor has both Cargo.toml and docs/NATIVE_ABI.txt)"
+                    .to_string()
+            )
+        );
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }

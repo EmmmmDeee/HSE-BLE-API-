@@ -121,7 +121,7 @@ pub const CONTRACTS: &[ContractStatus] = &[
     ContractStatus {
         name: "wifi_frequency_to_channel",
         status: ParityStatus::SourceAnalog,
-        evidence: "the source rejects 1,789 off-center or 6 GHz frequencies accepted by the oracle",
+        evidence: "matches the oracle over its complete u16 domain (BF-004 fixed); the oracle's true domain is signed i32, wider than the source's u16 input contract",
     },
     ContractStatus {
         name: "ble_distance",
