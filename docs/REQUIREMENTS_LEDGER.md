@@ -240,8 +240,8 @@ scenario within it.
 | REQ-COMPAT-001 | Every observed native function/method/constructor has implementation, reachability, and evidence classifications | ABI census → `RUNTIME_CONTRACTS: [RuntimeContract; 124]` | Pure static registry; generation fails on count drift | `lib.rs::RUNTIME_CONTRACTS` | `tests/contracts.rs` | VERIFIED |
 | REQ-COMPAT-002 | Runtime implementation language is never confused with source-replacement parity | registry read → independent `Implementation` and `ParityStatus` | No `SourceAnalog` can imply differential proof | `lib.rs::{Implementation,ParityStatus}` | contracts + oracle_characterization | VERIFIED |
 | REQ-COMPAT-003 | Coverage/status totals equal their registry lengths (no silent drift) | registry → coverage/reachability counts | — | `lib.rs` | contracts.rs | VERIFIED |
-| REQ-COMPAT-004 | Every observed native symbol has characterized behavior sufficient to remove the oracle implementation | full ABI and Android paths → executable contract corpus | Unknown/failure/state/side effects must remain distinct | `docs/BEHAVIORAL_CONTRACT.md`, generated `docs/PARITY_COVERAGE.md` | provisional pure fixtures; Android harness pending | PARTIAL — all 124 are classified, but 27 retain unknown reachability and 0 source replacements are differentially verified over their full observable contract |
-| REQ-COMPAT-005 | Known oracle/source gaps cannot be silently promoted to parity | sampled inputs → explicit mismatch evidence | Pure/no persistent side effects | `tests/oracle_characterization.rs` | haversine, proximity, BLE range, 6 GHz channel and registry guards | VERIFIED for captured samples only |
+| REQ-COMPAT-004 | Every observed native symbol has characterized behavior sufficient to remove the oracle implementation | full ABI and Android paths → executable contract corpus | Unknown/failure/state/side effects must remain distinct | `docs/BEHAVIORAL_CONTRACT.md`, generated `docs/PARITY_COVERAGE.md` | 41 stateless runtime traces and executable pure fixtures; Android harness pending | PARTIAL — all 124 are classified, but 5 stateful store contracts retain unknown reachability and 0 source replacements are differentially verified over their full observable contract |
+| REQ-COMPAT-005 | Known oracle/source gaps cannot be silently promoted to parity | sampled inputs → explicit mismatch evidence | Pure/no persistent side effects | `tests/oracle_characterization.rs`, `tests/stateless_oracle_characterization.rs` | haversine, proximity, BLE range, exact Wi-Fi mapping, and stateless helper guards | VERIFIED for captured samples/models only |
 
 **Runtime verification evidence:** use `cargo test -p bleradar-compat --locked`;
 test counts are intentionally not frozen in this ledger.
@@ -309,8 +309,8 @@ and close it without re-deriving this audit.
 - **Infrastructure**: `CommonCdn`/`CommonCms`/`CommonRegistrar`/`SharedThirdPartyService`/`Unknown` as a test's leading-outcome scenario (REQ-INFRA-002).
 - **Website**: `CommonTemplate`/`ContentReuse`/`DevelopmentRelationship`/`Coincidence`/`Unknown` as a test's leading-outcome scenario; multi-observation mid-extraction rollback ordering (REQ-WEB-002, 004).
 - **xtask**: `check-dependency-policy`/`check-oracle-integrity` command-level failure branches — closing these fully would need the commands refactored to accept injectable paths for in-process fixture testing, which is a larger change than this pass's scope, not a same-session fix; `repo_root()` (REQ-XTASK-002, 003 command-level, 008).
-- **Compat/runtime**: all 124 ABI contracts are registered, but 27 have unknown
-  reachability and the stateful/lifecycle/network behavior needed for
+- **Compat/runtime**: all 124 ABI contracts are registered, but five read-only
+  store contracts have unknown reachability and the stateful/lifecycle/network behavior needed for
   replacement parity requires an ARM64 Android/Bionic harness (MIG-003). This is
   an open evidence and migration backlog, not a non-Rust exception.
 

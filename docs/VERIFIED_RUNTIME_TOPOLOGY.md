@@ -2,9 +2,9 @@
 
 ## Scope and authority
 
-This map describes the code that actually exists at commit `7a1ae2d` and the
-immutable v0.3.0 APK (`dc1c5129625e53646f3cb644c6c8e060c4527d366aa1e284d0393284d467e255`).
-It does not infer a runnable Android product from the reconstructed source.
+This map describes the current authoritative branch and the immutable v0.3.0
+APK (`dc1c5129625e53646f3cb644c6c8e060c4527d366aa1e284d0393284d467e255`). It
+does not infer a runnable Android product from the reconstructed source.
 
 There are two disconnected execution graphs:
 
@@ -24,25 +24,27 @@ replacement for the shipped native contract.
 | APK manifest inspection | `BleRadarApp`, exported launcher `MainActivity`, non-exported `BleScanService`, `FileProvider`, AndroidX startup provider, and profile receiver |
 | DEX call-site analysis | 90 of 124 application contracts have direct non-generated DEX callers |
 | UniFFI metadata | 99 functions, 24 `RadarStore` methods, and one constructor |
-| Instrumented native trace | 19 deterministic functions executed under ARM64 QEMU compatibility loading |
+| Instrumented native trace | 41 stateless functions executed under ARM64 QEMU compatibility loading |
 | Rust source/call-site analysis | Library modules are caller-owned and synchronous; only `xtask` is an executable |
 | APK signature/alignment checks | v2/v3 signature valid and ZIP alignment valid; retained APK was not modified |
 
 The complete machine-readable ABI result is
 `bleradar_compat::RUNTIME_CONTRACTS`. Its current counts are:
 
-- `VERIFIED_RUNTIME`: 19;
+- `VERIFIED_RUNTIME`: 41;
 - `STATICALLY_REACHABLE`: 78;
 - `CONDITIONALLY_REACHABLE`: 0 at individual ABI-contract granularity;
 - `UNREACHABLE`: 0;
-- `UNKNOWN`: 27.
+- `UNKNOWN`: 5.
 
-`VERIFIED_RUNTIME` records execution of deterministic native code, not Android
-lifecycle parity. The compatibility loader changed Android library names and
-used minimal Bionic-to-glibc symbol shims. Pure results were stable; stateful
-`RadarStore` runs exposed allocator corruption and are excluded. Android,
-concurrency, persistence, and lifecycle behavior still require a real Bionic
-device/emulator trace.
+`VERIFIED_RUNTIME` records execution of stateless native code, not complete
+behavioral or Android lifecycle parity. The compatibility loader changed Android
+library names and used minimal Bionic-to-glibc symbol shims. Repeated traces were
+stable under a fixed process environment. `times_parse_wigle` demonstrably
+depends on the process timezone, and its absolute values are not promoted to
+platform-independent semantics. Stateful `RadarStore` runs exposed allocator
+corruption and are excluded. Android, concurrency, persistence, and lifecycle
+behavior still require a real Bionic device/emulator trace.
 
 ## Entry points
 
@@ -159,9 +161,11 @@ same split-brain risk. Both are migration defects.
 - Threat and correlation candidates come from the JVM mirror instead of an
   atomic Rust snapshot.
 - Alias edits write Rust and SharedPreferences separately.
-- The 27 `UNKNOWN` ABI entries have exports but no direct non-generated DEX
-  caller and no pure trace. They are not declared dead. Generated bindings,
-  reflection, native-internal calls, or unsupported UI routes remain possible.
+- The five `UNKNOWN` ABI entries are read-only `RadarStore` methods with no
+  direct non-generated DEX caller. They are not declared dead; generated
+  bindings, reflection, native-internal calls, or unsupported UI routes remain
+  possible. A compatibility-loader trace is deliberately excluded because each
+  requires state created under the incompatible allocator/runtime.
 - The 106 ABI contracts outside the high-value semantic registry were
   reachable-but-unregistered before this audit; all 124 now have runtime-map
   entries, but semantic parity still requires characterization.
@@ -219,9 +223,14 @@ validation, state, scheduling, parsing, or decisions.
 
 ### `UNKNOWN`
 
-Exact behavior of untraced ABI exports, Android lifecycle races, platform retry
-semantics, stateful native allocator/concurrency behavior, persistence failure
-atomicity, cache freshness, and network-module retry/rate policy remains
-unknown. A real ARM64/Bionic device or emulator is required to reduce these
-unknowns safely.
+Only five ABI contracts retain unknown reachability:
+`radarstore_alias_get`, `radarstore_get`, `radarstore_is_empty`,
+`radarstore_len`, and `radarstore_version`. They have no non-generated DEX
+caller, and exercising them requires a live native store. The compatibility
+loader cannot supply trustworthy stateful evidence because its allocator and
+threading runtime differ from Bionic.
 
+Android lifecycle races, platform retry semantics, stateful native
+allocator/concurrency behavior, persistence failure atomicity, cache freshness,
+and network-module retry/rate policy also remain unknown. A real ARM64/Bionic
+device or emulator is required to reduce these unknowns safely.

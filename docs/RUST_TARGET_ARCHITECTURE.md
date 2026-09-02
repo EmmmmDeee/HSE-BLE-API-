@@ -101,7 +101,9 @@ The target uses strong identifiers for device, observation, operation,
 session, group, module, job, state version, and monotonic tick. Addresses,
 fingerprints, SSIDs, frequencies, channels, RSSI, coordinates, timestamps,
 durations, distances, and confidence are validated domain types rather than
-interchangeable strings/numbers.
+interchangeable strings/numbers. Civil timestamps without an encoded offset
+require an explicit timezone-policy input; parsing never reads ambient process
+timezone.
 
 Finite lifecycle states are closed enums:
 
@@ -347,4 +349,3 @@ responsibility. A switch is not complete while both old and new paths can
 mutate state. Removal requires the corresponding ledger row in
 `BEHAVIORAL_CONTRACT.md` to be satisfied and the topology census to report no
 unclassified reachable path.
-

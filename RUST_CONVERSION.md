@@ -28,7 +28,7 @@ workspace implementation preserves the shipped behavioral contract.
   analysis but are not a substitute for running on Android/Bionic.
 
 The machine-readable census in `bleradar-compat` classifies all **124**
-contracts: 19 `VERIFIED_RUNTIME`, 78 `STATICALLY_REACHABLE`, and 27 `UNKNOWN`;
+contracts: 41 `VERIFIED_RUNTIME`, 78 `STATICALLY_REACHABLE`, and 5 `UNKNOWN`;
 all 124 shipped implementations are `RUST_NATIVE`. The separate
 source-replacement registry has 0 `DifferentiallyVerified`, 6 `SourceAnalog`,
 5 `OracleOnly`, and 7 `Blocked` entries. This distinction prevents “written in
@@ -67,11 +67,11 @@ state, or success/failure decisions.
 
 ## Required characterization before replacement
 
-QEMU compatibility probing supplied provisional deterministic fixtures for
-pure functions, including confirmed mismatches in haversine radius, proximity
-input semantics, BLE range, and 6 GHz Wi-Fi channels. It is not authoritative
-for allocator-, thread-, persistence-, lifecycle-, callback-, or network-
-dependent behavior.
+QEMU compatibility probing supplied provisional fixed-environment fixtures for
+stateless functions, including confirmed mismatches in haversine radius,
+proximity input semantics, BLE range, and 6 GHz Wi-Fi channels. It is not
+authoritative for allocator-, thread-, persistence-, lifecycle-, callback-, or
+network-dependent behavior.
 
 A real ARM64 Android/Bionic harness must record:
 

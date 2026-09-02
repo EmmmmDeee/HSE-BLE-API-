@@ -67,7 +67,7 @@ fn complete_runtime_map_matches_native_census() {
             unreachable,
             unknown,
         ),
-        (19, 78, 0, 0, 27)
+        (41, 78, 0, 0, 5)
     );
     assert!(
         RUNTIME_CONTRACTS

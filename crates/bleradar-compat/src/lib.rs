@@ -116,12 +116,12 @@ pub const CONTRACTS: &[ContractStatus] = &[
     ContractStatus {
         name: "wifi_channel_to_frequency",
         status: ParityStatus::SourceAnalog,
-        evidence: "source analogue and sampled oracle fixtures; edge coverage is incomplete",
+        evidence: "exact oracle ranges are captured; the source matches only over its narrower u16 input contract",
     },
     ContractStatus {
         name: "wifi_frequency_to_channel",
         status: ParityStatus::SourceAnalog,
-        evidence: "oracle supports 6 GHz while the source analogue does not",
+        evidence: "the source rejects 1,789 off-center or 6 GHz frequencies accepted by the oracle",
     },
     ContractStatus {
         name: "ble_distance",
@@ -259,8 +259,8 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
     runtime_contract!(
         "bt_category_from_class",
         Function,
-        Unknown,
-        StaticReachability
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
     ),
     runtime_contract!(
         "bt_describe",
@@ -268,9 +268,24 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         StaticallyReachable,
         CallSiteAnalysis
     ),
-    runtime_contract!("bt_major", Function, Unknown, StaticReachability),
-    runtime_contract!("bt_major_label", Function, Unknown, StaticReachability),
-    runtime_contract!("bt_minor", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "bt_major",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "bt_major_label",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "bt_minor",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "bt_services",
         Function,
@@ -284,8 +299,18 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         InstrumentedRuntimeTrace
     ),
     runtime_contract!("correlate", Function, StaticallyReachable, CallSiteAnalysis),
-    runtime_contract!("device_category", Function, Unknown, StaticReachability),
-    runtime_contract!("export_csv_field", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "device_category",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "export_csv_field",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "export_device_json",
         Function,
@@ -335,7 +360,12 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         InstrumentedRuntimeTrace
     ),
     runtime_contract!("fmt_hex", Function, StaticallyReachable, CallSiteAnalysis),
-    runtime_contract!("fmt_rssi", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "fmt_rssi",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "fmt_upper_invariant",
         Function,
@@ -366,7 +396,12 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         StaticallyReachable,
         CallSiteAnalysis
     ),
-    runtime_contract!("gatt_short", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "gatt_short",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "haversine_m",
         Function,
@@ -379,11 +414,36 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         VerifiedRuntime,
         InstrumentedRuntimeTrace
     ),
-    runtime_contract!("import_parse_json", Function, Unknown, StaticReachability),
-    runtime_contract!("import_parse_wigle", Function, Unknown, StaticReachability),
-    runtime_contract!("import_records", Function, Unknown, StaticReachability),
-    runtime_contract!("import_split_csv", Function, Unknown, StaticReachability),
-    runtime_contract!("mac_info", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "import_parse_json",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "import_parse_wigle",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "import_records",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "import_split_csv",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "mac_info",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "multilaterate",
         Function,
@@ -414,7 +474,12 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         VerifiedRuntime,
         InstrumentedRuntimeTrace
     ),
-    runtime_contract!("oui_vendor", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "oui_vendor",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "perms_can_connect_bt",
         Function,
@@ -499,8 +564,18 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         StaticallyReachable,
         CallSiteAnalysis
     ),
-    runtime_contract!("session_filter_sort", Function, Unknown, StaticReachability),
-    runtime_contract!("session_fingerprint", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "session_filter_sort",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "session_fingerprint",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "session_parse_transport",
         Function,
@@ -513,7 +588,12 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         StaticallyReachable,
         CallSiteAnalysis
     ),
-    runtime_contract!("session_summaries", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "session_summaries",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "session_to_track",
         Function,
@@ -539,9 +619,24 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         StaticallyReachable,
         CallSiteAnalysis
     ),
-    runtime_contract!("times_iso", Function, Unknown, StaticReachability),
-    runtime_contract!("times_parse_iso", Function, Unknown, StaticReachability),
-    runtime_contract!("times_parse_wigle", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "times_iso",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "times_parse_iso",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
+    runtime_contract!(
+        "times_parse_wigle",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "times_wigle",
         Function,
@@ -603,7 +698,12 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         StaticallyReachable,
         CallSiteAnalysis
     ),
-    runtime_contract!("ui_point_alpha", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "ui_point_alpha",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "ui_radar_points",
         Function,
@@ -640,7 +740,12 @@ pub const RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         StaticallyReachable,
         CallSiteAnalysis
     ),
-    runtime_contract!("ui_stable_angle", Function, Unknown, StaticReachability),
+    runtime_contract!(
+        "ui_stable_angle",
+        Function,
+        VerifiedRuntime,
+        InstrumentedRuntimeTrace
+    ),
     runtime_contract!(
         "ui_status_line",
         Function,

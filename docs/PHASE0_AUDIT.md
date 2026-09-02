@@ -38,11 +38,12 @@ libraries are reached by tests/library callers and are not linked from the APK.
 `xtask` is its only executable.
 
 `crates/bleradar-compat` records the complete 124-entry ABI census. Ninety
-contracts have non-generated DEX call-site evidence; 12 of those plus seven
-additional pure exports have stronger instrumented-trace evidence, producing
-the final buckets 19 `VERIFIED_RUNTIME`, 78 `STATICALLY_REACHABLE`, and 27
-`UNKNOWN`. Every shipped ABI implementation is native Rust; that fact does not
-prove parity for reconstructed functions with similar names.
+contracts have non-generated DEX call-site evidence; 12 of those have stronger
+instrumented-trace evidence. Twenty-nine additional stateless exports without
+such callers were also traced, producing the current buckets 41
+`VERIFIED_RUNTIME`, 78 `STATICALLY_REACHABLE`, and 5 `UNKNOWN`. Every shipped
+ABI implementation is native Rust; that fact does not prove parity for
+reconstructed functions with similar names.
 
 ## High-risk constructs
 

@@ -15,11 +15,11 @@ Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility/runtime regi
 
 ## Reachability
 
-- `VERIFIED_RUNTIME`: **19**
+- `VERIFIED_RUNTIME`: **41**
 - `STATICALLY_REACHABLE`: **78**
 - `CONDITIONALLY_REACHABLE`: **0**
 - `UNREACHABLE`: **0**
-- `UNKNOWN`: **27**
+- `UNKNOWN`: **5**
 
 ## Source-replacement parity frontier
 

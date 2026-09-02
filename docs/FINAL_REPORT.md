@@ -127,7 +127,7 @@ Still blocked, not reported green:
 The largest remaining risk is semantic overreach. The 124-contract surface is
 fully registered, but registration and Rust-native oracle implementation do
 not prove that workspace source preserves behavior. DEX-owned control logic,
-competing state, and 27 unknown-reachability contracts remain explicit
+competing state, and five unknown-reachability store contracts remain explicit
 migration defects/unknowns.
 
 ## Recommended continuation

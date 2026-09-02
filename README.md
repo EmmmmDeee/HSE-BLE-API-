@@ -36,11 +36,12 @@ bindings call 124 ABI contracts implemented by the shipped Rust native core.
 The workspace libraries are reached by Cargo callers/tests and are not linked
 into that APK.
 
-The runtime registry classifies all 124 contracts: 19 observed executing, 78
-statically reached from non-generated DEX call sites, and 27 of unknown
-reachability. All shipped ABI implementations are Rust-native, but none of the
-similarly named workspace replacements is yet differentially verified across
-its complete observable contract.
+The runtime registry classifies all 124 contracts: 41 observed executing, 78
+statically reached from non-generated DEX call sites, and 5 of unknown
+reachability. The five unknowns are read-only `RadarStore` methods that require
+trustworthy Android/Bionic state. All shipped ABI implementations are
+Rust-native, but none of the similarly named workspace replacements is yet
+differentially verified across its complete observable contract.
 
 See `docs/VERIFIED_RUNTIME_TOPOLOGY.md`,
 `docs/BEHAVIORAL_CONTRACT.md`, and `docs/RUST_TARGET_ARCHITECTURE.md` before

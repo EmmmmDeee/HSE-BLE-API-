@@ -22,16 +22,29 @@ Classification meanings:
 `crates/bleradar-compat/tests/oracle_characterization.rs` locks sampled oracle
 facts, an exact Wi-Fi mapping model, and known source gaps. Its ignored
 `wifi_frequency_oracle_parity_removal_gate` is deliberately red until the
-replacement implements the captured contract. `crates/bleradar-compat/tests/contracts.rs`
-locks the 124-entry census, reachability counts, and registry semantics. These
-tests deliberately do not load the Android `.so` in normal CI.
+replacement implements the captured contract.
+`crates/bleradar-compat/tests/stateless_oracle_characterization.rs` locks exact
+Bluetooth bitfields, text normalization, projection math, and the expanded
+trace census. `crates/bleradar-compat/tests/contracts.rs` locks the 124-entry
+census, reachability counts, and registry semantics. Timestamp defects remain
+recorded trace observations pending executable target rejection/boundary tests.
+These tests deliberately do not load the Android `.so` in normal CI.
 
-The compatibility trace executed deterministic native functions from a copied
+The compatibility trace executed stateless native functions from a copied
 oracle after changing imported Android library names and removing Android
 symbol-version metadata. It supplied only `__sF`, `__errno`, and
-`__register_atfork` compatibility symbols. Results used below were repeated and
-deterministic. Stateful store results are excluded from parity evidence because
-Bionic allocation and threading were not reproduced.
+`__register_atfork` compatibility symbols. Two fixed-environment runs were
+byte-identical. A three-timezone run isolated `times_parse_wigle` as dependent
+on the process timezone; its absolute glibc values are observations, not Android
+parity evidence. Stateful store results are excluded because Bionic allocation
+and threading were not reproduced.
+
+All 22 formerly unknown stateless exports were exercised using their generated
+UniFFI wire layouts. This raises the instrumented bucket to 41 and leaves only
+five untraced, read-only `RadarStore` methods. Execution proves reachability,
+not complete semantics: structured parsers exercised only selected empty and
+malformed inputs. The Bluetooth, CSV/text, fingerprint, and projection helpers
+have executable models below; timestamp behavior remains trace-only evidence.
 
 The Wi-Fi model has stronger evidence than a sampled fixture. The generated DEX
 bindings establish `Int → Int?` for channel-to-frequency and `Int? → Int?` for
@@ -54,6 +67,18 @@ integer formulas. The extracted native oracle used for both has SHA-256
 | BLE RSSI `0` | `100` m | `COMPATIBILITY_REQUIRED` sentinel behavior |
 | Wi-Fi channel → frequency | `1..=13 → 2407 + 5c`; `14 → 2484`; `32..=177 → 5000 + 5c`; otherwise `None` | `COMPATIBILITY_REQUIRED`; exact signed-input mapping |
 | Wi-Fi frequency → channel | `2412..=2472 → floor((f-2407)/5)`; `2484 → 14`; `5160..=5885 → floor((f-5000)/5)`; `5955..=7115 → floor((f-5950)/5)`; otherwise `None` | `COMPATIBILITY_REQUIRED`; `None → None`; ranges are inclusive |
+| Bluetooth class helpers | major `(class >> 8) & 31`; minor `(class >> 2) & 63`; majors 0..9 map to the captured platform labels and categories | `COMPATIBILITY_REQUIRED`; exact signed-`Int` bit extraction |
+| `export_csv_field` | absent → empty; comma, quote, CR, or LF triggers quoting and doubled quotes; tabs and formula prefixes remain raw | CSV quoting is `COMPATIBILITY_REQUIRED`; unneutralized formula-leading attacker input is security-sensitive and not promoted to desired semantics |
+| `fmt_rssi(i32)` | decimal integer plus ` dBm`, including signed extrema | `COMPATIBILITY_REQUIRED` |
+| `gatt_short` | Unicode-lowercase input; shorten a 36-byte `0000hhhh` Bluetooth-base-shaped string to `0xhhhh`; otherwise return the lowercased input | `COMPATIBILITY_REQUIRED`; `hhhh` is not hex-validated |
+| `session_fingerprint(transport,address)` | transport unchanged, `:`, Unicode-uppercase address; `straße → STRASSE` | `COMPATIBILITY_REQUIRED`; punctuation is not canonicalized |
+| `ui_point_alpha(now,last_seen)` | `1 - 0.7 × clamp(now-last_seen,0,60000)/60000` in `f32` operation order | `COMPATIBILITY_REQUIRED` for valid timestamps; wrapping subtraction at signed extrema is `DEFECTIVE` |
+| `ui_stable_angle(address)` | wrapping `u64` seed `1125899906842597`, multiply by 31 per UTF-16 unit, then `((hash >> 1) % 3600) / 10` as `f32` | `COMPATIBILITY_REQUIRED`; exact Unicode/code-unit behavior |
+| `times_iso` | ordinary signed milliseconds format as UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`; `i64::MIN/MAX` wrap to epoch-adjacent `.192/.807` | ordinary range is `COMPATIBILITY_REQUIRED`; overflow output is `DEFECTIVE` |
+| ISO timestamp parse | trims outer whitespace and accepts variable-width components/fractions; impossible dates/times normalize forward | invalid-date normalization is `DEFECTIVE`, not desired compatibility |
+| WiGLE timestamp parse | seconds precision; permissive components; interprets text in the process timezone | local-time intent may be compatible; hidden timezone dependency is `DEFECTIVE` |
+| MAC/OUI samples | delimiter variants normalize to uppercase colon form; flags/address kind and optional vendor fields are returned; malformed input remains an invalid record | sampled normalization is `COMPATIBILITY_REQUIRED`; all 58,049 OUI blocks are not differentially frozen |
+| empty structured helpers | empty JSON/WiGLE parse and empty session summary/filter inputs return empty lists; empty CSV split returns one empty field | sampled behavior only; malformed/schema semantics remain `UNKNOWN` |
 | signal bars thresholds | `<-90:0`, `-90..-72:1`, `-71..-62:2`, `-61..-52:3`, `>=-51:4` | `COMPATIBILITY_REQUIRED` |
 | `fmt_coord(1.23456789)` | `1.23457` | `COMPATIBILITY_REQUIRED` |
 | `fmt_distance(999/1000/nonfinite)` | `999 m` / `1.0 km` / `?` | `COMPATIBILITY_REQUIRED` |
@@ -216,6 +241,16 @@ must land as a named defect change rather than incidental migration drift.
 - Alias state is currently persisted in both native `aliases.json` and Android
   SharedPreferences. This duplication is `DEFECTIVE`; import-on-start is a
   compatibility bridge, not the target architecture.
+- Timestamp parsing currently accepts impossible values such as
+  `2023-02-29`, month 13, hour 24, minute 60, and second 60 by normalizing them
+  into later dates. The target rejects these with a typed parse error.
+- WiGLE text has no offset. The oracle consults ambient process timezone:
+  parsing `1970-01-01 00:00:00` produced `0` in UTC, `36,000,000` in
+  `Pacific/Honolulu`, and `-3,600,000` in `Europe/Berlin`. The target receives
+  an explicit timezone policy rather than reading hidden process state.
+- Timestamp formatting must define a supported date range and reject values
+  outside it; epoch-adjacent output produced by signed-extreme arithmetic is
+  not a compatibility requirement.
 - A process restart reconstructs aliases but not an unsaved scan automatically.
   Manual saved-session load is a separate action. Exact sticky-service restart
   behavior is Android-dependent and `UNKNOWN`.
@@ -226,9 +261,9 @@ must land as a named defect change rather than incidental migration drift.
 
 | Case family | Current executable protection | Required next evidence |
 |---|---|---|
-| valid/empty/boundary scalar inputs | pure oracle fixtures for geo, range, formatting, scheduler; complete Wi-Fi integer model and source-domain sweep | exhaustive tables for remaining scalars and target differential runner |
-| invalid/non-finite inputs | selected pure fixtures; source validators | each ABI error/status and panic containment |
-| malformed import | selected oracle empty-result fixture | typed error tests, truncation/encoding/size fuzz corpus |
+| valid/empty/boundary scalar inputs | pure oracle fixtures for geo, range, formatting, scheduler, Bluetooth, text helpers, projection math; complete Wi-Fi integer model and source-domain sweep | exhaustive tables for remaining scalars and target differential runner |
+| invalid/non-finite inputs | signed-extreme scalar fixtures, timestamp defects, selected floating fixtures, source validators | each remaining ABI error/status and panic containment |
+| malformed import | selected JSON/WiGLE/record/CSV helper traces | typed error tests, truncation/encoding/size fuzz corpus |
 | duplicate input/execution | sampled store trace, not trusted for parity | real-Bionic idempotency and callback replay |
 | timeouts/retries/rate limits | global OSINT budget metadata only | fake-clock/fake-client integration tests |
 | cancellation | DEX cleanup call analysis | service, GATT, and network cancellation tests |
@@ -253,9 +288,12 @@ implementation.
 | BF-004 | source rejects 1,789 oracle-accepted `u16` frequencies: 628 off-center 2.4/5 GHz values and all 1,161 6 GHz values | target preserves the verified inclusive ranges, floor division, optional input, and asymmetric reverse mapping unless deliberately versioned | `oracle_wifi_boundary_trace_locks_ranges_and_flooring`; `oracle_wifi_frequency_gap_is_exhaustively_classified_over_source_domain`; ignored parity removal gate |
 | BF-005 | Rust store plus independently mutable JVM mirror and duplicate alias persistence | one authoritative Rust state/persistence transaction | architecture guard pending Android source |
 | BF-006 | correlation execution failure becomes empty groups in DEX fallback | failure leaves prior groups intact and is observable | fault-injection test required before migration |
+| BF-007 | ISO/WiGLE parsers normalize impossible calendar/time components | reject invalid components with a typed error before persistence/state mutation | QEMU trace observation; executable target rejection test required |
+| BF-008 | WiGLE parse reads ambient timezone; timestamp arithmetic wraps at signed extrema | explicit timezone input and validated timestamp range | QEMU trace observation; executable target boundary tests required |
 
-BF-002 through BF-004 are not silently fixed in this phase. Their tests make
-the incompatible replacement fail or remain explicitly unverified. Run
+No defect is silently fixed or promoted to desired compatibility in this
+phase. Existing guards lock the reproducer; corrected-target gates remain
+mandatory where no replacement exists yet. Run
 `cargo test -p bleradar-compat --test oracle_characterization
 wifi_frequency_oracle_parity_removal_gate -- --ignored` to exercise BF-004's
 currently failing removal gate directly.
