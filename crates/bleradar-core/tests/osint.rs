@@ -392,3 +392,120 @@ fn pivots_can_be_exhausted_without_becoming_executable() {
         Err(SearchError::InvalidState { .. })
     ));
 }
+
+#[test]
+fn graph_neighbor_representation_can_be_used_as_a_pivots_representation() {
+    let mut engine = ExecutionFeedbackAdaptiveOsintSearchEngine::new(EvidenceStore::new());
+    engine
+        .add_pivot(pivot(
+            "neighbor-1",
+            "neighboring-node",
+            SearchRepresentation::GraphNeighbor,
+        ))
+        .unwrap();
+
+    let execution = engine
+        .execute("neighbor-1", 10, |candidate| {
+            assert_eq!(
+                candidate.representation(),
+                SearchRepresentation::GraphNeighbor
+            );
+            SearchFeedback::classified(1, 1, 1, 0, 0)
+        })
+        .unwrap();
+
+    assert_eq!(execution.feedback().outcome(), SearchOutcome::Useful);
+    assert_eq!(
+        engine.pivot("neighbor-1").unwrap().representation(),
+        SearchRepresentation::GraphNeighbor
+    );
+    assert_eq!(
+        engine
+            .statistics(SearchRepresentation::GraphNeighbor)
+            .useful(),
+        1
+    );
+}
+
+#[test]
+fn exhausting_an_already_executed_pivot_is_rejected() {
+    let mut engine = ExecutionFeedbackAdaptiveOsintSearchEngine::new(EvidenceStore::new());
+    engine
+        .add_pivot(pivot(
+            "executed",
+            "already-run",
+            SearchRepresentation::Exact,
+        ))
+        .unwrap();
+    engine
+        .execute("executed", 10, |_| {
+            SearchFeedback::classified(1, 1, 1, 0, 0)
+        })
+        .unwrap();
+    assert_eq!(
+        engine.pivot("executed").unwrap().state(),
+        SearchPivotState::Executed
+    );
+
+    assert_eq!(
+        engine.exhaust("executed"),
+        Err(SearchError::InvalidState {
+            pivot_id: "executed".to_owned(),
+            state: SearchPivotState::Executed,
+        })
+    );
+    // A rejected exhaustion attempt must leave the pivot's state untouched.
+    assert_eq!(
+        engine.pivot("executed").unwrap().state(),
+        SearchPivotState::Executed
+    );
+}
+
+#[test]
+fn resource_limits_allow_up_to_the_configured_count_then_reject_the_next_attempt() {
+    let limits = SearchLimits::new(2, 3).unwrap();
+    let mut engine =
+        ExecutionFeedbackAdaptiveOsintSearchEngine::with_limits(EvidenceStore::new(), limits);
+
+    engine
+        .add_pivot(pivot("pivot-1", "query-1", SearchRepresentation::Exact))
+        .unwrap();
+    engine
+        .add_pivot(pivot("pivot-2", "query-2", SearchRepresentation::Exact))
+        .unwrap();
+    engine
+        .add_pivot(pivot("pivot-3", "query-3", SearchRepresentation::Exact))
+        .unwrap();
+    assert_eq!(engine.pivot_count(), 3);
+
+    assert_eq!(
+        engine.add_pivot(pivot("pivot-4", "query-4", SearchRepresentation::Exact)),
+        Err(SearchError::ResourceLimit {
+            resource: "pivot",
+            limit: 3,
+        })
+    );
+    assert_eq!(engine.pivot_count(), 3);
+
+    engine
+        .execute("pivot-1", 10, |_| SearchFeedback::classified(1, 1, 1, 0, 0))
+        .unwrap();
+    engine
+        .execute("pivot-2", 20, |_| SearchFeedback::classified(1, 1, 1, 0, 0))
+        .unwrap();
+    assert_eq!(engine.execution_count(), 2);
+
+    assert_eq!(
+        engine.execute("pivot-3", 30, |_| SearchFeedback::classified(1, 1, 1, 0, 0)),
+        Err(SearchError::ResourceLimit {
+            resource: "execution",
+            limit: 2,
+        })
+    );
+    assert_eq!(engine.execution_count(), 2);
+    // The pivot itself must be untouched by the rejected execution attempt.
+    assert_eq!(
+        engine.pivot("pivot-3").unwrap().state(),
+        SearchPivotState::Proposed
+    );
+}
