@@ -251,15 +251,15 @@ fn cmd_parity_report() -> Result<(), String> {
     Ok(())
 }
 
-/// Port of `tools/check_dependency_policy.py`: fails when the root
-/// `Cargo.lock` contains any crate outside the audited workspace set.
-fn cmd_check_dependency_policy() -> Result<(), String> {
-    let root = repo_root()?;
-    let lock_path = root.join("Cargo.lock");
-    let text = read_to_string(&lock_path)?;
+/// Names of the only crates this workspace is allowed to depend on
+/// (`docs/AUTONOMOUS_DECISIONS.md`, decision 9).
+const ALLOWED: [&str; 2] = ["bleradar-core", "bleradar-compat"];
 
-    const ALLOWED: [&str; 2] = ["bleradar-core", "bleradar-compat"];
-
+/// Extracts every `name = "..."` package name from `Cargo.lock` text, in
+/// file order. Pure text scan (no filesystem access), so it is directly
+/// unit-testable against fixture lockfile content, including unparsable
+/// input that yields no names at all.
+fn parse_lockfile_package_names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("name = \"")
@@ -268,41 +268,84 @@ fn cmd_check_dependency_policy() -> Result<(), String> {
             names.push(inner.to_string());
         }
     }
+    names
+}
 
+/// Outcome of comparing a lockfile's parsed package names against the
+/// allowed set, decoupled from filesystem access and `println!` side
+/// effects so every branch — not just the one exercised by the real
+/// `Cargo.lock` on every gate run — is directly unit-testable with fixture
+/// input.
+#[derive(Debug, PartialEq, Eq)]
+enum DependencyPolicyOutcome {
+    /// No package names could be parsed at all (empty/unparsable lockfile).
+    EmptyLockfile,
+    /// One or more crates outside `allowed` were found (sorted, deduped).
+    ForeignCrates(Vec<String>),
+    /// Every parsed name is in `allowed` (sorted copy of `allowed`, for the
+    /// success message).
+    Compliant(Vec<String>),
+}
+
+fn evaluate_dependency_policy(names: &[String], allowed: &[&str]) -> DependencyPolicyOutcome {
     if names.is_empty() {
-        println!("Dependency policy gate could not parse any package names from Cargo.lock;");
-        println!("refusing to pass silently on an unreadable lockfile.");
-        return Err("empty package name set".to_string());
+        return DependencyPolicyOutcome::EmptyLockfile;
     }
 
-    let mut foreign: Vec<&String> = names
+    let mut foreign: Vec<String> = names
         .iter()
-        .filter(|n| !ALLOWED.contains(&n.as_str()))
+        .filter(|n| !allowed.contains(&n.as_str()))
+        .cloned()
         .collect();
     foreign.sort();
     foreign.dedup();
     if !foreign.is_empty() {
-        println!("Dependency policy violation: third-party crates present in Cargo.lock:");
-        for name in &foreign {
-            println!("  - {name}");
-        }
-        println!(
-            "The workspace is intentionally third-party-free (docs/AUTONOMOUS_DECISIONS.md, decision 9)."
-        );
-        println!("Adding a dependency is a deliberate decision: record it in the decision log and");
-        println!(
-            "update ALLOWED in xtask/src/main.rs (cmd_check_dependency_policy) in the same change."
-        );
-        return Err("foreign crates present".to_string());
+        return DependencyPolicyOutcome::ForeignCrates(foreign);
     }
 
-    let mut allowed_sorted = ALLOWED.to_vec();
+    let mut allowed_sorted: Vec<String> = allowed.iter().map(|s| (*s).to_string()).collect();
     allowed_sorted.sort_unstable();
-    println!(
-        "Cargo.lock contains only the audited workspace crates: {}",
-        allowed_sorted.join(", ")
-    );
-    Ok(())
+    DependencyPolicyOutcome::Compliant(allowed_sorted)
+}
+
+/// Port of `tools/check_dependency_policy.py`: fails when the root
+/// `Cargo.lock` contains any crate outside the audited workspace set.
+fn cmd_check_dependency_policy() -> Result<(), String> {
+    let root = repo_root()?;
+    let lock_path = root.join("Cargo.lock");
+    let text = read_to_string(&lock_path)?;
+    let names = parse_lockfile_package_names(&text);
+
+    match evaluate_dependency_policy(&names, &ALLOWED) {
+        DependencyPolicyOutcome::EmptyLockfile => {
+            println!("Dependency policy gate could not parse any package names from Cargo.lock;");
+            println!("refusing to pass silently on an unreadable lockfile.");
+            Err("empty package name set".to_string())
+        }
+        DependencyPolicyOutcome::ForeignCrates(foreign) => {
+            println!("Dependency policy violation: third-party crates present in Cargo.lock:");
+            for name in &foreign {
+                println!("  - {name}");
+            }
+            println!(
+                "The workspace is intentionally third-party-free (docs/AUTONOMOUS_DECISIONS.md, decision 9)."
+            );
+            println!(
+                "Adding a dependency is a deliberate decision: record it in the decision log and"
+            );
+            println!(
+                "update ALLOWED in xtask/src/main.rs (cmd_check_dependency_policy) in the same change."
+            );
+            Err("foreign crates present".to_string())
+        }
+        DependencyPolicyOutcome::Compliant(allowed_sorted) => {
+            println!(
+                "Cargo.lock contains only the audited workspace crates: {}",
+                allowed_sorted.join(", ")
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Port of `tools/check_oracle_integrity.py`: fails when a retained binary
@@ -314,44 +357,46 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
     let zip_path = root.join("BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip");
     const ZIP_BASELINE: &str = "07d2d80ce7e6c43f4c6ccc2496d30faafb77342e7bf196b894d32c7528cf3f76";
 
-    let mut failures = Vec::new();
+    let apk_name = apk_path.file_name().unwrap().to_string_lossy().into_owned();
+    let input_sha_name = input_sha_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let zip_name = zip_path.file_name().unwrap().to_string_lossy().into_owned();
 
     let input_sha_text = fs::read_to_string(&input_sha_path).unwrap_or_default();
     let expected_apk_sha = find_sha256_after_label(&input_sha_text, "Original APK SHA-256:");
-    match expected_apk_sha {
-        None => failures.push(format!(
-            "could not parse an APK SHA-256 from {}",
-            input_sha_path.file_name().unwrap().to_string_lossy()
-        )),
-        Some(_) if !apk_path.exists() => failures.push(format!(
-            "missing oracle file: {}",
-            apk_path.file_name().unwrap().to_string_lossy()
-        )),
-        Some(expected) => {
-            let actual = sha256::to_hex(&sha256::sha256(&read_bytes(&apk_path)?));
-            if actual != expected {
-                failures.push(format!(
-                    "{}: expected {expected}, observed {actual}",
-                    apk_path.file_name().unwrap().to_string_lossy()
-                ));
-            }
-        }
-    }
-
-    if !zip_path.exists() {
-        failures.push(format!(
-            "missing oracle archive: {}",
-            zip_path.file_name().unwrap().to_string_lossy()
-        ));
+    let actual_apk_sha = if apk_path.exists() {
+        Some(sha256::to_hex(&sha256::sha256(&read_bytes(&apk_path)?)))
     } else {
-        let actual = sha256::to_hex(&sha256::sha256(&read_bytes(&zip_path)?));
-        if actual != ZIP_BASELINE {
-            failures.push(format!(
-                "{}: expected {ZIP_BASELINE}, observed {actual}",
-                zip_path.file_name().unwrap().to_string_lossy()
-            ));
-        }
-    }
+        None
+    };
+    let apk_result = evaluate_oracle_hash(
+        expected_apk_sha.as_deref(),
+        actual_apk_sha.as_deref(),
+        format!("could not parse an APK SHA-256 from {input_sha_name}"),
+        format!("missing oracle file: {apk_name}"),
+        &apk_name,
+    );
+
+    let actual_zip_sha = if zip_path.exists() {
+        Some(sha256::to_hex(&sha256::sha256(&read_bytes(&zip_path)?)))
+    } else {
+        None
+    };
+    let zip_result = evaluate_oracle_hash(
+        Some(ZIP_BASELINE),
+        actual_zip_sha.as_deref(),
+        String::new(), // unreachable: the zip's expected hash is a constant, never unparsable
+        format!("missing oracle archive: {zip_name}"),
+        &zip_name,
+    );
+
+    let failures: Vec<String> = [apk_result, zip_result]
+        .into_iter()
+        .filter_map(Result::err)
+        .collect();
 
     if !failures.is_empty() {
         println!("Oracle integrity violation — immutable behavioral oracles must never change:");
@@ -365,6 +410,36 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
         "Oracle integrity verified: APK matches docs/INPUT_SHA256.txt; migration archive matches its recorded baseline."
     );
     Ok(())
+}
+
+/// Evaluates one oracle file's SHA-256 against its expected value, without
+/// touching the filesystem, so every failure branch is directly
+/// unit-testable with fixture input instead of only ever being exercised
+/// against the one real committed oracle: `expected == None` models an
+/// unparsable/absent expected-hash record, `actual == None` models a missing
+/// oracle file, and a `Some != Some` mismatch models tampering/drift.
+fn evaluate_oracle_hash(
+    expected: Option<&str>,
+    actual: Option<&str>,
+    unparsable_message: String,
+    missing_message: String,
+    mismatch_label: &str,
+) -> Result<(), String> {
+    match expected {
+        None => Err(unparsable_message),
+        Some(_) if actual.is_none() => Err(missing_message),
+        Some(expected) => {
+            let actual =
+                actual.expect("checked above: Some(_) arm only reached when actual is Some");
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{mismatch_label}: expected {expected}, observed {actual}"
+                ))
+            }
+        }
+    }
 }
 
 /// Finds a 64-character lowercase-hex run immediately after (whitespace
@@ -722,5 +797,115 @@ mod tests {
         let hash = "0123456789abcdef".repeat(4);
         let text = format!("Different label: {hash}");
         assert_eq!(find_sha256_after_label(&text, "Label:"), None);
+    }
+
+    #[test]
+    fn parse_lockfile_package_names_extracts_every_name_line_in_order() {
+        let text = "[[package]]\nname = \"bleradar-core\"\nversion = \"0.4.2\"\n\n\
+                     [[package]]\nname = \"bleradar-compat\"\n";
+        assert_eq!(
+            parse_lockfile_package_names(text),
+            vec!["bleradar-core".to_string(), "bleradar-compat".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_lockfile_package_names_returns_empty_on_unparsable_lockfile() {
+        assert!(parse_lockfile_package_names("this is not a Cargo.lock at all").is_empty());
+        assert!(parse_lockfile_package_names("").is_empty());
+    }
+
+    #[test]
+    fn evaluate_dependency_policy_reports_empty_lockfile() {
+        let names: Vec<String> = Vec::new();
+        assert_eq!(
+            evaluate_dependency_policy(&names, &ALLOWED),
+            DependencyPolicyOutcome::EmptyLockfile
+        );
+    }
+
+    #[test]
+    fn evaluate_dependency_policy_reports_sorted_deduplicated_foreign_crates() {
+        // "serde" appears twice and out of sorted order, alongside one
+        // in-policy crate: the outcome must name only the foreign crates,
+        // sorted, deduplicated.
+        let names = vec![
+            "bleradar-core".to_string(),
+            "serde".to_string(),
+            "libc".to_string(),
+            "serde".to_string(),
+        ];
+        assert_eq!(
+            evaluate_dependency_policy(&names, &ALLOWED),
+            DependencyPolicyOutcome::ForeignCrates(vec!["libc".to_string(), "serde".to_string()])
+        );
+    }
+
+    #[test]
+    fn evaluate_dependency_policy_reports_compliant_when_every_name_is_allowed() {
+        let names = vec!["bleradar-compat".to_string(), "bleradar-core".to_string()];
+        assert_eq!(
+            evaluate_dependency_policy(&names, &ALLOWED),
+            DependencyPolicyOutcome::Compliant(vec![
+                "bleradar-compat".to_string(),
+                "bleradar-core".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn evaluate_oracle_hash_fails_when_expected_is_unparsable() {
+        assert_eq!(
+            evaluate_oracle_hash(
+                None,
+                Some("deadbeef"),
+                "could not parse expected hash".to_string(),
+                "missing".to_string(),
+                "label",
+            ),
+            Err("could not parse expected hash".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluate_oracle_hash_fails_when_file_is_missing() {
+        assert_eq!(
+            evaluate_oracle_hash(
+                Some("abc123"),
+                None,
+                "unparsable".to_string(),
+                "missing oracle file: x.apk".to_string(),
+                "x.apk",
+            ),
+            Err("missing oracle file: x.apk".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluate_oracle_hash_fails_on_mismatch_naming_both_hashes() {
+        assert_eq!(
+            evaluate_oracle_hash(
+                Some("expected_hash"),
+                Some("actual_hash"),
+                String::new(),
+                String::new(),
+                "oracle.apk",
+            ),
+            Err("oracle.apk: expected expected_hash, observed actual_hash".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluate_oracle_hash_passes_when_hashes_match() {
+        assert_eq!(
+            evaluate_oracle_hash(
+                Some("same_hash"),
+                Some("same_hash"),
+                String::new(),
+                String::new(),
+                "oracle.apk",
+            ),
+            Ok(())
+        );
     }
 }

@@ -381,3 +381,241 @@ fn fusion_rejects_unregistered_evidence() {
         })
     );
 }
+
+#[test]
+fn fuse_hypotheses_rejects_an_unregistered_hypothesis_id() {
+    // `fuse` derives its hypothesis set from registered evidence, so it can
+    // never reference an unregistered hypothesis; `fuse_hypotheses` accepts
+    // an explicit hypothesis list instead and must fail explicitly, not
+    // panic or silently skip, when one of those ids has no matching
+    // `Hypothesis` record in the store.
+    let fusion = CalibratedEvidenceFusion::new();
+    let store = EvidenceStore::new();
+
+    assert_eq!(
+        fusion.fuse_hypotheses(&store, &["unregistered-hypothesis".to_owned()]),
+        Err(FusionError::MissingHypothesis {
+            hypothesis_id: "unregistered-hypothesis".to_owned()
+        })
+    );
+}
+
+#[test]
+fn fuse_hypotheses_orders_equal_net_score_hypotheses_by_id_ascending() {
+    // Two hypotheses backed by equally weighted, single-source support tie
+    // on `net_score`. The documented tie-break (ascending hypothesis id)
+    // must decide the order deterministically instead of leaving it to
+    // incidental sort stability.
+    let hypothesis_zeta = Hypothesis::new(
+        "hypothesis-zeta",
+        "second alphabetically",
+        HypothesisKind::Leading,
+    )
+    .unwrap();
+    let hypothesis_alpha = Hypothesis::new(
+        "hypothesis-alpha",
+        "first alphabetically",
+        HypothesisKind::Leading,
+    )
+    .unwrap();
+    let source_zeta = source("source-tie-zeta");
+    let source_alpha = source("source-tie-alpha");
+    let observation_zeta = observation("observation-tie-zeta", &source_zeta, 10);
+    let observation_alpha = observation("observation-tie-alpha", &source_alpha, 10);
+    let evidence_zeta = Evidence::new(
+        "evidence-tie-zeta",
+        hypothesis_zeta.id(),
+        observation_zeta.id(),
+        EvidenceRole::Supporting,
+    )
+    .unwrap();
+    let evidence_alpha = Evidence::new(
+        "evidence-tie-alpha",
+        hypothesis_alpha.id(),
+        observation_alpha.id(),
+        EvidenceRole::Supporting,
+    )
+    .unwrap();
+
+    let mut store = EvidenceStore::new();
+    store.add_source(source_zeta).unwrap();
+    store.add_source(source_alpha).unwrap();
+    store.add_hypothesis(hypothesis_zeta).unwrap();
+    store.add_hypothesis(hypothesis_alpha).unwrap();
+    store.add_observation(observation_zeta).unwrap();
+    store.add_observation(observation_alpha).unwrap();
+    store.add_evidence(evidence_zeta).unwrap();
+    store.add_evidence(evidence_alpha).unwrap();
+
+    let mut fusion = CalibratedEvidenceFusion::new();
+    fusion
+        .add_assessment(uniform_assessment("evidence-tie-zeta", 50))
+        .unwrap();
+    fusion
+        .add_assessment(uniform_assessment("evidence-tie-alpha", 50))
+        .unwrap();
+
+    // Hypotheses are requested in descending-id order so a passing result
+    // cannot be an accident of input order.
+    let result = fusion
+        .fuse_hypotheses(
+            &store,
+            &["hypothesis-zeta".to_owned(), "hypothesis-alpha".to_owned()],
+        )
+        .unwrap();
+    assert_eq!(
+        result.scores()[0].net_score(),
+        result.scores()[1].net_score()
+    );
+    assert_eq!(result.scores()[0].hypothesis(), "hypothesis-alpha");
+    assert_eq!(result.scores()[1].hypothesis(), "hypothesis-zeta");
+    assert_eq!(result.leading_hypothesis(), "hypothesis-alpha");
+}
+
+#[test]
+fn perturbation_pass_scales_down_contribution_by_its_recorded_uncertainty() {
+    // `with_uncertainty` documents that a non-zero value reduces the
+    // assessment's weight specifically during falsification's uncertainty
+    // perturbation pass. `ScoreOptions` is a private implementation detail,
+    // so the only public surface that exercises it is
+    // `FusionResult::falsify`'s `perturbed_uncertainty()` field.
+    let src = source("source-uncertain");
+    let hypothesis = Hypothesis::new(
+        "hypothesis-uncertain",
+        "single uncertain explanation",
+        HypothesisKind::Leading,
+    )
+    .unwrap();
+    let obs = observation("observation-uncertain", &src, 10);
+    let evidence = Evidence::new(
+        "evidence-uncertain",
+        hypothesis.id(),
+        obs.id(),
+        EvidenceRole::Supporting,
+    )
+    .unwrap();
+
+    let mut store = EvidenceStore::new();
+    store.add_source(src).unwrap();
+    store.add_hypothesis(hypothesis).unwrap();
+    store.add_observation(obs).unwrap();
+    store.add_evidence(evidence).unwrap();
+
+    let mut fusion = CalibratedEvidenceFusion::new();
+    fusion
+        .add_assessment(
+            EvidenceAssessment::new("evidence-uncertain", EvidenceQuality::uniform(80))
+                .unwrap()
+                .with_uncertainty(50),
+        )
+        .unwrap();
+
+    let result = fusion.fuse(&store).unwrap();
+    let report = result.falsify(&fusion, &store).unwrap();
+
+    assert_eq!(report.baseline().support_score(), 80);
+    // 80 scaled by (100 - 50) / 100 == 40, not merely "some" reduction.
+    assert_eq!(report.perturbed_uncertainty().support_score(), 40);
+    assert!(report.perturbed_uncertainty().support_score() < report.baseline().support_score());
+}
+
+#[test]
+fn contextual_evidence_never_contributes_to_support_or_contradiction() {
+    let src = source("source-contextual");
+    let hypothesis = Hypothesis::new(
+        "hypothesis-contextual",
+        "background information only",
+        HypothesisKind::Leading,
+    )
+    .unwrap();
+    let obs = observation("observation-contextual", &src, 10);
+    let evidence = Evidence::new(
+        "evidence-contextual",
+        hypothesis.id(),
+        obs.id(),
+        EvidenceRole::Contextual,
+    )
+    .unwrap();
+
+    let mut store = EvidenceStore::new();
+    store.add_source(src).unwrap();
+    store.add_hypothesis(hypothesis).unwrap();
+    store.add_observation(obs).unwrap();
+    store.add_evidence(evidence).unwrap();
+
+    let mut fusion = CalibratedEvidenceFusion::new();
+    fusion
+        .add_assessment(uniform_assessment("evidence-contextual", 90))
+        .unwrap();
+
+    let score = fusion
+        .fuse(&store)
+        .unwrap()
+        .score("hypothesis-contextual")
+        .unwrap()
+        .clone();
+    assert_eq!(score.support_score(), 0);
+    assert_eq!(score.contradiction_score(), 0);
+    assert!(score.supporting_evidence().is_empty());
+    assert!(score.contradicting_evidence().is_empty());
+    assert!(score.collapsed_evidence().is_empty());
+}
+
+#[test]
+fn add_assessment_rejects_a_duplicate_evidence_id() {
+    let mut fusion = CalibratedEvidenceFusion::new();
+    fusion
+        .add_assessment(uniform_assessment("dup-evidence", 50))
+        .unwrap();
+
+    assert_eq!(
+        fusion.add_assessment(uniform_assessment("dup-evidence", 10)),
+        Err(FusionError::DuplicateAssessment {
+            evidence_id: "dup-evidence".to_owned()
+        })
+    );
+}
+
+#[test]
+fn add_expected_evidence_rejects_a_duplicate_expected_id() {
+    let mut fusion = CalibratedEvidenceFusion::new();
+    fusion
+        .add_expected_evidence(
+            ExpectedEvidence::new("expected-1", "hypothesis-1", "an independent confirmation")
+                .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fusion.add_expected_evidence(
+            ExpectedEvidence::new("expected-1", "hypothesis-1", "a different description")
+                .unwrap()
+                .observed()
+        ),
+        Err(FusionError::DuplicateExpectedEvidence {
+            expected_id: "expected-1".to_owned()
+        })
+    );
+}
+
+#[test]
+fn fusion_error_variants_implement_display_and_error() {
+    assert_eq!(
+        FusionError::MissingHypothesis {
+            hypothesis_id: "h1".to_owned()
+        }
+        .to_string(),
+        "missing hypothesis `h1`"
+    );
+    assert_eq!(
+        FusionError::NoHypotheses.to_string(),
+        "no hypotheses were available for fusion"
+    );
+
+    // Confirm the type genuinely satisfies `std::error::Error`, not merely
+    // `Display`, so callers can use it behind a `Box<dyn Error>`.
+    let boxed: Box<dyn std::error::Error> = Box::new(FusionError::EmptyValue {
+        field: "evidence id",
+    });
+    assert_eq!(boxed.to_string(), "evidence id must not be empty");
+}
