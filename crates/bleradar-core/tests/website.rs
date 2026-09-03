@@ -357,6 +357,77 @@ fn snapshot_conflict_rolls_back_all_extracted_features() {
 }
 
 #[test]
+fn snapshot_conflict_on_the_last_observation_still_rolls_back_earlier_successes() {
+    // The prior rollback test's conflict lands on the *first* extracted
+    // observation, where there is nothing yet to roll back. This test
+    // forces the conflict onto the *last* of four extracted observations,
+    // so normalized-text, html-structure, and public-asset-0 all succeed on
+    // the candidate engine clone before public-asset-1 aborts the batch —
+    // proving the whole snapshot is still discarded, not just the failing
+    // item, regardless of how many earlier items already succeeded.
+    let source = source("snapshot-source", None);
+    let canonical = Observation::new(
+        "snapshot-b:public-asset-1",
+        "different content",
+        Some(EvidenceValue::Text("different content".to_owned())),
+        source.id(),
+        source.source_type().clone(),
+        source.retrieval_method().clone(),
+        100,
+    )
+    .unwrap();
+    let mut evidence = EvidenceStore::new();
+    evidence.add_source(source.clone()).unwrap();
+    evidence.add_observation(canonical).unwrap();
+
+    let snapshot = WebsiteSnapshot::new(
+        "snapshot-b",
+        "site-b",
+        "<html><body>Alpha</body></html>",
+        source,
+        100,
+    )
+    .unwrap()
+    .with_public_asset("asset-0.svg")
+    .unwrap()
+    .with_public_asset("asset-1.svg")
+    .unwrap();
+    let mut engine = WebsiteLineageEcosystemAnalysisEngine::new(evidence);
+    let error = engine.observe_snapshot(&snapshot).unwrap_err();
+    assert!(matches!(
+        error,
+        WebsiteError::ObservationConflict {
+            observation_id
+        } if observation_id == "snapshot-b:public-asset-1"
+    ));
+    assert_eq!(engine.observation_count(), 0);
+    assert!(
+        engine
+            .evidence()
+            .observation("snapshot-b:normalized-text")
+            .is_none()
+    );
+    assert!(
+        engine
+            .evidence()
+            .observation("snapshot-b:html-structure")
+            .is_none()
+    );
+    assert!(
+        engine
+            .evidence()
+            .observation("snapshot-b:public-asset-0")
+            .is_none()
+    );
+    assert!(
+        engine
+            .evidence()
+            .observation("snapshot-b:public-asset-1")
+            .is_some()
+    );
+}
+
+#[test]
 fn temporal_gap_limits_and_ranking_are_deterministic() {
     let limits = WebsiteLimits::new(10, 2)
         .unwrap()
