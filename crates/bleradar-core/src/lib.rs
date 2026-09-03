@@ -13,6 +13,7 @@ mod infrastructure;
 mod osint;
 mod signal;
 mod tracking;
+mod validation;
 mod verification;
 mod website;
 

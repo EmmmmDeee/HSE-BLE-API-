@@ -227,7 +227,7 @@ narrower status name the specific missing scenario within it.
 | ID | Requirement | Inputs → Outputs | Side effects / Failure behavior | Location | Tests | Status |
 |---|---|---|---|---|---|---|
 | REQ-WEB-001 | Twelve feature families are extracted with raw capture + normalized form + source + temporal interval all preserved | page/site snapshot → `WebsiteFeature` records | Pure extraction | `website.rs` extractors | covered across suite | VERIFIED |
-| REQ-WEB-002 | Eight competing explanation classes (Coincidence, CommonPlatform, CommonTemplate, ContentReuse, AssetReuse, DevelopmentRelationship, OperationalRelationship, Unknown) are ranked | correlated features → ranked `WebsiteExplanation` | Pure | `website.rs::WebsiteExplanation` + classifier | Directly asserted as leading/ranked outcome: `AssetReuse`, `CommonPlatform`, `OperationalRelationship`. `CommonTemplate`/`ContentReuse`/`DevelopmentRelationship`/`Coincidence`/`Unknown` are producible by the classifier (confirmed by direct reading) but not asserted as a leading outcome in any test | PARTIAL (3 of 8 variants proven as a test's leading outcome; the rest defined, reachable, and classified but untested at that level — this is a coverage gap, not the enum/README mismatch it might first appear to be: README's prose groups ContentReuse+AssetReuse together as "reuse" and omits `Unknown` as it is a catch-all, which is normal summarization, not a discrepancy) |
+| REQ-WEB-002 | Eight competing explanation classes (Coincidence, CommonPlatform, CommonTemplate, ContentReuse, AssetReuse, DevelopmentRelationship, OperationalRelationship, Unknown) are ranked | correlated features → ranked `WebsiteExplanation` | Pure | `website.rs::WebsiteExplanation` + classifier | Directly asserted as leading/ranked outcome: `AssetReuse`, `CommonPlatform`, `OperationalRelationship`. `Unknown` is proven structurally never-leading by design (`unknown_is_never_the_leading_explanation_because_coincidence_always_dominates_it`: `Coincidence` and `Unknown` are unconditionally co-inserted for every comparable pair with identical group/high-base-rate fields, so they always corroborate across the same independent groups, and `Coincidence`'s per-pair weight (`base_weight/3`) can never fall below `Unknown`'s (`base_weight/4`) — this mirrors, and is directly contrasted against, `infrastructure.rs`'s analogous `Unknown`, which has no such dominating sibling and can legitimately lead). `CommonTemplate`/`ContentReuse`/`DevelopmentRelationship`/`Coincidence` are producible by the classifier (confirmed by direct reading) but not asserted as a leading outcome in any test | PARTIAL (4 of 8 variants accounted for: 3 directly asserted as a leading outcome, 1 (`Unknown`) proven structurally never-leading by design; the remaining 4 are defined, reachable, and classified but untested at the leading-outcome level — this is a coverage gap, not the enum/README mismatch it might first appear to be: README's prose groups ContentReuse+AssetReuse together as "reuse", which is normal summarization, not a discrepancy) |
 | REQ-WEB-003 | Website similarity never alone proves common operation (explicit invariant) | correlation result → `common_operator_proven() == false` unless independently established | Pure | `website.rs` | explicit invariant test across all scenarios in suite | VERIFIED |
 | REQ-WEB-004 | Snapshot extraction persists transactionally, rolling back on conflict | snapshot → canonical records | Transactional; rollback on conflict | `website.rs` ↔ `evidence.rs` | single-conflict rollback tested (`snapshot_conflict_rolls_back_all_extracted_features`, conflict on the *first* extracted observation); multi-observation mid-extraction rollback ordering now tested (`snapshot_conflict_on_the_last_observation_still_rolls_back_earlier_successes`: conflict on the *last* of four extracted observations, proving normalized-text/html-structure/public-asset-0 — all of which succeeded on the candidate clone first — are still fully discarded) | VERIFIED |
 | REQ-WEB-005 | High-base-rate platform/CDN similarity is down-weighted under falsification | falsification pass → reduced score | Pure | `website.rs` | covered in suite | VERIFIED |
@@ -236,7 +236,7 @@ narrower status name the specific missing scenario within it.
 | REQ-WEB-008 | Temporal interval alignment and relation classification (overlapping/contiguous/disjoint) between two sites' observed states | two temporal intervals → relation classification | Pure | `website.rs` | covered in suite | VERIFIED |
 | REQ-WEB-009 | Dependency-group collapse for shared CDN/provider (same non-independence rule as REQ-FUSION-002) | grouped observations → single counted contribution | Collapsed items retained for audit | `website.rs` | covered in suite | VERIFIED |
 
-**Runtime verification evidence:** `cargo test -p bleradar-core --locked --test website` → 8 passed, 0 failed (2026-09-03). REQ-WEB-004 fully closed this session: `website.rs` test count grew from 7 to 8, closing the multi-observation mid-extraction rollback-ordering gap with `snapshot_conflict_on_the_last_observation_still_rolls_back_earlier_successes`; falsified by temporarily removing the clone-and-swap transaction pattern from `observe_snapshot` and confirming the new test fails while the pre-existing first-observation-conflict test does not, proving the new test closes a real, previously-uncaught coverage gap.
+**Runtime verification evidence:** `cargo test -p bleradar-core --locked --test website` → 9 passed, 0 failed (2026-09-03). REQ-WEB-004 was fully closed in an earlier session; REQ-WEB-002 was partially narrowed in this session: `website.rs` test count grew from 8 to 9, closing the `Unknown`-as-leading-outcome question (not by asserting it as a leading outcome, which is impossible, but by proving it structurally can never be one) with `unknown_is_never_the_leading_explanation_because_coincidence_always_dominates_it`; the three-independent-group construction mirrors `infrastructure.rs`'s `unknown_leads_when_every_named_explanation_is_narrowly_and_independently_supported` (the most favorable shape for `Unknown` to accumulate cross-group corroboration) and confirms `Unknown` still cannot lead here, unlike its infrastructure.rs counterpart.
 
 ---
 
@@ -349,9 +349,12 @@ As of the 2026-09-02 reconciliation, every Fusion/Evidence/Verification/
 Advancement/OSINT row previously listed here is `VERIFIED` (see the ledger
 reconciliation section above) and has been removed from this list.
 REQ-INFRA-002 (`Unknown`-as-leading-outcome) was closed and removed from this
-list on 2026-09-03; see the remediation log above.
+list on 2026-09-03; see the remediation log above. REQ-WEB-002's `Unknown`
+variant was likewise resolved (proven structurally never-leading, not
+merely untested) on 2026-09-03, narrowing this row from 5 to 4 remaining
+untested variants.
 
-- **Website**: `CommonTemplate`/`ContentReuse`/`DevelopmentRelationship`/`Coincidence`/`Unknown` as a test's leading-outcome scenario (REQ-WEB-002).
+- **Website**: `CommonTemplate`/`ContentReuse`/`DevelopmentRelationship`/`Coincidence` as a test's leading-outcome scenario (REQ-WEB-002; `Unknown` closed 2026-09-03 — see above).
 - **Compat/runtime**: all 124 ABI contracts are registered, but five read-only
   store contracts have unknown reachability and the stateful/lifecycle/network behavior needed for
   replacement parity requires an ARM64 Android/Bionic harness (MIG-003). This is
@@ -362,8 +365,9 @@ list on 2026-09-03; see the remediation log above.
 Every requirement audited across the original pass and both the 2026-09-02
 and 2026-09-03 reconciliations is now either `VERIFIED`, or is
 `IMPLEMENTED_UNVERIFIED`/`PARTIAL` with its specific missing test scenario
-named above — a bounded, traceable backlog now limited to REQ-WEB-002 and
-REQ-COMPAT-004. No `BROKEN` and no silently `MISSING`
+named above — a bounded, traceable backlog now limited to REQ-WEB-002 (4 of
+8 variants remaining, `Unknown` closed 2026-09-03) and REQ-COMPAT-004. No
+`BROKEN` and no silently `MISSING`
 requirement was found anywhere in the seven engine modules, the four
 original core modules, `bleradar-compat`, or `xtask`, across the full audit
 scope. REQ-COMPAT-004 remains open until Android/Bionic characterization

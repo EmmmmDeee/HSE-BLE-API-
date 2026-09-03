@@ -1484,17 +1484,19 @@ impl fmt::Display for WebsiteError {
 
 impl std::error::Error for WebsiteError {}
 
-impl From<ProvenanceError> for WebsiteError {
-    fn from(error: ProvenanceError) -> Self {
-        Self::Provenance { error }
+impl crate::validation::EmptyValueError for WebsiteError {
+    fn empty_value(field: &'static str) -> Self {
+        Self::EmptyValue { field }
     }
 }
 
 fn require_text(value: String, field: &'static str) -> Result<String, WebsiteError> {
-    if value.trim().is_empty() {
-        Err(WebsiteError::EmptyValue { field })
-    } else {
-        Ok(value)
+    crate::validation::require_text(value, field)
+}
+
+impl From<ProvenanceError> for WebsiteError {
+    fn from(error: ProvenanceError) -> Self {
+        Self::Provenance { error }
     }
 }
 

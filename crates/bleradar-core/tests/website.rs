@@ -473,3 +473,76 @@ fn temporal_gap_limits_and_ranking_are_deterministic() {
         Err(WebsiteError::DuplicateCorrelation { .. })
     ));
 }
+
+#[test]
+fn unknown_is_never_the_leading_explanation_because_coincidence_always_dominates_it() {
+    // Every comparable pair unconditionally produces both `Coincidence` and
+    // `Unknown` with identical `group`/`high_base_rate` support fields
+    // (`explanations_for`), so the two always corroborate across exactly
+    // the same independent groups. Their only difference is per-pair
+    // weight: `Coincidence` keeps `base_weight / 3` while `Unknown` keeps
+    // the strictly smaller `base_weight / 4` (`explanation_weight`).
+    // Because `strongest` is a per-explanation max taken over that same set
+    // of pairs, `Coincidence`'s strongest weight, independent support, and
+    // therefore score can never fall below `Unknown`'s, and ties favor
+    // `Coincidence` (`explanation_order`). `Unknown` can therefore never be
+    // the leading explanation here - unlike
+    // `TemporalMetamorphicInfrastructureCorrelationEngine`, whose analogous
+    // `Unknown` has no such always-co-present dominating sibling and can
+    // legitimately lead (see
+    // `unknown_leads_when_every_named_explanation_is_narrowly_and_independently_supported`
+    // in `tests/infrastructure.rs`). This scenario mirrors that test's
+    // three-independent-group construction, the most favorable shape for
+    // `Unknown` to accumulate cross-group corroboration, and still
+    // confirms `Unknown` cannot lead.
+    let low = factors(20);
+    let mut engine = WebsiteLineageEcosystemAnalysisEngine::new(EvidenceStore::new());
+    for (id, kind, value) in [
+        (
+            "phrase",
+            WebsiteFeatureKind::DistinctivePhrase,
+            "shared distinctive phrase",
+        ),
+        (
+            "analytics",
+            WebsiteFeatureKind::PublicAnalyticsIdentifier,
+            "shared-analytics-id",
+        ),
+        (
+            "archive",
+            WebsiteFeatureKind::ArchivedState,
+            "shared-archive-state",
+        ),
+    ] {
+        for site in ["site-a", "site-b"] {
+            let observation_id = format!("{id}-{site}");
+            engine
+                .observe(
+                    observation(
+                        &observation_id,
+                        site,
+                        kind,
+                        value,
+                        source(&format!("{observation_id}-source"), None),
+                        100,
+                    )
+                    .with_factors(low),
+                )
+                .unwrap();
+        }
+    }
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    assert_ne!(
+        report.leading_explanation(),
+        WebsiteExplanation::Unknown,
+        "{:?}",
+        report.rankings()
+    );
+
+    let coincidence = report.ranking(WebsiteExplanation::Coincidence).unwrap();
+    let unknown = report.ranking(WebsiteExplanation::Unknown).unwrap();
+    assert_eq!(coincidence.independent_support(), 3);
+    assert_eq!(unknown.independent_support(), 3);
+    assert!(coincidence.score() >= unknown.score());
+}

@@ -1329,17 +1329,19 @@ impl fmt::Display for InfrastructureError {
 
 impl std::error::Error for InfrastructureError {}
 
-impl From<ProvenanceError> for InfrastructureError {
-    fn from(error: ProvenanceError) -> Self {
-        Self::Provenance { error }
+impl crate::validation::EmptyValueError for InfrastructureError {
+    fn empty_value(field: &'static str) -> Self {
+        Self::EmptyValue { field }
     }
 }
 
 fn require_text(value: String, field: &'static str) -> Result<String, InfrastructureError> {
-    if value.trim().is_empty() {
-        Err(InfrastructureError::EmptyValue { field })
-    } else {
-        Ok(value)
+    crate::validation::require_text(value, field)
+}
+
+impl From<ProvenanceError> for InfrastructureError {
+    fn from(error: ProvenanceError) -> Self {
+        Self::Provenance { error }
     }
 }
 
@@ -2044,7 +2046,8 @@ fn rank_explanation(
         .map(|pair| pair.weight)
         .max()
         .unwrap_or(0);
-    let corroboration = ((independent_support.saturating_sub(1) as u16) * 10).min(100 - strongest);
+    let corroboration =
+        ((independent_support.saturating_sub(1) as u16) * 10).min(100 - strongest.min(100));
     let score = strongest.saturating_add(corroboration);
     let temporal_compatibility = if supporting_pairs.is_empty() {
         0
