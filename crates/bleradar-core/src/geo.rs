@@ -82,7 +82,14 @@ impl std::error::Error for GeoError {}
 /// ```
 #[must_use]
 pub fn haversine_m(a: LatLon, b: LatLon) -> f64 {
-    const EARTH_RADIUS_M: f64 = 6_371_000.0;
+    // IUGG/WGS84 arithmetic mean radius (2*a + b) / 3, rounded to the same
+    // precision as the widely published constant of that name (e.g. turf.js's
+    // `earthRadius`). BF-002 (`docs/BEHAVIORAL_CONTRACT.md`,
+    // `docs/ISSUE_LEDGER.md` MIG-009) found this is also the exact constant
+    // the oracle uses: solving the formula below for the radius that
+    // reproduces the captured 1-degree-at-the-equator oracle fixture yields
+    // this value bit-for-bit, not the coarser 6,371,000 previously used here.
+    const EARTH_RADIUS_M: f64 = 6_371_008.8;
     let lat1 = a.lat.to_radians();
     let lat2 = b.lat.to_radians();
     let dlat = (b.lat - a.lat).to_radians();

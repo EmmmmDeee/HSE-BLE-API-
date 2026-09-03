@@ -43,7 +43,9 @@ impl Rng {
     }
 }
 
-const EARTH_RADIUS_M: f64 = 6_371_000.0;
+// Kept in sync with `geo.rs::haversine_m`'s private constant (BF-002 fixed
+// this to the IUGG/WGS84 mean radius, matching the oracle exactly).
+const EARTH_RADIUS_M: f64 = 6_371_008.8;
 
 #[test]
 fn prop_haversine_is_finite_nonnegative_bounded_and_symmetric() {
