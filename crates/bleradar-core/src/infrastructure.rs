@@ -1346,7 +1346,7 @@ impl From<ProvenanceError> for InfrastructureError {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ScoreMode<'a> {
+pub(crate) enum ScoreMode<'a> {
     Baseline,
     WithoutHighBaseRate,
     WithoutGroup(&'a str),
@@ -1804,7 +1804,33 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
     }
 }
 
-fn values_match(left: &InfrastructureObservation, right: &InfrastructureObservation) -> bool {
+/// Accessor surface shared by every engine module's per-observation value
+/// comparison, letting [`values_match`] be written once instead of once per
+/// module's concrete observation type.
+pub(crate) trait ComparableValue {
+    /// Stable feature signature, if supplied.
+    fn feature_key(&self) -> Option<&str>;
+    /// Additive normalized value, if available.
+    fn normalized_value(&self) -> Option<&EvidenceValue>;
+    /// Exact raw value captured from the source.
+    fn raw_value(&self) -> &EvidenceValue;
+}
+
+impl ComparableValue for InfrastructureObservation {
+    fn feature_key(&self) -> Option<&str> {
+        Self::feature_key(self)
+    }
+
+    fn normalized_value(&self) -> Option<&EvidenceValue> {
+        Self::normalized_value(self)
+    }
+
+    fn raw_value(&self) -> &EvidenceValue {
+        Self::raw_value(self)
+    }
+}
+
+pub(crate) fn values_match<O: ComparableValue>(left: &O, right: &O) -> bool {
     if let (Some(left_feature), Some(right_feature)) = (left.feature_key(), right.feature_key())
         && left_feature == right_feature
     {
@@ -1818,7 +1844,7 @@ fn values_match(left: &InfrastructureObservation, right: &InfrastructureObservat
     }
 }
 
-fn temporal_relation(
+pub(crate) fn temporal_relation(
     left: TemporalInterval,
     right: TemporalInterval,
     maximum_gap: Timestamp,
@@ -1832,7 +1858,7 @@ fn temporal_relation(
     }
 }
 
-fn temporal_score(
+pub(crate) fn temporal_score(
     relation: TemporalRelation,
     left: TemporalInterval,
     right: TemporalInterval,

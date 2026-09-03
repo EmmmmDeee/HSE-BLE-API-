@@ -9,7 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::infrastructure::{TemporalInterval, TemporalRelation};
+use crate::infrastructure::{
+    ComparableValue, ScoreMode, TemporalInterval, TemporalRelation, temporal_relation,
+    temporal_score, values_match,
+};
 use crate::{
     Confidence, EdgeType, Entity, EntityType, EvidenceStore, EvidenceValue, Observation,
     ProvenanceError, Relationship, RelationshipProvenance, RetrievalMethod, Source, SourceType,
@@ -1568,14 +1571,6 @@ fn distinctive_phrases(normalized_text: &str) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ScoreMode<'a> {
-    Baseline,
-    WithoutHighBaseRate,
-    WithoutGroup(&'a str),
-    PerturbedUncertainty,
-}
-
 #[derive(Debug, Clone)]
 struct Support {
     explanation: WebsiteExplanation,
@@ -2051,51 +2046,17 @@ impl WebsiteLineageEcosystemAnalysisEngine {
     }
 }
 
-fn values_match(left: &WebsiteObservation, right: &WebsiteObservation) -> bool {
-    if let (Some(left_feature), Some(right_feature)) = (left.feature_key(), right.feature_key())
-        && left_feature == right_feature
-    {
-        return true;
+impl ComparableValue for WebsiteObservation {
+    fn feature_key(&self) -> Option<&str> {
+        Self::feature_key(self)
     }
-    match (left.normalized_value(), right.normalized_value()) {
-        (Some(left_value), Some(right_value)) if left_value == right_value => true,
-        (Some(left_value), _) if left_value == right.raw_value() => true,
-        (_, Some(right_value)) if left.raw_value() == right_value => true,
-        _ => left.raw_value() == right.raw_value(),
-    }
-}
 
-fn temporal_relation(
-    left: TemporalInterval,
-    right: TemporalInterval,
-    maximum_gap: Timestamp,
-) -> TemporalRelation {
-    if left.overlaps(right) {
-        TemporalRelation::Overlapping
-    } else if left.is_contiguous_with(right, maximum_gap) {
-        TemporalRelation::Contiguous
-    } else {
-        TemporalRelation::Disjoint
+    fn normalized_value(&self) -> Option<&EvidenceValue> {
+        Self::normalized_value(self)
     }
-}
 
-fn temporal_score(
-    relation: TemporalRelation,
-    left: TemporalInterval,
-    right: TemporalInterval,
-    maximum_gap: Timestamp,
-) -> u8 {
-    match relation {
-        TemporalRelation::Overlapping => 100,
-        TemporalRelation::Contiguous => {
-            if maximum_gap == 0 {
-                50
-            } else {
-                let gap = left.gap(right).min(maximum_gap);
-                50 + (maximum_gap.saturating_sub(gap).saturating_mul(50) / maximum_gap) as u8
-            }
-        }
-        TemporalRelation::Disjoint => 0,
+    fn raw_value(&self) -> &EvidenceValue {
+        Self::raw_value(self)
     }
 }
 
