@@ -496,6 +496,111 @@ fn shared_third_party_service_leads_for_cross_kind_pairs_outside_the_named_famil
 }
 
 #[test]
+fn unknown_leads_when_every_named_explanation_is_narrowly_and_independently_supported() {
+    // `Unknown` is inserted for every comparable pair, but only ever at half
+    // that pair's base weight (`supports()`), while the same pair always
+    // also produces at least one named explanation at *full* weight. A
+    // single pair can therefore never let `Unknown` lead. `Unknown` can
+    // only lead by out-accumulating cross-pair corroboration credit: it is
+    // present in every independent group, while no single named explanation
+    // repeats across more than a couple of them. This is a real, narrow
+    // scenario (unlike `CommonCdn`/`CommonRegistrar`, which can never lead
+    // regardless of construction because they always tie their dominating
+    // sibling and lose the tie-break).
+    //
+    // Three temporally disjoint, independently sourced, independently
+    // valued pairs are constructed, one per family:
+    //   - Domain/Domain      -> {CommonRegistrar, DirectTechnicalRelationship}
+    //   - IpAddress/IpAddress-> {CommonHost, CommonCdn, SharedThirdPartyService}
+    //   - Domain/Certificate -> {DirectTechnicalRelationship} only
+    // `DirectTechnicalRelationship` repeats across the first and third pair
+    // (2-group corroboration); every other named explanation is supported
+    // by exactly one pair (no corroboration). `Unknown` alone spans all
+    // three independent groups, and its three-group corroboration bonus
+    // outweighs its per-pair half-weight handicap enough to out-score even
+    // `DirectTechnicalRelationship`.
+    let low = CorrelationFactors::new(20, 20, 20, 20, 20, 20, 20, 20, 20);
+    let mut engine = TemporalMetamorphicInfrastructureCorrelationEngine::new(EvidenceStore::new());
+    for (left_id, right_id, value, left_kind, right_kind) in [
+        (
+            "domain-a",
+            "domain-b",
+            "shared-1",
+            InfrastructureKind::Domain,
+            InfrastructureKind::Domain,
+        ),
+        (
+            "ip-a",
+            "ip-b",
+            "shared-2",
+            InfrastructureKind::IpAddress,
+            InfrastructureKind::IpAddress,
+        ),
+        (
+            "cert-a",
+            "cert-b",
+            "shared-3",
+            InfrastructureKind::Domain,
+            InfrastructureKind::Certificate,
+        ),
+    ] {
+        engine
+            .observe(
+                InfrastructureObservation::new(
+                    left_id,
+                    "site-a",
+                    left_kind,
+                    value,
+                    source(&format!("{left_id}-source"), None),
+                    0,
+                )
+                .unwrap()
+                .with_factors(low),
+            )
+            .unwrap();
+        engine
+            .observe(
+                InfrastructureObservation::new(
+                    right_id,
+                    "site-b",
+                    right_kind,
+                    value,
+                    source(&format!("{right_id}-source"), None),
+                    200_000_000,
+                )
+                .unwrap()
+                .with_factors(low),
+            )
+            .unwrap();
+    }
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    assert_eq!(
+        report.leading_explanation(),
+        InfrastructureExplanation::Unknown
+    );
+    assert_eq!(report.control_assessment(), ControlAssessment::Unknown);
+
+    let unknown = report.ranking(InfrastructureExplanation::Unknown).unwrap();
+    assert_eq!(unknown.independent_support(), 3);
+    let direct = report
+        .ranking(InfrastructureExplanation::DirectTechnicalRelationship)
+        .unwrap();
+    assert_eq!(direct.independent_support(), 2);
+    assert!(unknown.score() > direct.score());
+    for narrow in [
+        InfrastructureExplanation::CommonRegistrar,
+        InfrastructureExplanation::CommonHost,
+        InfrastructureExplanation::CommonCdn,
+        InfrastructureExplanation::SharedThirdPartyService,
+    ] {
+        let ranking = report.ranking(narrow).unwrap();
+        assert_eq!(ranking.independent_support(), 1);
+        assert!(unknown.score() > ranking.score());
+    }
+}
+
+#[test]
 fn correlation_persistence_is_transactional_on_source_conflict() {
     let mut evidence = EvidenceStore::new();
     evidence
