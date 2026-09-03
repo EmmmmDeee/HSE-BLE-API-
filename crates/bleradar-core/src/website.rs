@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::infrastructure::{
-    ComparableValue, ScoreMode, TemporalInterval, TemporalRelation, temporal_relation,
-    temporal_score, values_match,
+    ComparableValue, ObservationSource, ScoreMode, SupportFields, TemporalInterval,
+    TemporalRelation, active_weight, dependency_group, pair_key, temporal_relation, temporal_score,
+    values_match,
 };
 use crate::{
     Confidence, EdgeType, Entity, EntityType, EvidenceStore, EvidenceValue, Observation,
@@ -2174,44 +2175,39 @@ fn explanation_weight(
     }
 }
 
-fn dependency_group(observation: &WebsiteObservation) -> &str {
-    observation
-        .dependency_group()
-        .or_else(|| {
-            observation
-                .source()
-                .metadata()
-                .get("dependency_group")
-                .map(String::as_str)
-        })
-        .or_else(|| {
-            observation
-                .source()
-                .metadata()
-                .get("provider")
-                .map(String::as_str)
-        })
-        .or_else(|| {
-            observation
-                .source()
-                .metadata()
-                .get("dataset")
-                .map(String::as_str)
-        })
-        .unwrap_or_else(|| observation.source_id())
+impl ObservationSource for WebsiteObservation {
+    fn dependency_group(&self) -> Option<&str> {
+        Self::dependency_group(self)
+    }
+
+    fn source(&self) -> &Source {
+        Self::source(self)
+    }
 }
 
-fn active_weight(support: &Support, mode: ScoreMode<'_>) -> u16 {
-    match mode {
-        ScoreMode::WithoutHighBaseRate if support.high_base_rate => 0,
-        ScoreMode::WithoutGroup(group) if support.group == group => 0,
-        _ => {
-            let uncertainty_factor = match mode {
-                ScoreMode::PerturbedUncertainty => 100 - u16::from(support.uncertainty),
-                _ => 100,
-            };
-            support.weight.saturating_mul(uncertainty_factor) / 100
-        }
+impl SupportFields for Support {
+    fn group(&self) -> &str {
+        &self.group
+    }
+
+    fn high_base_rate(&self) -> bool {
+        self.high_base_rate
+    }
+
+    fn uncertainty(&self) -> u8 {
+        self.uncertainty
+    }
+
+    fn weight(&self) -> u16 {
+        self.weight
+    }
+
+    fn left_observation(&self) -> &str {
+        &self.left_observation
+    }
+
+    fn right_observation(&self) -> &str {
+        &self.right_observation
     }
 }
 
@@ -2320,10 +2316,6 @@ fn rank_explanation(
         high_base_rate_support,
         temporal_compatibility: Confidence::new(temporal_compatibility),
     }
-}
-
-fn pair_key(support: &Support) -> String {
-    format!("{}:{}", support.left_observation, support.right_observation)
 }
 
 fn to_pair(support: &Support, weight: u16) -> WebsiteObservationPair {
