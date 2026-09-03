@@ -111,7 +111,7 @@ pub const CONTRACTS: &[ContractStatus] = &[
     ContractStatus {
         name: "haversine_m",
         status: ParityStatus::SourceAnalog,
-        evidence: "oracle probe proves the source uses a different Earth-radius constant",
+        evidence: "oracle probe confirms the source now uses the same Earth-radius constant (6,371,008.8 m; BF-002 fixed); one sampled point, not exhaustive over the continuous domain",
     },
     ContractStatus {
         name: "wifi_channel_to_frequency",

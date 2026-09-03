@@ -1329,22 +1329,24 @@ impl fmt::Display for InfrastructureError {
 
 impl std::error::Error for InfrastructureError {}
 
+impl crate::validation::EmptyValueError for InfrastructureError {
+    fn empty_value(field: &'static str) -> Self {
+        Self::EmptyValue { field }
+    }
+}
+
+fn require_text(value: String, field: &'static str) -> Result<String, InfrastructureError> {
+    crate::validation::require_text(value, field)
+}
+
 impl From<ProvenanceError> for InfrastructureError {
     fn from(error: ProvenanceError) -> Self {
         Self::Provenance { error }
     }
 }
 
-fn require_text(value: String, field: &'static str) -> Result<String, InfrastructureError> {
-    if value.trim().is_empty() {
-        Err(InfrastructureError::EmptyValue { field })
-    } else {
-        Ok(value)
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
-enum ScoreMode<'a> {
+pub(crate) enum ScoreMode<'a> {
     Baseline,
     WithoutHighBaseRate,
     WithoutGroup(&'a str),
@@ -1802,7 +1804,33 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
     }
 }
 
-fn values_match(left: &InfrastructureObservation, right: &InfrastructureObservation) -> bool {
+/// Accessor surface shared by every engine module's per-observation value
+/// comparison, letting [`values_match`] be written once instead of once per
+/// module's concrete observation type.
+pub(crate) trait ComparableValue {
+    /// Stable feature signature, if supplied.
+    fn feature_key(&self) -> Option<&str>;
+    /// Additive normalized value, if available.
+    fn normalized_value(&self) -> Option<&EvidenceValue>;
+    /// Exact raw value captured from the source.
+    fn raw_value(&self) -> &EvidenceValue;
+}
+
+impl ComparableValue for InfrastructureObservation {
+    fn feature_key(&self) -> Option<&str> {
+        Self::feature_key(self)
+    }
+
+    fn normalized_value(&self) -> Option<&EvidenceValue> {
+        Self::normalized_value(self)
+    }
+
+    fn raw_value(&self) -> &EvidenceValue {
+        Self::raw_value(self)
+    }
+}
+
+pub(crate) fn values_match<O: ComparableValue>(left: &O, right: &O) -> bool {
     if let (Some(left_feature), Some(right_feature)) = (left.feature_key(), right.feature_key())
         && left_feature == right_feature
     {
@@ -1816,7 +1844,7 @@ fn values_match(left: &InfrastructureObservation, right: &InfrastructureObservat
     }
 }
 
-fn temporal_relation(
+pub(crate) fn temporal_relation(
     left: TemporalInterval,
     right: TemporalInterval,
     maximum_gap: Timestamp,
@@ -1830,7 +1858,7 @@ fn temporal_relation(
     }
 }
 
-fn temporal_score(
+pub(crate) fn temporal_score(
     relation: TemporalRelation,
     left: TemporalInterval,
     right: TemporalInterval,
@@ -1930,7 +1958,27 @@ fn explanations_for(
     explanations.into_iter().collect()
 }
 
-fn dependency_group(observation: &InfrastructureObservation) -> &str {
+/// Accessor surface needed by [`dependency_group`]'s fallback resolution,
+/// letting it be written once instead of once per module's concrete
+/// observation type.
+pub(crate) trait ObservationSource {
+    /// Explicit dependency group, if supplied.
+    fn dependency_group(&self) -> Option<&str>;
+    /// Source record, including its retrieval metadata.
+    fn source(&self) -> &Source;
+}
+
+impl ObservationSource for InfrastructureObservation {
+    fn dependency_group(&self) -> Option<&str> {
+        Self::dependency_group(self)
+    }
+
+    fn source(&self) -> &Source {
+        Self::source(self)
+    }
+}
+
+pub(crate) fn dependency_group<O: ObservationSource>(observation: &O) -> &str {
     observation
         .dependency_group()
         .or_else(|| {
@@ -1954,21 +2002,99 @@ fn dependency_group(observation: &InfrastructureObservation) -> &str {
                 .get("dataset")
                 .map(String::as_str)
         })
-        .unwrap_or_else(|| observation.source_id())
+        .unwrap_or_else(|| observation.source().id())
 }
 
-fn active_weight(support: &Support, mode: ScoreMode<'_>) -> u16 {
+/// Accessor surface shared by every engine module's per-pair support record,
+/// letting [`active_weight`] and [`pair_key`] be written once instead of once
+/// per module's concrete `Support` type.
+pub(crate) trait SupportFields {
+    /// Dependency group the support belongs to.
+    fn group(&self) -> &str;
+    /// Whether the support is subject to common-feature down-weighting.
+    fn high_base_rate(&self) -> bool;
+    /// Uncertainty penalty in percentage points.
+    fn uncertainty(&self) -> u8;
+    /// Blended base weight before mode adjustments.
+    fn weight(&self) -> u16;
+    /// Left observation identifier.
+    fn left_observation(&self) -> &str;
+    /// Right observation identifier.
+    fn right_observation(&self) -> &str;
+}
+
+impl SupportFields for Support {
+    fn group(&self) -> &str {
+        &self.group
+    }
+
+    fn high_base_rate(&self) -> bool {
+        self.high_base_rate
+    }
+
+    fn uncertainty(&self) -> u8 {
+        self.uncertainty
+    }
+
+    fn weight(&self) -> u16 {
+        self.weight
+    }
+
+    fn left_observation(&self) -> &str {
+        &self.left_observation
+    }
+
+    fn right_observation(&self) -> &str {
+        &self.right_observation
+    }
+}
+
+impl<T: SupportFields> SupportFields for &T {
+    fn group(&self) -> &str {
+        T::group(self)
+    }
+
+    fn high_base_rate(&self) -> bool {
+        T::high_base_rate(self)
+    }
+
+    fn uncertainty(&self) -> u8 {
+        T::uncertainty(self)
+    }
+
+    fn weight(&self) -> u16 {
+        T::weight(self)
+    }
+
+    fn left_observation(&self) -> &str {
+        T::left_observation(self)
+    }
+
+    fn right_observation(&self) -> &str {
+        T::right_observation(self)
+    }
+}
+
+pub(crate) fn active_weight<S: SupportFields>(support: &S, mode: ScoreMode<'_>) -> u16 {
     match mode {
-        ScoreMode::WithoutHighBaseRate if support.high_base_rate => 0,
-        ScoreMode::WithoutGroup(group) if support.group == group => 0,
+        ScoreMode::WithoutHighBaseRate if support.high_base_rate() => 0,
+        ScoreMode::WithoutGroup(group) if support.group() == group => 0,
         _ => {
             let uncertainty_factor = match mode {
-                ScoreMode::PerturbedUncertainty => 100 - u16::from(support.uncertainty),
+                ScoreMode::PerturbedUncertainty => 100 - u16::from(support.uncertainty()),
                 _ => 100,
             };
-            support.weight.saturating_mul(uncertainty_factor) / 100
+            support.weight().saturating_mul(uncertainty_factor) / 100
         }
     }
+}
+
+pub(crate) fn pair_key<S: SupportFields>(support: &S) -> String {
+    format!(
+        "{}:{}",
+        support.left_observation(),
+        support.right_observation()
+    )
 }
 
 fn rank_supports(supports: &[Support], mode: ScoreMode<'_>) -> Vec<CorrelationRanking> {
@@ -2044,7 +2170,8 @@ fn rank_explanation(
         .map(|pair| pair.weight)
         .max()
         .unwrap_or(0);
-    let corroboration = ((independent_support.saturating_sub(1) as u16) * 10).min(100 - strongest);
+    let corroboration =
+        ((independent_support.saturating_sub(1) as u16) * 10).min(100 - strongest.min(100));
     let score = strongest.saturating_add(corroboration);
     let temporal_compatibility = if supporting_pairs.is_empty() {
         0
@@ -2075,10 +2202,6 @@ fn rank_explanation(
         collapsed_pairs: collapsed,
         temporal_compatibility: Confidence::new(temporal_compatibility),
     }
-}
-
-fn pair_key(support: &Support) -> String {
-    format!("{}:{}", support.left_observation, support.right_observation)
 }
 
 fn to_pair(support: &Support, weight: u16) -> ObservationPair {

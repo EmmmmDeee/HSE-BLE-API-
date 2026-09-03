@@ -476,12 +476,14 @@ impl fmt::Display for ProvenanceError {
 
 impl std::error::Error for ProvenanceError {}
 
-fn require_text(value: String, field: &'static str) -> Result<String, ProvenanceError> {
-    if value.trim().is_empty() {
-        Err(ProvenanceError::EmptyValue { field })
-    } else {
-        Ok(value)
+impl crate::validation::EmptyValueError for ProvenanceError {
+    fn empty_value(field: &'static str) -> Self {
+        Self::EmptyValue { field }
     }
+}
+
+fn require_text(value: String, field: &'static str) -> Result<String, ProvenanceError> {
+    crate::validation::require_text(value, field)
 }
 
 fn require_ref<T>(

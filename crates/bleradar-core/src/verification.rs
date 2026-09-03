@@ -1136,6 +1136,16 @@ impl fmt::Display for VerificationError {
 
 impl std::error::Error for VerificationError {}
 
+impl crate::validation::EmptyValueError for VerificationError {
+    fn empty_value(field: &'static str) -> Self {
+        Self::EmptyValue { field }
+    }
+}
+
+fn require_text(value: String, field: &'static str) -> Result<String, VerificationError> {
+    crate::validation::require_text(value, field)
+}
+
 /// Mutable metamorphic verification plan and adaptive feedback state.
 #[derive(Debug, Clone)]
 pub struct VerificationEngine {
@@ -1681,12 +1691,4 @@ fn observable_surfaces() -> &'static [VerificationSurface] {
         VerificationSurface::Recovery,
         VerificationSurface::PerformanceWhenContractual,
     ]
-}
-
-fn require_text(value: String, field: &'static str) -> Result<String, VerificationError> {
-    if value.trim().is_empty() {
-        Err(VerificationError::EmptyValue { field })
-    } else {
-        Ok(value)
-    }
 }

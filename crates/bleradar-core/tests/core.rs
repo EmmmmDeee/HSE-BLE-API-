@@ -39,8 +39,10 @@ fn haversine_is_finite_at_near_antipodal_points() {
     let b = LatLon::new(-58.533_453_260_712_285, 100.853_414_970_007_24).unwrap();
     let d = haversine_m(a, b);
     assert!(d.is_finite());
-    // Near-antipodal separation is close to half the great circle.
-    assert!((d - std::f64::consts::PI * 6_371_000.0).abs() < 5_000.0);
+    // Near-antipodal separation is close to half the great circle (BF-002
+    // fixed the radius to 6,371,008.8 m; the 5 km tolerance dwarfs that
+    // ~27 m shift, but the literal is kept in sync for clarity).
+    assert!((d - std::f64::consts::PI * 6_371_008.8).abs() < 5_000.0);
 }
 
 #[test]

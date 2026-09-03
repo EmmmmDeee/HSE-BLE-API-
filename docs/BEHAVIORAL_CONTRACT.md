@@ -61,8 +61,8 @@ integer formulas. The extracted native oracle used for both has SHA-256
 | Contract/input | Oracle output | Classification |
 |---|---|---|
 | `core_version()` | `0.3.0 (oui 58049 blocks)` | `COMPATIBILITY_REQUIRED` |
-| haversine `(0,0)→(1,0)` | `111195.08023353291` m | `COMPATIBILITY_REQUIRED`; source-radius mismatch recorded |
-| antipodal haversine | `20015114.442035925` m | `COMPATIBILITY_REQUIRED` within target-specific floating tolerance |
+| haversine `(0,0)→(1,0)` | `111195.08023353291` m | `COMPATIBILITY_REQUIRED`; source now matches exactly (BF-002 fixed) |
+| antipodal haversine | `20015114.442035925` m | `COMPATIBILITY_REQUIRED`; equals `π × 6,371,008.8` under the corrected source radius, within target-specific floating tolerance |
 | `proximity_label(1/2/5/25)` | `immediate/near/mid/far` | `COMPATIBILITY_REQUIRED`; argument is distance, not RSSI |
 | BLE RSSI `-70` | `2.8729848333536645` m for absent or supplied tx power | `COMPATIBILITY_REQUIRED`; fixed `-59`, exponent `2.4`, 100 m cap |
 | BLE RSSI `0` | `100` m | `COMPATIBILITY_REQUIRED` sentinel behavior |
@@ -284,7 +284,7 @@ implementation.
 | ID | Reproducer | Correct contract | Executable guard |
 |---|---|---|---|
 | BF-001 | registry labeled source analogues `Reconstructed` despite oracle mismatches | only differential proof may produce `DifferentiallyVerified` | `no_source_analogue_is_mislabeled_as_differentially_verified` |
-| BF-002 | oracle 1° haversine differs from source by its radius constant | target explicitly chooses compatibility or a versioned correction | `oracle_haversine_fixture_exposes_radius_gap` |
+| BF-002 (fixed 2026-09-03) | oracle 1° haversine differed from source by its radius constant (6,371,000 vs the oracle's 6,371,008.8 m) | target adopts the oracle's radius: solving the fixture for the exact value it implies yields 6,371,008.8 m, the standard IUGG/WGS84 arithmetic-mean Earth radius (also `turf.js`'s `earthRadius` constant) bit-for-bit — an objective precision correction, not mere compatibility-for-its-own-sake — now the source's actual behavior (`bleradar-core` 0.4.4) | `oracle_haversine_fixture_gap_is_closed` (bit-exact equality; previously `oracle_haversine_fixture_exposes_radius_gap`, which asserted the now-closed gap) |
 | BF-003 | oracle proximity accepts metres; source analogue accepts dBm | distinct typed APIs; no name-based substitution | `oracle_proximity_fixture_exposes_input_semantics_gap` |
 | BF-004 (fixed 2026-09-02) | source previously rejected 1,789 oracle-accepted `u16` frequencies: 628 off-center 2.4/5 GHz values and all 1,161 6 GHz values | target preserves the verified inclusive ranges, floor division, optional input, and asymmetric reverse mapping unless deliberately versioned — now the source's actual behavior (`bleradar-core` 0.4.3) | `oracle_wifi_boundary_trace_locks_ranges_and_flooring`; `oracle_wifi_frequency_gap_is_exhaustively_classified_over_source_domain` (now asserts zero mismatches); `wifi_frequency_oracle_parity_removal_gate` (passing, no longer ignored) |
 | BF-005 | Rust store plus independently mutable JVM mirror and duplicate alias persistence | one authoritative Rust state/persistence transaction | architecture guard pending Android source |
@@ -294,17 +294,26 @@ implementation.
 
 No defect is silently fixed or promoted to desired compatibility in this
 phase. Existing guards lock the reproducer; corrected-target gates remain
-mandatory where no replacement exists yet. BF-004 is the one exception: the
-source implementation itself was corrected (not merely characterized) because
-the oracle's formula is an objective, real-world-correct Wi-Fi channel
-mapping, not a deliberately divergent design choice like BF-002/BF-003. It
-remains classified `ParityStatus::SourceAnalog`, not promoted to
-`DifferentiallyVerified`, because the oracle's true domain is signed `i32`
-(including values the `u16` Rust API cannot represent) — the same reasoning
-`wifi_channel_to_frequency` already used. Run
+mandatory where no replacement exists yet. BF-002 and BF-004 are the two
+exceptions: in both, the source implementation itself was corrected (not
+merely characterized) because the oracle's value is an objective,
+real-world-correct constant/mapping — a standard geodesy radius and a Wi-Fi
+channel mapping, respectively — not a deliberately divergent design choice
+like BF-003's distance-vs-dBm argument mismatch (there is no "more correct"
+choice between two incomparable units, unlike a demonstrably more precise
+radius or a regulatory frequency plan). BF-004 remains classified
+`ParityStatus::SourceAnalog`, not promoted to `DifferentiallyVerified`,
+because the oracle's true domain is signed `i32` (including values the `u16`
+Rust API cannot represent) — the same reasoning `wifi_channel_to_frequency`
+already used. BF-002 remains `SourceAnalog` for a different reason: haversine
+takes continuous lat/lon input, so one matching sample (plus the
+mathematically consistent antipodal case) is real evidence but not an
+exhaustive differential proof the way an integer domain sweep is. Run
 `cargo test -p bleradar-compat --test oracle_characterization
-wifi_frequency_oracle_parity_removal_gate` to exercise BF-004's removal gate
-directly; it now passes unconditionally (no `--ignored` needed).
+wifi_frequency_oracle_parity_removal_gate` or
+`oracle_haversine_fixture_gap_is_closed` to exercise BF-004's and BF-002's
+removal gates directly; both now pass unconditionally (no `--ignored`
+needed).
 
 ## Migration ledger
 

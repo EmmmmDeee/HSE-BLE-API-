@@ -1281,6 +1281,16 @@ impl fmt::Display for SearchError {
 
 impl std::error::Error for SearchError {}
 
+impl crate::validation::EmptyValueError for SearchError {
+    fn empty_value(field: &'static str) -> Self {
+        Self::EmptyValue { field }
+    }
+}
+
+fn require_text(value: String, field: &'static str) -> Result<String, SearchError> {
+    crate::validation::require_text(value, field)
+}
+
 impl From<ProvenanceError> for SearchError {
     fn from(error: ProvenanceError) -> Self {
         Self::Provenance { error }
@@ -1745,12 +1755,4 @@ fn adaptive_priority(base: SearchPriority, statistics: SearchFamilyStatistics) -
 
 fn query_key(representation: SearchRepresentation, query: &str) -> String {
     format!("{}\u{1f}{}", representation.as_str(), query)
-}
-
-fn require_text(value: String, field: &'static str) -> Result<String, SearchError> {
-    if value.trim().is_empty() {
-        Err(SearchError::EmptyValue { field })
-    } else {
-        Ok(value)
-    }
 }

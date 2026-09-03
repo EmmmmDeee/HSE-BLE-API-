@@ -880,6 +880,16 @@ impl fmt::Display for AdvancementError {
 
 impl std::error::Error for AdvancementError {}
 
+impl crate::validation::EmptyValueError for AdvancementError {
+    fn empty_value(field: &'static str) -> Self {
+        Self::EmptyValue { field }
+    }
+}
+
+fn require_text(value: String, field: &'static str) -> Result<String, AdvancementError> {
+    crate::validation::require_text(value, field)
+}
+
 /// Engine that ranks, verifies, and integrates metamorphic software changes.
 #[derive(Debug, Clone)]
 pub struct MetamorphicSoftwareAdvancementEngine {
@@ -1095,11 +1105,3 @@ impl MetamorphicSoftwareAdvancementEngine {
 
 /// Backwards-friendly shorter name for the advancement engine.
 pub type SoftwareAdvancementEngine = MetamorphicSoftwareAdvancementEngine;
-
-fn require_text(value: String, field: &'static str) -> Result<String, AdvancementError> {
-    if value.trim().is_empty() {
-        Err(AdvancementError::EmptyValue { field })
-    } else {
-        Ok(value)
-    }
-}

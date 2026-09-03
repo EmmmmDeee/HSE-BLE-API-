@@ -357,6 +357,77 @@ fn snapshot_conflict_rolls_back_all_extracted_features() {
 }
 
 #[test]
+fn snapshot_conflict_on_the_last_observation_still_rolls_back_earlier_successes() {
+    // The prior rollback test's conflict lands on the *first* extracted
+    // observation, where there is nothing yet to roll back. This test
+    // forces the conflict onto the *last* of four extracted observations,
+    // so normalized-text, html-structure, and public-asset-0 all succeed on
+    // the candidate engine clone before public-asset-1 aborts the batch —
+    // proving the whole snapshot is still discarded, not just the failing
+    // item, regardless of how many earlier items already succeeded.
+    let source = source("snapshot-source", None);
+    let canonical = Observation::new(
+        "snapshot-b:public-asset-1",
+        "different content",
+        Some(EvidenceValue::Text("different content".to_owned())),
+        source.id(),
+        source.source_type().clone(),
+        source.retrieval_method().clone(),
+        100,
+    )
+    .unwrap();
+    let mut evidence = EvidenceStore::new();
+    evidence.add_source(source.clone()).unwrap();
+    evidence.add_observation(canonical).unwrap();
+
+    let snapshot = WebsiteSnapshot::new(
+        "snapshot-b",
+        "site-b",
+        "<html><body>Alpha</body></html>",
+        source,
+        100,
+    )
+    .unwrap()
+    .with_public_asset("asset-0.svg")
+    .unwrap()
+    .with_public_asset("asset-1.svg")
+    .unwrap();
+    let mut engine = WebsiteLineageEcosystemAnalysisEngine::new(evidence);
+    let error = engine.observe_snapshot(&snapshot).unwrap_err();
+    assert!(matches!(
+        error,
+        WebsiteError::ObservationConflict {
+            observation_id
+        } if observation_id == "snapshot-b:public-asset-1"
+    ));
+    assert_eq!(engine.observation_count(), 0);
+    assert!(
+        engine
+            .evidence()
+            .observation("snapshot-b:normalized-text")
+            .is_none()
+    );
+    assert!(
+        engine
+            .evidence()
+            .observation("snapshot-b:html-structure")
+            .is_none()
+    );
+    assert!(
+        engine
+            .evidence()
+            .observation("snapshot-b:public-asset-0")
+            .is_none()
+    );
+    assert!(
+        engine
+            .evidence()
+            .observation("snapshot-b:public-asset-1")
+            .is_some()
+    );
+}
+
+#[test]
 fn temporal_gap_limits_and_ranking_are_deterministic() {
     let limits = WebsiteLimits::new(10, 2)
         .unwrap()
@@ -401,4 +472,77 @@ fn temporal_gap_limits_and_ranking_are_deterministic() {
         first.correlate("site-a", "site-b"),
         Err(WebsiteError::DuplicateCorrelation { .. })
     ));
+}
+
+#[test]
+fn unknown_is_never_the_leading_explanation_because_coincidence_always_dominates_it() {
+    // Every comparable pair unconditionally produces both `Coincidence` and
+    // `Unknown` with identical `group`/`high_base_rate` support fields
+    // (`explanations_for`), so the two always corroborate across exactly
+    // the same independent groups. Their only difference is per-pair
+    // weight: `Coincidence` keeps `base_weight / 3` while `Unknown` keeps
+    // the strictly smaller `base_weight / 4` (`explanation_weight`).
+    // Because `strongest` is a per-explanation max taken over that same set
+    // of pairs, `Coincidence`'s strongest weight, independent support, and
+    // therefore score can never fall below `Unknown`'s, and ties favor
+    // `Coincidence` (`explanation_order`). `Unknown` can therefore never be
+    // the leading explanation here - unlike
+    // `TemporalMetamorphicInfrastructureCorrelationEngine`, whose analogous
+    // `Unknown` has no such always-co-present dominating sibling and can
+    // legitimately lead (see
+    // `unknown_leads_when_every_named_explanation_is_narrowly_and_independently_supported`
+    // in `tests/infrastructure.rs`). This scenario mirrors that test's
+    // three-independent-group construction, the most favorable shape for
+    // `Unknown` to accumulate cross-group corroboration, and still
+    // confirms `Unknown` cannot lead.
+    let low = factors(20);
+    let mut engine = WebsiteLineageEcosystemAnalysisEngine::new(EvidenceStore::new());
+    for (id, kind, value) in [
+        (
+            "phrase",
+            WebsiteFeatureKind::DistinctivePhrase,
+            "shared distinctive phrase",
+        ),
+        (
+            "analytics",
+            WebsiteFeatureKind::PublicAnalyticsIdentifier,
+            "shared-analytics-id",
+        ),
+        (
+            "archive",
+            WebsiteFeatureKind::ArchivedState,
+            "shared-archive-state",
+        ),
+    ] {
+        for site in ["site-a", "site-b"] {
+            let observation_id = format!("{id}-{site}");
+            engine
+                .observe(
+                    observation(
+                        &observation_id,
+                        site,
+                        kind,
+                        value,
+                        source(&format!("{observation_id}-source"), None),
+                        100,
+                    )
+                    .with_factors(low),
+                )
+                .unwrap();
+        }
+    }
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    assert_ne!(
+        report.leading_explanation(),
+        WebsiteExplanation::Unknown,
+        "{:?}",
+        report.rankings()
+    );
+
+    let coincidence = report.ranking(WebsiteExplanation::Coincidence).unwrap();
+    let unknown = report.ranking(WebsiteExplanation::Unknown).unwrap();
+    assert_eq!(coincidence.independent_support(), 3);
+    assert_eq!(unknown.independent_support(), 3);
+    assert!(coincidence.score() >= unknown.score());
 }

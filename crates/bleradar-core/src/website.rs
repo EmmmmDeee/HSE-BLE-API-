@@ -9,7 +9,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::infrastructure::{TemporalInterval, TemporalRelation};
+use crate::infrastructure::{
+    ComparableValue, ObservationSource, ScoreMode, SupportFields, TemporalInterval,
+    TemporalRelation, active_weight, dependency_group, pair_key, temporal_relation, temporal_score,
+    values_match,
+};
 use crate::{
     Confidence, EdgeType, Entity, EntityType, EvidenceStore, EvidenceValue, Observation,
     ProvenanceError, Relationship, RelationshipProvenance, RetrievalMethod, Source, SourceType,
@@ -1484,17 +1488,19 @@ impl fmt::Display for WebsiteError {
 
 impl std::error::Error for WebsiteError {}
 
-impl From<ProvenanceError> for WebsiteError {
-    fn from(error: ProvenanceError) -> Self {
-        Self::Provenance { error }
+impl crate::validation::EmptyValueError for WebsiteError {
+    fn empty_value(field: &'static str) -> Self {
+        Self::EmptyValue { field }
     }
 }
 
 fn require_text(value: String, field: &'static str) -> Result<String, WebsiteError> {
-    if value.trim().is_empty() {
-        Err(WebsiteError::EmptyValue { field })
-    } else {
-        Ok(value)
+    crate::validation::require_text(value, field)
+}
+
+impl From<ProvenanceError> for WebsiteError {
+    fn from(error: ProvenanceError) -> Self {
+        Self::Provenance { error }
     }
 }
 
@@ -1564,14 +1570,6 @@ fn distinctive_phrases(normalized_text: &str) -> Vec<String> {
         .take(8)
         .map(str::to_owned)
         .collect()
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ScoreMode<'a> {
-    Baseline,
-    WithoutHighBaseRate,
-    WithoutGroup(&'a str),
-    PerturbedUncertainty,
 }
 
 #[derive(Debug, Clone)]
@@ -2049,51 +2047,17 @@ impl WebsiteLineageEcosystemAnalysisEngine {
     }
 }
 
-fn values_match(left: &WebsiteObservation, right: &WebsiteObservation) -> bool {
-    if let (Some(left_feature), Some(right_feature)) = (left.feature_key(), right.feature_key())
-        && left_feature == right_feature
-    {
-        return true;
+impl ComparableValue for WebsiteObservation {
+    fn feature_key(&self) -> Option<&str> {
+        Self::feature_key(self)
     }
-    match (left.normalized_value(), right.normalized_value()) {
-        (Some(left_value), Some(right_value)) if left_value == right_value => true,
-        (Some(left_value), _) if left_value == right.raw_value() => true,
-        (_, Some(right_value)) if left.raw_value() == right_value => true,
-        _ => left.raw_value() == right.raw_value(),
-    }
-}
 
-fn temporal_relation(
-    left: TemporalInterval,
-    right: TemporalInterval,
-    maximum_gap: Timestamp,
-) -> TemporalRelation {
-    if left.overlaps(right) {
-        TemporalRelation::Overlapping
-    } else if left.is_contiguous_with(right, maximum_gap) {
-        TemporalRelation::Contiguous
-    } else {
-        TemporalRelation::Disjoint
+    fn normalized_value(&self) -> Option<&EvidenceValue> {
+        Self::normalized_value(self)
     }
-}
 
-fn temporal_score(
-    relation: TemporalRelation,
-    left: TemporalInterval,
-    right: TemporalInterval,
-    maximum_gap: Timestamp,
-) -> u8 {
-    match relation {
-        TemporalRelation::Overlapping => 100,
-        TemporalRelation::Contiguous => {
-            if maximum_gap == 0 {
-                50
-            } else {
-                let gap = left.gap(right).min(maximum_gap);
-                50 + (maximum_gap.saturating_sub(gap).saturating_mul(50) / maximum_gap) as u8
-            }
-        }
-        TemporalRelation::Disjoint => 0,
+    fn raw_value(&self) -> &EvidenceValue {
+        Self::raw_value(self)
     }
 }
 
@@ -2211,44 +2175,39 @@ fn explanation_weight(
     }
 }
 
-fn dependency_group(observation: &WebsiteObservation) -> &str {
-    observation
-        .dependency_group()
-        .or_else(|| {
-            observation
-                .source()
-                .metadata()
-                .get("dependency_group")
-                .map(String::as_str)
-        })
-        .or_else(|| {
-            observation
-                .source()
-                .metadata()
-                .get("provider")
-                .map(String::as_str)
-        })
-        .or_else(|| {
-            observation
-                .source()
-                .metadata()
-                .get("dataset")
-                .map(String::as_str)
-        })
-        .unwrap_or_else(|| observation.source_id())
+impl ObservationSource for WebsiteObservation {
+    fn dependency_group(&self) -> Option<&str> {
+        Self::dependency_group(self)
+    }
+
+    fn source(&self) -> &Source {
+        Self::source(self)
+    }
 }
 
-fn active_weight(support: &Support, mode: ScoreMode<'_>) -> u16 {
-    match mode {
-        ScoreMode::WithoutHighBaseRate if support.high_base_rate => 0,
-        ScoreMode::WithoutGroup(group) if support.group == group => 0,
-        _ => {
-            let uncertainty_factor = match mode {
-                ScoreMode::PerturbedUncertainty => 100 - u16::from(support.uncertainty),
-                _ => 100,
-            };
-            support.weight.saturating_mul(uncertainty_factor) / 100
-        }
+impl SupportFields for Support {
+    fn group(&self) -> &str {
+        &self.group
+    }
+
+    fn high_base_rate(&self) -> bool {
+        self.high_base_rate
+    }
+
+    fn uncertainty(&self) -> u8 {
+        self.uncertainty
+    }
+
+    fn weight(&self) -> u16 {
+        self.weight
+    }
+
+    fn left_observation(&self) -> &str {
+        &self.left_observation
+    }
+
+    fn right_observation(&self) -> &str {
+        &self.right_observation
     }
 }
 
@@ -2357,10 +2316,6 @@ fn rank_explanation(
         high_base_rate_support,
         temporal_compatibility: Confidence::new(temporal_compatibility),
     }
-}
-
-fn pair_key(support: &Support) -> String {
-    format!("{}:{}", support.left_observation, support.right_observation)
 }
 
 fn to_pair(support: &Support, weight: u16) -> WebsiteObservationPair {

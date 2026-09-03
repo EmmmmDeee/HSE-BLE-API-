@@ -413,12 +413,14 @@ impl fmt::Display for FusionError {
 
 impl std::error::Error for FusionError {}
 
-fn require_text(value: String, field: &'static str) -> Result<String, FusionError> {
-    if value.trim().is_empty() {
-        Err(FusionError::EmptyValue { field })
-    } else {
-        Ok(value)
+impl crate::validation::EmptyValueError for FusionError {
+    fn empty_value(field: &'static str) -> Self {
+        Self::EmptyValue { field }
     }
+}
+
+fn require_text(value: String, field: &'static str) -> Result<String, FusionError> {
+    crate::validation::require_text(value, field)
 }
 
 /// Score for one competing hypothesis.

@@ -30,12 +30,25 @@ fn oracle_wifi_frequency_to_channel(mhz: Option<i32>) -> Option<i32> {
 }
 
 #[test]
-fn oracle_haversine_fixture_exposes_radius_gap() {
+fn oracle_haversine_fixture_gap_is_closed() {
+    // BF-002 (docs/BEHAVIORAL_CONTRACT.md, docs/ISSUE_LEDGER.md MIG-009)
+    // recorded that the source's spherical Earth radius (6,371,000 m)
+    // differed from this captured oracle fixture. Solving the haversine
+    // equation for the one radius that reproduces `ORACLE_EQUATORIAL_DEGREE_M`
+    // exactly yields 6,371,008.8 m -- the standard IUGG/WGS84 arithmetic mean
+    // Earth radius (also used verbatim by, e.g., turf.js's `earthRadius`
+    // constant), not an arbitrary divergent choice like BF-003's distance/dBm
+    // mismatch. The source now uses that constant, so this fixture reproduces
+    // bit-for-bit rather than merely characterizing a gap; the function name
+    // and inverted assertion are a permanent regression lock, mirroring
+    // BF-004's closure pattern. This is still only one sampled coordinate
+    // pair, not an exhaustive differential proof over the continuous
+    // lat/lon domain, so `haversine_m` intentionally remains `SourceAnalog`.
     let source = haversine_m(
         LatLon::new(0.0, 0.0).unwrap(),
         LatLon::new(1.0, 0.0).unwrap(),
     );
-    assert!((source - ORACLE_EQUATORIAL_DEGREE_M).abs() > 0.1);
+    assert_eq!(source.to_bits(), ORACLE_EQUATORIAL_DEGREE_M.to_bits());
     assert_eq!(
         parity_status("haversine_m"),
         Some(ParityStatus::SourceAnalog)
