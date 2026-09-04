@@ -77,6 +77,47 @@ fn observation_timeline_is_ordered_and_extendable() {
 }
 
 #[test]
+fn stored_observation_timeline_extension_is_atomic() {
+    let source = source();
+    let original = observation(&source);
+    let mut store = EvidenceStore::new();
+    store.add_source(source).unwrap();
+    store.add_observation(original.clone()).unwrap();
+
+    store
+        .record_observation_seen_at(original.id(), 150)
+        .unwrap();
+    let extended = store.observation(original.id()).unwrap();
+    assert_eq!(extended.first_seen(), 100);
+    assert_eq!(extended.observed_at(), 100);
+    assert_eq!(extended.last_seen(), 150);
+    assert_eq!(extended.raw_value(), original.raw_value());
+    assert_eq!(extended.normalized_value(), original.normalized_value());
+    assert_eq!(extended.source(), original.source());
+    assert_eq!(extended.derivation_history(), original.derivation_history());
+
+    let before_failure = extended.clone();
+    assert_eq!(
+        store.record_observation_seen_at(original.id(), 149),
+        Err(ProvenanceError::InvalidTimeline {
+            first_seen: 100,
+            observed_at: 100,
+            last_seen: 149,
+        })
+    );
+    assert_eq!(store.observation(original.id()), Some(&before_failure));
+    assert!(matches!(
+        store.record_observation_seen_at("missing-observation", 200),
+        Err(ProvenanceError::MissingReference {
+            record: "observation update",
+            field: "observation",
+            ..
+        })
+    ));
+    assert_eq!(store.observation(original.id()), Some(&before_failure));
+}
+
+#[test]
 fn feature_temporal_provenance_does_not_precede_observation() {
     let source = source();
     let observation = observation(&source);
@@ -465,6 +506,61 @@ fn constructors_reject_empty_and_whitespace_only_identifiers() {
         ),
         Err(ProvenanceError::EmptyValue {
             field: "transformation id"
+        })
+    ));
+}
+
+#[test]
+fn duplicate_source_id_is_rejected_on_second_insert() {
+    let mut store = EvidenceStore::new();
+    store.add_source(source()).unwrap();
+
+    assert!(matches!(
+        store.add_source(source()),
+        Err(ProvenanceError::DuplicateId {
+            collection: "source",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn claim_without_any_evidence_is_rejected_by_trace_and_validate() {
+    let hypothesis =
+        Hypothesis::new("hypothesis-1", "ordinary explanation", HypothesisKind::Null).unwrap();
+    let claim = Claim::new(
+        "claim-1",
+        "the observed value has the ordinary explanation",
+        hypothesis.id(),
+    )
+    .unwrap();
+    let mut store = EvidenceStore::new();
+    store.add_hypothesis(hypothesis).unwrap();
+    store.add_claim(claim).unwrap();
+
+    assert!(matches!(
+        store.trace_claim("claim-1"),
+        Err(ProvenanceError::ClaimWithoutEvidence { .. })
+    ));
+    assert!(matches!(
+        store.validate(),
+        Err(ProvenanceError::ClaimWithoutEvidence { .. })
+    ));
+}
+
+#[test]
+fn artifact_referencing_an_unregistered_entity_is_rejected() {
+    let artifact = Artifact::new("artifact-1", ArtifactType::Digital)
+        .unwrap()
+        .for_entity("no-such-entity");
+    let mut store = EvidenceStore::new();
+
+    assert!(matches!(
+        store.add_artifact(artifact),
+        Err(ProvenanceError::MissingReference {
+            record: "artifact",
+            field: "entity",
+            ..
         })
     ));
 }
