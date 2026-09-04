@@ -546,3 +546,186 @@ fn unknown_is_never_the_leading_explanation_because_coincidence_always_dominates
     assert_eq!(unknown.independent_support(), 3);
     assert!(coincidence.score() >= unknown.score());
 }
+
+#[test]
+fn common_template_leads_for_html_structure_matches() {
+    let mut engine = WebsiteLineageEcosystemAnalysisEngine::new(EvidenceStore::new());
+    for (id, site, value) in [
+        ("html-a", "site-a", "<html><body>structure</body></html>"),
+        ("html-b", "site-b", "<html><body>structure</body></html>"),
+    ] {
+        engine
+            .observe(
+                observation(
+                    id,
+                    site,
+                    WebsiteFeatureKind::HtmlStructure,
+                    value,
+                    source(&format!("{id}-source"), None),
+                    100,
+                )
+                .with_feature("html-structure".to_owned())
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    assert_eq!(
+        report.leading_explanation(),
+        WebsiteExplanation::CommonTemplate,
+        "{:?}",
+        report.rankings()
+    );
+}
+
+#[test]
+fn content_reuse_leads_for_distinctive_phrase_matches() {
+    let mut engine = WebsiteLineageEcosystemAnalysisEngine::new(EvidenceStore::new());
+    for (id, site, value) in [
+        ("phrase-a", "site-a", "unique distinctive phrase"),
+        ("phrase-b", "site-b", "unique distinctive phrase"),
+    ] {
+        engine
+            .observe(
+                observation(
+                    id,
+                    site,
+                    WebsiteFeatureKind::DistinctivePhrase,
+                    value,
+                    source(&format!("{id}-source"), None),
+                    100,
+                )
+                .with_feature("distinctive-phrase".to_owned())
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    assert_eq!(
+        report.leading_explanation(),
+        WebsiteExplanation::ContentReuse,
+        "{:?}",
+        report.rankings()
+    );
+}
+
+#[test]
+fn development_relationship_leads_for_script_reference_matches() {
+    let mut engine = WebsiteLineageEcosystemAnalysisEngine::new(EvidenceStore::new());
+    for (id, site, value) in [
+        ("script-a", "site-a", "/js/app.js"),
+        ("script-b", "site-b", "/js/app.js"),
+    ] {
+        engine
+            .observe(
+                observation(
+                    id,
+                    site,
+                    WebsiteFeatureKind::ScriptReference,
+                    value,
+                    source(&format!("{id}-source"), None),
+                    100,
+                )
+                .with_feature("script-ref".to_owned())
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    assert_eq!(
+        report.leading_explanation(),
+        WebsiteExplanation::DevelopmentRelationship,
+        "{:?}",
+        report.rankings()
+    );
+}
+
+#[test]
+fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_corroboration() {
+    let low = factors(20);
+    let limits = WebsiteLimits::new(100, 10)
+        .unwrap()
+        .with_maximum_temporal_gap(5);
+    let mut engine =
+        WebsiteLineageEcosystemAnalysisEngine::with_limits(EvidenceStore::new(), limits);
+
+    // Pair 1: ArchivedState / ArchivedState -> DevelopmentRelationship, ContentReuse
+    for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
+        let id = format!("archive-{}", site);
+        engine
+            .observe(
+                observation(
+                    &id,
+                    site,
+                    WebsiteFeatureKind::ArchivedState,
+                    "val-1",
+                    source(&format!("{}-source", id), None),
+                    observed_at,
+                )
+                .with_factors(low)
+                .with_timeline(
+                    TemporalInterval::new(observed_at, observed_at, observed_at).unwrap(),
+                )
+                .with_feature("archive-disjoint".to_owned())
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    // Pair 2: Certificate / Certificate -> OperationalRelationship, DevelopmentRelationship
+    for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
+        let id = format!("cert-{}", site);
+        engine
+            .observe(
+                observation(
+                    &id,
+                    site,
+                    WebsiteFeatureKind::Certificate,
+                    "val-2",
+                    source(&format!("{}-source", id), None),
+                    observed_at,
+                )
+                .with_factors(low)
+                .with_timeline(
+                    TemporalInterval::new(observed_at, observed_at, observed_at).unwrap(),
+                )
+                .with_feature("cert-disjoint".to_owned())
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    // Pair 3: NormalizedText / NormalizedText -> ContentReuse, CommonTemplate
+    for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
+        let id = format!("text-{}", site);
+        engine
+            .observe(
+                observation(
+                    &id,
+                    site,
+                    WebsiteFeatureKind::NormalizedText,
+                    "val-3",
+                    source(&format!("{}-source", id), None),
+                    observed_at,
+                )
+                .with_factors(low)
+                .with_timeline(
+                    TemporalInterval::new(observed_at, observed_at, observed_at).unwrap(),
+                )
+                .with_feature("text-disjoint".to_owned())
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    assert_eq!(
+        report.leading_explanation(),
+        WebsiteExplanation::Coincidence,
+        "{:?}",
+        report.rankings()
+    );
+}
