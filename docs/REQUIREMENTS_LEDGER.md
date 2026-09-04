@@ -308,7 +308,10 @@ test counts are intentionally not frozen in this ledger.
 | 12 | REQ-EVID-002 canonical timeline persistence | `BROKEN` — `Observation::seen_at` returned an updated copy with the same ID, while the store's only public insertion path rejected that ID as a duplicate | `VERIFIED` | added atomic `EvidenceStore::record_observation_seen_at`; `stored_observation_timeline_extension_is_atomic` proves successful persistence, immutable-field retention, missing-ID failure, time-reversal rejection, and no mutation on either failure |
 | 13 | REQ-CORE-007 full finite-input result invariant | `BROKEN` — extreme but finite inputs could overflow to `Some(inf)` or underflow to `Some(0.0)` | `VERIFIED` | `ble_distance_m` now returns `None` unless its computed result is positive and finite; direct reproducers and a finite-boundary Cartesian sweep lock the invariant |
 
-Every fix above was validated with `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo build --workspace --locked`, `cargo test --workspace --locked`, `cargo test --manifest-path xtask/Cargo.toml --locked`, and a full `cargo xtask gates` run — all green — after each individual change and again after all changes combined.
+Items 1-10 were validated with the listed focused checks and a full
+`cargo xtask gates` run after each original change. Items 11-13 were validated
+with focused formatting, lint, and regression checks, then together with the
+complete `cargo xtask gates` suite.
 
 ## Ledger reconciliation (2026-09-02): stale rows corrected against pre-existing tests
 
@@ -348,7 +351,7 @@ them here (rather than omitting them) is itself part of satisfying "do not
 infer completion from code presence": a future pass can pick any single row
 and close it without re-deriving this audit.
 
-As of the 2026-09-02 reconciliation, every Fusion/Evidence/Verification/
+As of the 2026-09-04 reconciliation, every Fusion/Evidence/Verification/
 Advancement/OSINT row previously listed here is `VERIFIED` (see the ledger
 reconciliation section above) and has been removed from this list.
 REQ-INFRA-002 (`Unknown`-as-leading-outcome) was closed and removed from this
