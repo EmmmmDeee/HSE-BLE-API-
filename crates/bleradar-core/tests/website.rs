@@ -649,7 +649,8 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
     let limits = WebsiteLimits::new(100, 10)
         .unwrap()
         .with_maximum_temporal_gap(5);
-    let mut engine = WebsiteLineageEcosystemAnalysisEngine::with_limits(EvidenceStore::new(), limits);
+    let mut engine =
+        WebsiteLineageEcosystemAnalysisEngine::with_limits(EvidenceStore::new(), limits);
 
     // Pair 1: ArchivedState / ArchivedState -> DevelopmentRelationship, ContentReuse
     for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
@@ -665,7 +666,9 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
                     observed_at,
                 )
                 .with_factors(low)
-                .with_timeline(TemporalInterval::new(observed_at, observed_at, observed_at).unwrap())
+                .with_timeline(
+                    TemporalInterval::new(observed_at, observed_at, observed_at).unwrap(),
+                )
                 .with_feature("archive-disjoint".to_owned())
                 .unwrap(),
             )
@@ -686,7 +689,9 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
                     observed_at,
                 )
                 .with_factors(low)
-                .with_timeline(TemporalInterval::new(observed_at, observed_at, observed_at).unwrap())
+                .with_timeline(
+                    TemporalInterval::new(observed_at, observed_at, observed_at).unwrap(),
+                )
                 .with_feature("cert-disjoint".to_owned())
                 .unwrap(),
             )
@@ -707,7 +712,9 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
                     observed_at,
                 )
                 .with_factors(low)
-                .with_timeline(TemporalInterval::new(observed_at, observed_at, observed_at).unwrap())
+                .with_timeline(
+                    TemporalInterval::new(observed_at, observed_at, observed_at).unwrap(),
+                )
                 .with_feature("text-disjoint".to_owned())
                 .unwrap(),
             )
