@@ -109,6 +109,13 @@ fn distance_model_is_calibrated_not_absolute() {
 }
 
 #[test]
+fn distance_model_rejects_unrepresentable_results() {
+    assert!(ble_distance_m(-f64::MAX, f64::MAX, 2.0).is_none());
+    assert!(ble_distance_m(f64::MAX, -f64::MAX, 2.0).is_none());
+    assert!(ble_distance_m(-70.0, -59.0, f64::MIN_POSITIVE).is_none());
+}
+
+#[test]
 fn track_rejects_time_reversal() {
     let mut track = DeviceTrack::new(0.5).unwrap();
     let p = LatLon::new(-26.8, 152.8).unwrap();

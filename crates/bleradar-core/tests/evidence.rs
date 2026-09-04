@@ -77,6 +77,47 @@ fn observation_timeline_is_ordered_and_extendable() {
 }
 
 #[test]
+fn stored_observation_timeline_extension_is_atomic() {
+    let source = source();
+    let original = observation(&source);
+    let mut store = EvidenceStore::new();
+    store.add_source(source).unwrap();
+    store.add_observation(original.clone()).unwrap();
+
+    store
+        .record_observation_seen_at(original.id(), 150)
+        .unwrap();
+    let extended = store.observation(original.id()).unwrap();
+    assert_eq!(extended.first_seen(), 100);
+    assert_eq!(extended.observed_at(), 100);
+    assert_eq!(extended.last_seen(), 150);
+    assert_eq!(extended.raw_value(), original.raw_value());
+    assert_eq!(extended.normalized_value(), original.normalized_value());
+    assert_eq!(extended.source(), original.source());
+    assert_eq!(extended.derivation_history(), original.derivation_history());
+
+    let before_failure = extended.clone();
+    assert_eq!(
+        store.record_observation_seen_at(original.id(), 149),
+        Err(ProvenanceError::InvalidTimeline {
+            first_seen: 100,
+            observed_at: 100,
+            last_seen: 149,
+        })
+    );
+    assert_eq!(store.observation(original.id()), Some(&before_failure));
+    assert!(matches!(
+        store.record_observation_seen_at("missing-observation", 200),
+        Err(ProvenanceError::MissingReference {
+            record: "observation update",
+            field: "observation",
+            ..
+        })
+    ));
+    assert_eq!(store.observation(original.id()), Some(&before_failure));
+}
+
+#[test]
 fn feature_temporal_provenance_does_not_precede_observation() {
     let source = source();
     let observation = observation(&source);

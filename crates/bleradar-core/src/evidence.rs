@@ -2443,6 +2443,31 @@ impl EvidenceStore {
         insert_unique(&mut self.observations, "observation", &id, observation)
     }
 
+    /// Extends a stored observation's last-seen time without replacing its evidence.
+    ///
+    /// # Errors
+    /// Returns [`ProvenanceError::MissingReference`] when `observation_id` is
+    /// unknown, or [`ProvenanceError::InvalidTimeline`] when `timestamp`
+    /// precedes the current last-seen time. The store is unchanged on failure.
+    pub fn record_observation_seen_at(
+        &mut self,
+        observation_id: &str,
+        timestamp: Timestamp,
+    ) -> Result<(), ProvenanceError> {
+        let updated = self
+            .observations
+            .get(observation_id)
+            .ok_or_else(|| ProvenanceError::MissingReference {
+                record: "observation update",
+                record_id: observation_id.to_owned(),
+                field: "observation",
+                reference: observation_id.to_owned(),
+            })?
+            .seen_at(timestamp)?;
+        self.observations.insert(observation_id.to_owned(), updated);
+        Ok(())
+    }
+
     /// Inserts a feature and checks its optional observation and feature links.
     pub fn insert_feature(&mut self, feature: Feature) -> Result<(), ProvenanceError> {
         if let Some(observation_id) = feature.source_observation() {

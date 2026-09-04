@@ -176,6 +176,33 @@ fn prop_ble_distance_is_positive_and_monotonic_in_rssi() {
 }
 
 #[test]
+fn prop_ble_distance_returns_only_positive_finite_estimates_at_numeric_boundaries() {
+    let rssi_values = [
+        f64::MIN,
+        -1.0,
+        -f64::MIN_POSITIVE,
+        0.0,
+        f64::MIN_POSITIVE,
+        1.0,
+        f64::MAX,
+    ];
+    let path_loss_values = [f64::MIN_POSITIVE, 1.0, 2.0, f64::MAX];
+
+    for rssi in rssi_values {
+        for reference in rssi_values {
+            for path_loss in path_loss_values {
+                if let Some(distance) = ble_distance_m(rssi, reference, path_loss) {
+                    assert!(
+                        distance.is_finite() && distance > 0.0,
+                        "invalid distance {distance} for ({rssi}, {reference}, {path_loss})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn prop_track_push_and_spatial_estimate_stay_valid() {
     let mut rng = Rng::new(0x9e37_79b9_7f4a_7c15);
     for _ in 0..20_000 {

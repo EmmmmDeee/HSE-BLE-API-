@@ -137,8 +137,10 @@ pub fn proximity_label(rssi_dbm: f64) -> ProximityBand {
 
 /// Log-distance estimate in metres from RSSI, calibrated RSSI at 1 m, and path-loss exponent.
 ///
-/// Returns `None` for non-finite input or a non-positive path-loss exponent. The result is an
-/// estimate only and should be displayed with an uncertainty band rather than as exact range.
+/// Returns `None` for non-finite input, a non-positive path-loss exponent, or
+/// an estimate that overflows to infinity or underflows to zero. The result is
+/// an estimate only and should be displayed with an uncertainty band rather
+/// than as exact range.
 ///
 /// # Examples
 /// ```
@@ -156,5 +158,6 @@ pub fn ble_distance_m(rssi_dbm: f64, rssi_at_1m_dbm: f64, path_loss_exponent: f6
     {
         return None;
     }
-    Some(10_f64.powf((rssi_at_1m_dbm - rssi_dbm) / (10.0 * path_loss_exponent)))
+    let distance = 10_f64.powf((rssi_at_1m_dbm - rssi_dbm) / (10.0 * path_loss_exponent));
+    (distance.is_finite() && distance > 0.0).then_some(distance)
 }
