@@ -651,28 +651,7 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
         .with_maximum_temporal_gap(5);
     let mut engine = WebsiteLineageEcosystemAnalysisEngine::with_limits(EvidenceStore::new(), limits);
 
-    // Pair 1: HtmlStructure / HtmlStructure -> CommonTemplate, CommonPlatform (Group 1)
-    for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
-        let id = format!("html-{}", site);
-        engine
-            .observe(
-                observation(
-                    &id,
-                    site,
-                    WebsiteFeatureKind::HtmlStructure,
-                    "<html><body>disjoint</body></html>",
-                    source(&format!("{}-source", id), None),
-                    observed_at,
-                )
-                .with_factors(low)
-                .with_timeline(TemporalInterval::new(observed_at, observed_at, observed_at).unwrap())
-                .with_feature("html-disjoint".to_owned())
-                .unwrap(),
-            )
-            .unwrap();
-    }
-
-    // Pair 2: ArchivedState / ArchivedState -> DevelopmentRelationship, ContentReuse (Group 2)
+    // Pair 1: ArchivedState / ArchivedState -> DevelopmentRelationship, ContentReuse
     for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
         let id = format!("archive-{}", site);
         engine
@@ -681,7 +660,7 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
                     &id,
                     site,
                     WebsiteFeatureKind::ArchivedState,
-                    "archived-state",
+                    "val-1",
                     source(&format!("{}-source", id), None),
                     observed_at,
                 )
@@ -693,35 +672,47 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
             .unwrap();
     }
 
-    // Pair 3: NormalizedText / HtmlStructure -> OperationalRelationship wildcard_ (Group 3)
-    let text_a = observation(
-        "text-a",
-        "site-a",
-        WebsiteFeatureKind::NormalizedText,
-        "shared-value",
-        source("text-a-source", None),
-        10,
-    )
-    .with_factors(low)
-    .with_timeline(TemporalInterval::new(10, 10, 10).unwrap())
-    .with_feature("shared-wildcard-feature".to_owned())
-    .unwrap();
-    
-    let html_b = observation(
-        "html-b-wild",
-        "site-b",
-        WebsiteFeatureKind::HtmlStructure,
-        "shared-value",
-        source("html-b-wild-source", None),
-        20,
-    )
-    .with_factors(low)
-    .with_timeline(TemporalInterval::new(20, 20, 20).unwrap())
-    .with_feature("shared-wildcard-feature".to_owned())
-    .unwrap();
+    // Pair 2: Certificate / Certificate -> OperationalRelationship, DevelopmentRelationship
+    for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
+        let id = format!("cert-{}", site);
+        engine
+            .observe(
+                observation(
+                    &id,
+                    site,
+                    WebsiteFeatureKind::Certificate,
+                    "val-2",
+                    source(&format!("{}-source", id), None),
+                    observed_at,
+                )
+                .with_factors(low)
+                .with_timeline(TemporalInterval::new(observed_at, observed_at, observed_at).unwrap())
+                .with_feature("cert-disjoint".to_owned())
+                .unwrap(),
+            )
+            .unwrap();
+    }
 
-    engine.observe(text_a).unwrap();
-    engine.observe(html_b).unwrap();
+    // Pair 3: NormalizedText / NormalizedText -> ContentReuse, CommonTemplate
+    for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
+        let id = format!("text-{}", site);
+        engine
+            .observe(
+                observation(
+                    &id,
+                    site,
+                    WebsiteFeatureKind::NormalizedText,
+                    "val-3",
+                    source(&format!("{}-source", id), None),
+                    observed_at,
+                )
+                .with_factors(low)
+                .with_timeline(TemporalInterval::new(observed_at, observed_at, observed_at).unwrap())
+                .with_feature("text-disjoint".to_owned())
+                .unwrap(),
+            )
+            .unwrap();
+    }
 
     let report = engine.correlate("site-a", "site-b").unwrap();
     assert_eq!(
