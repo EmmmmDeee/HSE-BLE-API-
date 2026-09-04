@@ -468,3 +468,58 @@ fn constructors_reject_empty_and_whitespace_only_identifiers() {
         })
     ));
 }
+
+#[test]
+fn duplicate_source_id_is_rejected_on_second_insert() {
+    let mut store = EvidenceStore::new();
+    store.add_source(source()).unwrap();
+
+    assert!(matches!(
+        store.add_source(source()),
+        Err(ProvenanceError::DuplicateId {
+            collection: "source",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn claim_without_any_evidence_is_rejected_by_trace_and_validate() {
+    let hypothesis =
+        Hypothesis::new("hypothesis-1", "ordinary explanation", HypothesisKind::Null).unwrap();
+    let claim = Claim::new(
+        "claim-1",
+        "the observed value has the ordinary explanation",
+        hypothesis.id(),
+    )
+    .unwrap();
+    let mut store = EvidenceStore::new();
+    store.add_hypothesis(hypothesis).unwrap();
+    store.add_claim(claim).unwrap();
+
+    assert!(matches!(
+        store.trace_claim("claim-1"),
+        Err(ProvenanceError::ClaimWithoutEvidence { .. })
+    ));
+    assert!(matches!(
+        store.validate(),
+        Err(ProvenanceError::ClaimWithoutEvidence { .. })
+    ));
+}
+
+#[test]
+fn artifact_referencing_an_unregistered_entity_is_rejected() {
+    let artifact = Artifact::new("artifact-1", ArtifactType::Digital)
+        .unwrap()
+        .for_entity("no-such-entity");
+    let mut store = EvidenceStore::new();
+
+    assert!(matches!(
+        store.add_artifact(artifact),
+        Err(ProvenanceError::MissingReference {
+            record: "artifact",
+            field: "entity",
+            ..
+        })
+    ));
+}
