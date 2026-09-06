@@ -10,6 +10,9 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -17,6 +20,10 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.SpannableStringBuilder;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.RelativeSizeSpan;
+import android.text.style.StyleSpan;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
@@ -133,6 +140,13 @@ public final class MainActivity extends android.app.Activity {
 
         toggleButton = new Button(this);
         toggleButton.setText(R.string.action_start);
+        toggleButton.setAllCaps(false);
+        toggleButton.setTextSize(16f);
+        toggleButton.setTextColor(Color.parseColor("#0F1419"));
+        GradientDrawable buttonBackground = new GradientDrawable();
+        buttonBackground.setColor(Color.parseColor("#39D98A"));
+        buttonBackground.setCornerRadius(dp(8));
+        toggleButton.setBackground(buttonBackground);
         LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         buttonParams.setMargins(dp(16), dp(8), dp(16), dp(8));
@@ -143,10 +157,18 @@ public final class MainActivity extends android.app.Activity {
         deviceListAdapter = new DeviceListAdapter();
         deviceListView = new ListView(this);
         deviceListView.setAdapter(deviceListAdapter);
+        GradientDrawable listBackground = new GradientDrawable();
+        listBackground.setColor(Color.parseColor("#162026"));
+        listBackground.setCornerRadius(dp(8));
+        deviceListView.setBackground(listBackground);
+        deviceListView.setCacheColorHint(Color.TRANSPARENT);
+        deviceListView.setSelector(new ColorDrawable(Color.TRANSPARENT));
+        deviceListView.setDivider(new ColorDrawable(Color.parseColor("#337E9C90")));
+        deviceListView.setDividerHeight(1);
         LinearLayout.LayoutParams listParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(180));
+        listParams.setMargins(dp(16), 0, dp(16), dp(16));
         deviceListView.setLayoutParams(listParams);
-        deviceListView.setDivider(null);
         root.addView(deviceListView);
 
         return root;
@@ -265,8 +287,8 @@ public final class MainActivity extends android.app.Activity {
             TextView row = convertView instanceof TextView
                     ? (TextView) convertView
                     : new TextView(MainActivity.this);
-            row.setPadding(dp(16), dp(8), dp(16), dp(8));
-            row.setTextColor(Color.parseColor("#E7F3ED"));
+            row.setPadding(dp(16), dp(10), dp(16), dp(10));
+            row.setLineSpacing(dp(2), 1f);
             Blip blip = items.get(position);
             String name = blip.name != null && !blip.name.isEmpty()
                     ? blip.name
@@ -274,7 +296,21 @@ public final class MainActivity extends android.app.Activity {
             String distance = Double.isNaN(blip.distanceMetres)
                     ? getString(R.string.format_distance_unknown)
                     : getString(R.string.format_distance_meters, Math.round(blip.distanceMetres) + "");
-            row.setText(name + " (" + blip.address + ")\n" + distance + " · " + Math.round(blip.lastRssiDbm) + " dBm");
+            String identityLine = name + "  ·  " + blip.address;
+            String metricsLine = distance + "   " + Math.round(blip.lastRssiDbm) + " dBm";
+
+            SpannableStringBuilder text = new SpannableStringBuilder(identityLine);
+            text.setSpan(new StyleSpan(Typeface.BOLD), 0, identityLine.length(), 0);
+            text.setSpan(new ForegroundColorSpan(Color.parseColor("#E7F3ED")), 0, identityLine.length(), 0);
+
+            text.append("\n");
+            int metricsStart = text.length();
+            text.append(metricsLine);
+            text.setSpan(new ForegroundColorSpan(RadarView.colourForProximity(blip.proximity)),
+                    metricsStart, text.length(), 0);
+            text.setSpan(new RelativeSizeSpan(0.88f), metricsStart, text.length(), 0);
+
+            row.setText(text);
             return row;
         }
     }
