@@ -1142,13 +1142,35 @@ impl HseEntity {
     /// the [`RECALL_SOURCE`] memory replay; see
     /// [`is_non_corroborating_source`]). This is the honest cross-correlation
     /// set that drives [`Self::source_count`]/[`Self::c_effective`].
+    ///
+    /// GROUNDING GATE — identical to the one [`Self::source_count`] applies,
+    /// so the SET and the COUNT can never disagree about whether an entity is
+    /// independently corroborated. Promotion passes
+    /// (`multipath_corroboration`, `cross_scan_corroboration`) re-fire every
+    /// scan and must never GROUND an entity by themselves (see
+    /// [`is_promotion_source`]): they join the set only once the entity
+    /// already holds enough REAL sources — 1 normally, 2 when it is `derived`
+    /// (its lone real source is its own generator).
     #[must_use]
     pub fn corroborating_sources(&self) -> std::collections::HashSet<&str> {
-        self.evidence
-            .iter()
-            .map(|ev| ev.source.as_str())
-            .filter(|s| !is_non_corroborating_source(s))
-            .collect()
+        let derived = self.has_tag(tags::DERIVED);
+        let mut real: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut promo: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for ev in &self.evidence {
+            let s = ev.source.as_str();
+            if is_non_corroborating_source(s) {
+                continue;
+            }
+            if is_promotion_source(s) {
+                promo.insert(s);
+            } else {
+                real.insert(s);
+            }
+        }
+        if real.len() >= if derived { 2 } else { 1 } {
+            real.extend(promo);
+        }
+        real
     }
 
     /// Distinct `(source, summary)` evidence identities that represent
@@ -1172,18 +1194,20 @@ impl HseEntity {
 
     // ── GREATEST-semantics merge ─────────────────────────────────────────────
 
-    /// Put the evidence chain in its canonical order: sorted by
-    /// `(recorded_at, source, summary)` — stable, so pre-existing order breaks
-    /// exact ties. Merge produces a canonical order already (see
-    /// [`Self::absorb`]); this exists for entities built up by hand.
+    /// Put the evidence chain and tag bag in their canonical order: evidence
+    /// sorted by `(source, summary)` and tags sorted — stable, so pre-existing
+    /// order breaks exact ties. Merge produces a canonical order already (see
+    /// [`Self::absorb`]); this exists for entities built up by hand, so an
+    /// entity built by merging the same module results in different orders
+    /// (as concurrent completion-order dispatch does) finalises to identical
+    /// evidence + tag ordering.
     pub fn canonicalize_order(&mut self) {
         self.evidence.sort_by(|a, b| {
-            (a.recorded_at, a.source.as_str(), a.summary.as_str()).cmp(&(
-                b.recorded_at,
-                b.source.as_str(),
-                b.summary.as_str(),
-            ))
+            a.source
+                .cmp(&b.source)
+                .then_with(|| a.summary.cmp(&b.summary))
         });
+        self.tags.sort();
     }
 
     /// Merge another entity into this one (GREATEST semantics).
