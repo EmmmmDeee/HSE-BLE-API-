@@ -17,6 +17,10 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 - `crates/bleradar-core::infrastructure` — temporal metamorphic infrastructure
   correlation across domains, DNS, addresses, certificates, hosting, HTTP,
   public assets, application structure, and archived states.
+- `crates/bleradar-core::pipeline` — the investigation control loop (discover →
+  … → stop on diminishing information gain): a temporal+geo graph with
+  bridge/cluster detection, a round-over-round diminishing-information-gain
+  stop criterion, and explicit stage tracking across the whole loop.
 - `crates/bleradar-core::{entity,coords,tags}` — the Huntsman Search Engine
   (HSE) dependency-free entity model imported for the radar domain: SHA-256
   deterministic UIDs, per-kind normalisation, a cross-source corroboration
@@ -131,6 +135,23 @@ support; and applies bounded calibration, temporal alignment, and
 support-removal falsification before persisting a canonical lineage edge.
 Website similarity can yield a possible common-operator assessment, but this
 engine never treats similarity alone as proof of common operation.
+
+`InvestigationPipeline` names and tracks the loop that ties every other engine
+together: discover → normalise → entity-resolve → trace source lineage →
+geolocate → generate pivots → score frontier → expand best candidates →
+corroborate/contradict → build temporal+geo graph → detect bridges/clusters →
+generate competing hypotheses → seek discriminating evidence → promote/demote
+claims → recompute frontier → stop on diminishing information gain. Fourteen of
+the sixteen stages are domain work already performed by `entity`, `evidence`,
+`coords`, `osint`, `fusion`, `infrastructure`, and `website`; this module adds
+only the two capabilities the loop names but nothing else implements: a
+`TemporalGeoGraph` that unifies caller-supplied edges with per-node temporal
+and geographic annotations and reports connected components and bridge edges
+(via an iterative, multigraph-safe Tarjan bridge search), and a
+`DiminishingGainStopCriterion` that halts the loop once a full sliding window
+of consecutive rounds all yield low marginal information gain — distinct from
+`osint`'s static per-pivot ranking factor and hard search-limit counts, neither
+of which measures actual round-over-round yield.
 
 ## Requirements
 

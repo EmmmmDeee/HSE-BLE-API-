@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bleradar-core", "crates/bleradar-compat"]
+members = ["crates/bleradar-core", "crates/bleradar-compat", "crates/bleradar-jni"]
 
 [workspace.package]
 edition = "2024"
@@ -14,3 +14,20 @@ missing_docs = "warn"
 
 [workspace.lints.clippy]
 all = "deny"
+
+# Applies to every workspace member's `--release` build. None of the CI
+# gates (see .github/workflows/gates.yml) build in release mode, so this
+# only affects the aarch64-linux-android cross-compile of `bleradar-jni`
+# performed by `cargo xtask build-apk`, where it directly serves the
+# "optimised for ... low-end mobile" requirement: a smaller, LTO'd,
+# already-stripped .so reduces APK size, install time, and load time on
+# constrained hardware. `panic = "abort"` is safe across the JNI boundary
+# here because every exported function is a documented panic-free pure
+# computation over primitives (see crates/bleradar-jni/src/lib.rs).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+

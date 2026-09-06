@@ -44,6 +44,7 @@ fn main() -> ExitCode {
         "native-abi" => cmd_native_abi(&rest),
         "dex-classes" => cmd_dex_classes(&rest),
         "vendor-advisory-db" => cmd_vendor_advisory_db(),
+        "build-apk" => cmd_build_apk(),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -79,6 +80,7 @@ fn print_usage() {
          \x20 native-abi <lib.so>        print sorted defined FUNC/OBJECT symbols\n\
          \x20 dex-classes <classes.dex>  print sorted class descriptors\n\
          \x20 vendor-advisory-db         materialize the offline cargo-deny advisory db\n\
+         \x20 build-apk                  cross-compile + package + sign the Android radar APK\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/test/doc/checks/audit/deny)"
@@ -403,7 +405,7 @@ fn cmd_parity_report() -> Result<(), String> {
 
 /// Names of the only crates this workspace is allowed to depend on
 /// (`docs/AUTONOMOUS_DECISIONS.md`, decision 9).
-const ALLOWED: [&str; 2] = ["bleradar-core", "bleradar-compat"];
+const ALLOWED: [&str; 3] = ["bleradar-core", "bleradar-compat", "bleradar-jni"];
 
 /// Extracts every `name = "..."` package name from `Cargo.lock` text, in
 /// file order. Pure text scan (no filesystem access), so it is directly
@@ -666,6 +668,526 @@ fn cmd_vendor_advisory_db() -> Result<(), String> {
     let root = repo_root()?;
     let target = vendor::materialize_advisory_db(&root)?;
     println!("{}", target.display());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// `build-apk`: cross-compiles `bleradar-jni`, hand-packages the Android
+// app under `android/app/src/main`, and signs the result — with no
+// Gradle/AndroidX/Compose (unreachable from this workspace's network
+// policy; see docs/ANDROID_APP.md), only the Android SDK build-tools, the
+// NDK, and the JDK, all invoked as plain external tools exactly like
+// `cmd_audit`/`cmd_deny` already invoke `cargo audit`/`cargo deny` above.
+// Deliberately NOT part of `cmd_gates`: unlike every other gate, this one
+// requires an installed Android SDK + NDK, which CI's runner does not
+// provide.
+// ---------------------------------------------------------------------
+
+/// Directory (relative to the repo root) holding the hand-built Android
+/// app's manifest, resources, and Java sources. See `docs/ANDROID_APP.md`
+/// for why this app has no Gradle project.
+const ANDROID_APP_DIR: &str = "android/app/src/main";
+
+/// Name of the cross-compiled native library, matching
+/// `NativeRadar.ensureLoaded()`'s `System.loadLibrary("bleradar_jni")`.
+const NATIVE_LIB_FILE_NAME: &str = "libbleradar_jni.so";
+
+/// Final signed APK's committed name at the repository root.
+const APK_OUTPUT_NAME: &str = "HSE-BLE-Radar-arm64-v1.0.0.apk";
+
+/// Alias/password for the ephemeral, non-secret signing identity this
+/// command generates if one is not already present. Deliberately mirrors
+/// the Android SDK's own long-standing, publicly documented
+/// `debug.keystore` convention (same alias, same password) precisely
+/// because that convention is not a secret — it's the same well-known
+/// placeholder every Android developer's local debug keystore already
+/// uses — and reusing it here avoids inventing a new value that a secret
+/// scanner (or a future reader) might mistake for a real credential.
+const DEBUG_KEYSTORE_ALIAS: &str = "androiddebugkey";
+const DEBUG_KEYSTORE_PASSWORD: &str = "android";
+
+/// Parses a directory name like `"34.0.0"` or `"27.3.13750724"` into a
+/// comparable numeric key, or `None` if any dot-separated segment is not a
+/// plain non-negative integer. This deliberately filters out beta/rc-style
+/// names such as `"37.2-beta1"` so version discovery only ever picks a
+/// stable install.
+fn parse_plain_version(name: &str) -> Option<Vec<u64>> {
+    if name.is_empty() {
+        return None;
+    }
+    name.split('.')
+        .map(|segment| segment.parse().ok())
+        .collect()
+}
+
+/// Picks the immediate subdirectory of `parent` with the highest
+/// [`parse_plain_version`] key for which `predicate` also holds (e.g.
+/// "contains an `aapt2` executable"). Returns the full path of the winner.
+fn pick_highest_version_dir(
+    parent: &Path,
+    mut predicate: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
+    let entries = fs::read_dir(parent).ok()?;
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(key) = parse_plain_version(name) else {
+            continue;
+        };
+        if !predicate(&path) {
+            continue;
+        }
+        let is_better = best
+            .as_ref()
+            .map(|(best_key, _)| key > *best_key)
+            .unwrap_or(true);
+        if is_better {
+            best = Some((key, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// The Android NDK's host-toolchain directory name for the platform this
+/// binary is itself running on (mirrors the NDK's own `prebuilt/<tag>`
+/// naming — `linux-x86_64`, `darwin-x86_64`, or `windows-x86_64`).
+fn ndk_host_tag() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "darwin-x86_64"
+    } else if cfg!(target_os = "windows") {
+        "windows-x86_64"
+    } else {
+        "linux-x86_64"
+    }
+}
+
+/// Locates an installed Android SDK: `ANDROID_HOME`/`ANDROID_SDK_ROOT` if
+/// set to an existing directory, else this sandbox's known install path.
+fn discover_sdk_root() -> Result<PathBuf, String> {
+    for var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+        if let Ok(value) = env::var(var) {
+            let path = PathBuf::from(value);
+            if path.is_dir() {
+                return Ok(path);
+            }
+        }
+    }
+    let fallback = PathBuf::from("/usr/local/lib/android/sdk");
+    if fallback.is_dir() {
+        return Ok(fallback);
+    }
+    Err(
+        "Android SDK not found: set ANDROID_HOME (or ANDROID_SDK_ROOT) to its install path"
+            .to_string(),
+    )
+}
+
+/// Picks the highest-versioned `build-tools/<version>` directory that
+/// contains every tool this pipeline needs.
+fn discover_build_tools(sdk_root: &Path) -> Result<PathBuf, String> {
+    let build_tools_dir = sdk_root.join("build-tools");
+    pick_highest_version_dir(&build_tools_dir, |path| {
+        ["aapt2", "d8", "zipalign", "apksigner"]
+            .iter()
+            .all(|tool| path.join(tool).is_file())
+    })
+    .ok_or_else(|| {
+        format!(
+            "no build-tools/<version> under {} contains aapt2/d8/zipalign/apksigner",
+            build_tools_dir.display()
+        )
+    })
+}
+
+/// Picks the highest plain `android-<N>/android.jar` (skips extension and
+/// preview variants like `android-34-ext8` or `android-37.2-beta1`, which
+/// use a different naming scheme and are not needed here).
+fn discover_platform_jar(sdk_root: &Path) -> Result<PathBuf, String> {
+    let platforms_dir = sdk_root.join("platforms");
+    let entries = fs::read_dir(&platforms_dir)
+        .map_err(|e| format!("reading {}: {e}", platforms_dir.display()))?;
+    let mut best: Option<(u64, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(number) = name
+            .strip_prefix("android-")
+            .and_then(|n| n.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let jar = path.join("android.jar");
+        if !jar.is_file() {
+            continue;
+        }
+        let is_better = best
+            .as_ref()
+            .map(|(best_n, _)| number > *best_n)
+            .unwrap_or(true);
+        if is_better {
+            best = Some((number, jar));
+        }
+    }
+    best.map(|(_, jar)| jar).ok_or_else(|| {
+        format!(
+            "no platforms/android-<N>/android.jar found under {}",
+            platforms_dir.display()
+        )
+    })
+}
+
+/// Locates an installed Android NDK: `ANDROID_NDK_HOME`/`ANDROID_NDK_ROOT`
+/// if set to an existing directory, else the highest-versioned
+/// `<sdk>/ndk/<version>` directory with a usable host toolchain.
+fn discover_ndk_root(sdk_root: &Path) -> Result<PathBuf, String> {
+    for var in ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"] {
+        if let Ok(value) = env::var(var) {
+            let path = PathBuf::from(value);
+            if path.is_dir() {
+                return Ok(path);
+            }
+        }
+    }
+    let ndk_dir = sdk_root.join("ndk");
+    let host_bin_suffix = format!("toolchains/llvm/prebuilt/{}/bin", ndk_host_tag());
+    pick_highest_version_dir(&ndk_dir, |path| path.join(&host_bin_suffix).is_dir())
+        .ok_or_else(|| format!("no usable ndk/<version> found under {}", ndk_dir.display()))
+}
+
+/// Extracts the first `prefix"..."` quoted value's inner text, e.g. calling
+/// this with `prefix = "android:minSdkVersion=\""` on manifest source text
+/// returns the digits between those quotes. A targeted text scan, not a
+/// full XML parser, matching this file's existing style (see
+/// `find_quoted_name_values` above).
+fn find_quoted_attr(haystack: &str, prefix: &str) -> Option<String> {
+    let start = haystack.find(prefix)? + prefix.len();
+    let rest = &haystack[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Reads `(minSdkVersion, targetSdkVersion)` out of the manifest's
+/// `<uses-sdk>` element so this command can never silently drift from what
+/// `AndroidManifest.xml` itself declares.
+fn parse_uses_sdk(manifest_text: &str) -> Result<(u32, u32), String> {
+    let min_sdk = find_quoted_attr(manifest_text, "android:minSdkVersion=\"")
+        .ok_or("AndroidManifest.xml: missing android:minSdkVersion")?;
+    let target_sdk = find_quoted_attr(manifest_text, "android:targetSdkVersion=\"")
+        .ok_or("AndroidManifest.xml: missing android:targetSdkVersion")?;
+    let min_sdk = min_sdk
+        .parse::<u32>()
+        .map_err(|e| format!("android:minSdkVersion={min_sdk:?}: {e}"))?;
+    let target_sdk = target_sdk
+        .parse::<u32>()
+        .map_err(|e| format!("android:targetSdkVersion={target_sdk:?}: {e}"))?;
+    Ok((min_sdk, target_sdk))
+}
+
+/// Recursively collects every file under `dir` whose extension is exactly
+/// `ext`, sorted for deterministic build-command argument order.
+fn find_files_with_extension(dir: &Path, ext: &str) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    collect_files_with_extension(dir, ext, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn collect_files_with_extension(
+    dir: &Path,
+    ext: &str,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("reading {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_with_extension(&path, ext, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Recreates (deletes then creates) each directory in `dirs`, so a rerun
+/// never mixes stale outputs from a previous build into a new one.
+fn recreate_dirs(dirs: &[&Path]) -> Result<(), String> {
+    for dir in dirs {
+        if dir.is_dir() {
+            fs::remove_dir_all(dir).map_err(|e| format!("clearing {}: {e}", dir.display()))?;
+        }
+        fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
+fn cmd_build_apk() -> Result<(), String> {
+    let root = repo_root()?;
+    let app_dir = root.join(ANDROID_APP_DIR);
+    let manifest_path = app_dir.join("AndroidManifest.xml");
+    let manifest_text = read_to_string(&manifest_path)?;
+    let (min_sdk, target_sdk) = parse_uses_sdk(&manifest_text)?;
+    println!("manifest declares minSdkVersion={min_sdk} targetSdkVersion={target_sdk}");
+
+    let sdk_root = discover_sdk_root()?;
+    let build_tools = discover_build_tools(&sdk_root)?;
+    let platform_jar = discover_platform_jar(&sdk_root)?;
+    let ndk_root = discover_ndk_root(&sdk_root)?;
+    println!("sdk_root={}", sdk_root.display());
+    println!("build_tools={}", build_tools.display());
+    println!("platform_jar={}", platform_jar.display());
+    println!("ndk_root={}", ndk_root.display());
+
+    let build_dir = root.join("target/android-apk");
+    let res_compiled_dir = build_dir.join("res-compiled");
+    let gen_dir = build_dir.join("gen");
+    let classes_dir = build_dir.join("classes");
+    let dex_dir = build_dir.join("dex");
+    let staging_dir = build_dir.join("staging");
+    fs::create_dir_all(&build_dir).map_err(|e| format!("creating {}: {e}", build_dir.display()))?;
+    recreate_dirs(&[
+        &res_compiled_dir,
+        &gen_dir,
+        &classes_dir,
+        &dex_dir,
+        &staging_dir,
+    ])?;
+
+    println!("== cross-compiling bleradar-jni for aarch64-linux-android (release) ==");
+    let ndk_bin = ndk_root
+        .join("toolchains/llvm/prebuilt")
+        .join(ndk_host_tag())
+        .join("bin");
+    let clang = ndk_bin.join(format!("aarch64-linux-android{min_sdk}-clang"));
+    if !clang.is_file() {
+        return Err(format!(
+            "NDK clang for API {min_sdk} not found: {}",
+            clang.display()
+        ));
+    }
+    let llvm_ar = ndk_bin.join("llvm-ar");
+    run_status({
+        let mut c = Command::new("cargo");
+        c.current_dir(&root)
+            .args([
+                "build",
+                "--release",
+                "--locked",
+                "--target",
+                "aarch64-linux-android",
+                "-p",
+                "bleradar-jni",
+            ])
+            .env("CC_aarch64_linux_android", &clang)
+            .env("AR_aarch64_linux_android", &llvm_ar)
+            .env("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", &clang)
+            .env("CARGO_TARGET_AARCH64_LINUX_ANDROID_AR", &llvm_ar);
+        c
+    })?;
+    let so_path = root
+        .join("target/aarch64-linux-android/release")
+        .join(NATIVE_LIB_FILE_NAME);
+    if !so_path.is_file() {
+        return Err(format!(
+            "expected cross-compiled native library missing: {}",
+            so_path.display()
+        ));
+    }
+
+    println!("== aapt2 compile ==");
+    run_status({
+        let mut c = Command::new(build_tools.join("aapt2"));
+        c.arg("compile")
+            .arg("--dir")
+            .arg(app_dir.join("res"))
+            .arg("-o")
+            .arg(&res_compiled_dir);
+        c
+    })?;
+    let flat_files = find_files_with_extension(&res_compiled_dir, "flat")?;
+    if flat_files.is_empty() {
+        return Err(format!(
+            "aapt2 compile produced no .flat resource files under {}",
+            res_compiled_dir.display()
+        ));
+    }
+
+    println!("== aapt2 link ==");
+    let base_apk = build_dir.join("base.apk");
+    run_status({
+        let mut c = Command::new(build_tools.join("aapt2"));
+        c.arg("link")
+            .arg("-I")
+            .arg(&platform_jar)
+            .arg("--manifest")
+            .arg(&manifest_path)
+            .arg("-o")
+            .arg(&base_apk)
+            .arg("--java")
+            .arg(&gen_dir)
+            .args(["--min-sdk-version", &min_sdk.to_string()])
+            .args(["--target-sdk-version", &target_sdk.to_string()])
+            .args(["--version-code", "1", "--version-name", "1.0.0"])
+            .args(["-0", "arsc"])
+            .arg("--auto-add-overlay");
+        for flat in &flat_files {
+            c.arg("-R").arg(flat);
+        }
+        c
+    })?;
+    if !base_apk.is_file() {
+        return Err(format!("aapt2 link did not produce {}", base_apk.display()));
+    }
+
+    println!("== javac ==");
+    let mut java_sources = find_files_with_extension(&app_dir.join("java"), "java")?;
+    java_sources.extend(find_files_with_extension(&gen_dir, "java")?);
+    if java_sources.is_empty() {
+        return Err("no .java sources found to compile".to_string());
+    }
+    run_status({
+        let mut c = Command::new("javac");
+        c.args(["-source", "8", "-target", "8", "-d"])
+            .arg(&classes_dir)
+            .arg("-classpath")
+            .arg(&platform_jar);
+        c.args(&java_sources);
+        c
+    })?;
+
+    println!("== d8 ==");
+    let class_files = find_files_with_extension(&classes_dir, "class")?;
+    if class_files.is_empty() {
+        return Err("javac produced no .class files".to_string());
+    }
+    run_status({
+        let mut c = Command::new(build_tools.join("d8"));
+        c.args(["--release", "--min-api"])
+            .arg(min_sdk.to_string())
+            .arg("--lib")
+            .arg(&platform_jar)
+            .arg("--output")
+            .arg(&dex_dir);
+        c.args(&class_files);
+        c
+    })?;
+    let classes_dex = dex_dir.join("classes.dex");
+    if !classes_dex.is_file() {
+        return Err(format!("d8 did not produce {}", classes_dex.display()));
+    }
+
+    println!("== assembling APK (native lib + resources.arsc stored uncompressed) ==");
+    run_status({
+        let mut c = Command::new("unzip");
+        c.args(["-q", "-o"])
+            .arg(&base_apk)
+            .arg("-d")
+            .arg(&staging_dir);
+        c
+    })?;
+    let lib_dir = staging_dir.join("lib/arm64-v8a");
+    fs::create_dir_all(&lib_dir).map_err(|e| format!("creating {}: {e}", lib_dir.display()))?;
+    fs::copy(&so_path, lib_dir.join(NATIVE_LIB_FILE_NAME))
+        .map_err(|e| format!("copying {} into staging: {e}", so_path.display()))?;
+    fs::copy(&classes_dex, staging_dir.join("classes.dex"))
+        .map_err(|e| format!("copying {} into staging: {e}", classes_dex.display()))?;
+
+    let unaligned_apk = build_dir.join("unaligned.apk");
+    if unaligned_apk.is_file() {
+        fs::remove_file(&unaligned_apk)
+            .map_err(|e| format!("removing stale {}: {e}", unaligned_apk.display()))?;
+    }
+    run_status({
+        let mut c = Command::new("zip");
+        c.current_dir(&staging_dir).args(["-r", "-X", "-q"]);
+        c.arg(&unaligned_apk);
+        c.args([".", "-x", "lib/*", "-x", "resources.arsc"]);
+        c
+    })?;
+    run_status({
+        let mut c = Command::new("zip");
+        c.current_dir(&staging_dir).args(["-0", "-X", "-q"]);
+        c.arg(&unaligned_apk);
+        c.args(["lib/arm64-v8a/libbleradar_jni.so", "resources.arsc"]);
+        c
+    })?;
+
+    println!("== zipalign ==");
+    let aligned_apk = build_dir.join("aligned.apk");
+    if aligned_apk.is_file() {
+        fs::remove_file(&aligned_apk)
+            .map_err(|e| format!("removing stale {}: {e}", aligned_apk.display()))?;
+    }
+    run_status({
+        let mut c = Command::new(build_tools.join("zipalign"));
+        c.args(["-p", "-f", "4"])
+            .arg(&unaligned_apk)
+            .arg(&aligned_apk);
+        c
+    })?;
+
+    println!("== signing ==");
+    let keystore_path = build_dir.join("debug.keystore");
+    if !keystore_path.is_file() {
+        run_status({
+            let mut c = Command::new("keytool");
+            c.args(["-genkeypair", "-v", "-keystore"])
+                .arg(&keystore_path)
+                .args(["-storepass", DEBUG_KEYSTORE_PASSWORD])
+                .args(["-keypass", DEBUG_KEYSTORE_PASSWORD])
+                .args(["-alias", DEBUG_KEYSTORE_ALIAS])
+                .args(["-keyalg", "RSA", "-keysize", "2048", "-validity", "10950"])
+                .args(["-dname", "CN=Android Debug,O=Android,C=US"]);
+            c
+        })?;
+    }
+    let signed_apk = build_dir.join("signed.apk");
+    run_status({
+        let mut c = Command::new(build_tools.join("apksigner"));
+        c.arg("sign")
+            .arg("--ks")
+            .arg(&keystore_path)
+            .args(["--ks-pass", &format!("pass:{DEBUG_KEYSTORE_PASSWORD}")])
+            .args(["--key-pass", &format!("pass:{DEBUG_KEYSTORE_PASSWORD}")])
+            .args(["--ks-key-alias", DEBUG_KEYSTORE_ALIAS])
+            .args(["--min-sdk-version", &min_sdk.to_string()])
+            .args(["--v1-signing-enabled", "false"])
+            .args(["--v2-signing-enabled", "true"])
+            .args(["--v3-signing-enabled", "true"])
+            .arg("--out")
+            .arg(&signed_apk)
+            .arg(&aligned_apk);
+        c
+    })?;
+
+    println!("== verifying ==");
+    run_status({
+        let mut c = Command::new(build_tools.join("apksigner"));
+        c.args(["verify", "--print-certs"]).arg(&signed_apk);
+        c
+    })?;
+    run_status({
+        let mut c = Command::new(build_tools.join("zipalign"));
+        c.args(["-c", "-v", "4"]).arg(&signed_apk);
+        c
+    })?;
+
+    let output_path = root.join(APK_OUTPUT_NAME);
+    fs::copy(&signed_apk, &output_path)
+        .map_err(|e| format!("copying final APK to {}: {e}", output_path.display()))?;
+    let size = fs::metadata(&output_path)
+        .map_err(|e| format!("stat {}: {e}", output_path.display()))?
+        .len();
+    println!("== done: {} ({size} bytes) ==", output_path.display());
     Ok(())
 }
 
@@ -1072,7 +1594,8 @@ mod tests {
             evaluate_dependency_policy(&names, &ALLOWED),
             DependencyPolicyOutcome::Compliant(vec![
                 "bleradar-compat".to_string(),
-                "bleradar-core".to_string()
+                "bleradar-core".to_string(),
+                "bleradar-jni".to_string(),
             ])
         );
     }
@@ -1189,6 +1712,147 @@ mod tests {
             )
         );
 
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn parse_plain_version_accepts_dot_separated_integers() {
+        assert_eq!(parse_plain_version("34.0.0"), Some(vec![34, 0, 0]));
+        assert_eq!(parse_plain_version("27"), Some(vec![27]));
+        assert_eq!(
+            parse_plain_version("27.3.13750724"),
+            Some(vec![27, 3, 13750724])
+        );
+    }
+
+    #[test]
+    fn parse_plain_version_rejects_non_numeric_or_empty_input() {
+        assert_eq!(parse_plain_version(""), None);
+        assert_eq!(parse_plain_version("37.2-beta1"), None);
+        assert_eq!(parse_plain_version("android-34-ext8"), None);
+    }
+
+    #[test]
+    fn parse_plain_version_orders_numerically_not_lexicographically() {
+        // Vec<u64> ordering must prefer 10 over 9 (a plain string compare
+        // would wrongly prefer "9" over "10").
+        assert!(parse_plain_version("10.0.0") > parse_plain_version("9.0.0"));
+    }
+
+    #[test]
+    fn pick_highest_version_dir_prefers_the_highest_qualifying_version() {
+        let root =
+            unique_temp_dir("pick_highest_version_dir_prefers_the_highest_qualifying_version");
+        for name in ["9.0.0", "10.0.0", "not-a-version"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+        }
+
+        let picked = pick_highest_version_dir(&root, |_| true).unwrap();
+
+        assert_eq!(picked, root.join("10.0.0"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pick_highest_version_dir_filters_out_versions_failing_the_predicate() {
+        let root =
+            unique_temp_dir("pick_highest_version_dir_filters_out_versions_failing_the_predicate");
+        for name in ["9.0.0", "10.0.0"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+        }
+        fs::write(root.join("9.0.0").join("marker"), "").unwrap();
+
+        let picked = pick_highest_version_dir(&root, |path| path.join("marker").is_file()).unwrap();
+
+        assert_eq!(picked, root.join("9.0.0"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pick_highest_version_dir_returns_none_when_nothing_qualifies() {
+        let root = unique_temp_dir("pick_highest_version_dir_returns_none_when_nothing_qualifies");
+        fs::create_dir_all(root.join("not-a-version")).unwrap();
+
+        assert!(pick_highest_version_dir(&root, |_| true).is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn find_quoted_attr_extracts_the_value_between_quotes() {
+        let manifest = r#"<uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />"#;
+        assert_eq!(
+            find_quoted_attr(manifest, "android:minSdkVersion=\""),
+            Some("26".to_string())
+        );
+        assert_eq!(
+            find_quoted_attr(manifest, "android:targetSdkVersion=\""),
+            Some("34".to_string())
+        );
+    }
+
+    #[test]
+    fn find_quoted_attr_returns_none_when_prefix_or_closing_quote_missing() {
+        assert_eq!(
+            find_quoted_attr("no attrs here", "android:minSdkVersion=\""),
+            None
+        );
+        assert_eq!(
+            find_quoted_attr("android:minSdkVersion=\"26", "android:minSdkVersion=\""),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_uses_sdk_reads_both_versions_from_manifest_text() {
+        let manifest = r#"<uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />"#;
+        assert_eq!(parse_uses_sdk(manifest), Ok((26, 34)));
+    }
+
+    #[test]
+    fn parse_uses_sdk_reports_missing_attributes() {
+        assert!(parse_uses_sdk("<uses-sdk />").is_err());
+        assert!(parse_uses_sdk(r#"<uses-sdk android:minSdkVersion="26" />"#).is_err());
+    }
+
+    #[test]
+    fn parse_uses_sdk_reports_non_numeric_values() {
+        let manifest = r#"android:minSdkVersion="abc" android:targetSdkVersion="34""#;
+        assert!(parse_uses_sdk(manifest).is_err());
+    }
+
+    #[test]
+    fn find_files_with_extension_recurses_and_filters_by_exact_extension() {
+        let root =
+            unique_temp_dir("find_files_with_extension_recurses_and_filters_by_exact_extension");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("Top.java"), "").unwrap();
+        fs::write(root.join("a/Mid.java"), "").unwrap();
+        fs::write(root.join("a/b/Deep.java"), "").unwrap();
+        fs::write(root.join("a/Ignore.txt"), "").unwrap();
+
+        let found = find_files_with_extension(&root, "java").unwrap();
+
+        // Sorted order: "Top.java" (starts 'T') < "a/..." (starts 'a')
+        // since PathBuf's Ord compares components byte-wise, and within
+        // "a/", "Mid.java" ('M') < "b/Deep.java" ('b').
+        assert_eq!(
+            found,
+            vec![
+                root.join("Top.java"),
+                root.join("a/Mid.java"),
+                root.join("a/b/Deep.java"),
+            ]
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn find_files_with_extension_returns_empty_when_none_match() {
+        let root = unique_temp_dir("find_files_with_extension_returns_empty_when_none_match");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Ignore.txt"), "").unwrap();
+
+        assert!(find_files_with_extension(&root, "java").unwrap().is_empty());
         fs::remove_dir_all(&root).unwrap();
     }
 }

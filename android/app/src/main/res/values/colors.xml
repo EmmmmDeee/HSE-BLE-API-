@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Palette extracted read-only from the retained oracle APK's own compiled
+  launcher icon (aapt2 dump xmltree on res/E4.xml / res/BW.xml — the
+  ic_launcher adaptive-icon background/foreground vectors), not invented:
+  a dark tactical background with a mint-green sweep/ring system and two
+  accent colors for detected-device blips. See docs/ANDROID_APP.md.
+-->
+<resources>
+    <color name="radar_background">#FF0F1419</color>
+    <color name="ic_launcher_background">#FF0F1419</color>
+    <color name="radar_ring">#FF39D98A</color>
+    <color name="radar_sweep_leading">#FF39D98A</color>
+    <color name="radar_blip_alert">#FFFF7A45</color>
+    <color name="radar_blip_info">#FF4CC2FF</color>
+    <color name="radar_text_primary">#FFE7F3ED</color>
+    <color name="radar_text_secondary">#FF7E9C90</color>
+    <color name="radar_panel">#FF162026</color>
+</resources>
