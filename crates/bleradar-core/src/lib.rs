@@ -17,12 +17,28 @@ mod validation;
 mod verification;
 mod website;
 
+/// Huntsman Search Engine (HSE) universal coordinate parser.
+pub mod coords;
+/// Huntsman Search Engine (HSE) entity model.
+pub mod entity;
+/// Huntsman Search Engine (HSE) canonical entity tag vocabulary.
+pub mod tags;
+
 pub use advancement::{
     AdvancementDecision, AdvancementError, AdvancementExecution, AdvancementFactors,
     AdvancementPhase, AdvancementPriority, AdvancementProposal, AdvancementRanking,
     AdvancementRejection, AdvancementRun, AdvancementState, BenchmarkMetric, BenchmarkReport,
     FalsificationCheck, FalsificationFinding, FalsificationResult, FalsificationStatus,
     MetamorphicSoftwareAdvancementEngine, MetricDirection, SoftwareAdvancementEngine,
+};
+pub use entity::{
+    CANDIDATE_CONF, CONSENSUS_SOURCE, CORROBORATION_COEFF, CORROBORATION_DOUBT_DECAY,
+    CROSS_SCAN_CORROBORATION_SOURCE, CROSS_SCAN_SOURCE, ENRICHMENT_ONLY_SOURCES, GAMMA_PER_HOUR,
+    GEO_CORROBORATION_SOURCE, HseClassification, HseEntity, HseEntityBuilder, HseEntityKind,
+    HseEntityRef, HseEvidence, HseVerificationMethod, MULTIPATH_CORROBORATION_SOURCE,
+    RECALL_SOURCE, Sha256, canonical_handle, derive_uid, evidence_sources, expansion_timeline,
+    hex_encode, is_engine_corroboration_source, is_enrichment_source, is_non_corroborating_source,
+    is_promotion_source, is_tracking_param_key, normalise, scan_id, uid_for,
 };
 pub use evidence::{
     Action, ActionId, ActionStatus, ActionType, Artifact, ArtifactId, ArtifactType,
