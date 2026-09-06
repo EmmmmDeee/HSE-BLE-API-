@@ -1,0 +1,85 @@
+package com.hse.bleradar;
+
+/**
+ * Thin JNI façade over {@code crates/bleradar-jni}, which itself only
+ * re-exports pure functions already implemented and tested in
+ * {@code bleradar-core} ({@code ble_distance_m}, {@code proximity_label},
+ * {@code signal_trend}). Keeping every native declaration and ordinal
+ * mapping in one file makes the Java/Rust ABI contract easy to audit
+ * against {@code crates/bleradar-jni/src/lib.rs}.
+ */
+public final class NativeRadar {
+
+    /** {@link #proximityLabel(double)} result: typically very near the observer. */
+    public static final int PROXIMITY_IMMEDIATE = 0;
+    /** {@link #proximityLabel(double)} result: nearby. */
+    public static final int PROXIMITY_NEAR = 1;
+    /** {@link #proximityLabel(double)} result: moderate separation. */
+    public static final int PROXIMITY_MID = 2;
+    /** {@link #proximityLabel(double)} result: weak/far signal or uncertain environment. */
+    public static final int PROXIMITY_FAR = 3;
+
+    /** {@link #signalTrend(double, double, double)} result: signal improved beyond the deadband. */
+    public static final int TREND_STRONGER = 0;
+    /** {@link #signalTrend(double, double, double)} result: signal weakened beyond the deadband. */
+    public static final int TREND_WEAKER = 1;
+    /** {@link #signalTrend(double, double, double)} result: change fell within the deadband. */
+    public static final int TREND_STABLE = 2;
+
+    /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
+    public static final int EXPECTED_ABI_VERSION = 1;
+
+    private static volatile boolean loaded;
+    private static volatile Throwable loadError;
+
+    private NativeRadar() {
+    }
+
+    /**
+     * Loads {@code libbleradar_jni.so} once. Safe to call repeatedly; never
+     * throws. Callers must check {@link #isAvailable()} before relying on
+     * native results, since a device without the exact {@code arm64-v8a} ABI
+     * (there is deliberately no other ABI shipped — see docs/ANDROID_APP.md)
+     * would otherwise fail with an {@link UnsatisfiedLinkError} at first call.
+     */
+    public static synchronized void ensureLoaded() {
+        if (loaded || loadError != null) {
+            return;
+        }
+        try {
+            System.loadLibrary("bleradar_jni");
+            loaded = true;
+        } catch (UnsatisfiedLinkError | SecurityException error) {
+            loadError = error;
+        }
+    }
+
+    /** Whether the native library loaded successfully and {@link #abiVersion()} matches. */
+    public static boolean isAvailable() {
+        ensureLoaded();
+        return loaded;
+    }
+
+    /** The most recent load failure, if {@link #isAvailable()} is {@code false}. */
+    public static Throwable loadError() {
+        return loadError;
+    }
+
+    /**
+     * Log-distance estimate in metres, or {@link Double#NaN} when
+     * {@code bleradar-core}'s {@code ble_distance_m} would return
+     * {@code None} (non-finite input, non-positive path-loss exponent, or an
+     * estimate that would overflow/underflow). Always check
+     * {@link Double#isNaN(double)} before displaying the result.
+     */
+    public static native double bleDistanceM(double rssiDbm, double rssiAt1mDbm, double pathLossExponent);
+
+    /** One of the {@code PROXIMITY_*} constants above. */
+    public static native int proximityLabel(double rssiDbm);
+
+    /** One of the {@code TREND_*} constants above. */
+    public static native int signalTrend(double previousDbm, double currentDbm, double deadbandDb);
+
+    /** Build-time sanity check; should equal {@link #EXPECTED_ABI_VERSION}. */
+    public static native int abiVersion();
+}

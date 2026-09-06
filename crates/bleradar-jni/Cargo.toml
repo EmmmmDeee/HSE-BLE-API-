@@ -1,0 +1,31 @@
+[package]
+name = "bleradar-jni"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Zero-dependency JNI bridge exposing bleradar-core's verified signal math to the Android radar app"
+
+[lib]
+# `cdylib` is loaded by the Android app via `System.loadLibrary`; `lib` keeps
+# the crate unit-testable like every other workspace member.
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+bleradar-core = { path = "../bleradar-core" }
+
+# This crate cannot inherit `[workspace.lints]` verbatim: the JNI C-ABI export
+# boundary (`#[unsafe(no_mangle)] pub extern "system" fn Java_...`) requires
+# the `unsafe(no_mangle)` attribute, which the 2024-edition "unsafe attributes"
+# lint classifies as `unsafe_code` even though no pointer is ever dereferenced
+# (every exported function ignores its `JNIEnv`/`jclass` parameters and only
+# reads/returns primitives). `missing_docs` and `clippy::all` are restated
+# verbatim from `[workspace.lints]` so this crate stays otherwise identical to
+# every other workspace member; see `src/lib.rs` for the narrowed rationale.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "deny"

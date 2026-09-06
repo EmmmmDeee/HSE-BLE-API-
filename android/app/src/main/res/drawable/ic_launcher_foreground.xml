@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Faithful recreation of the retained oracle APK's own adaptive-icon
+  foreground (extracted read-only via `aapt2 dump xmltree` on its compiled
+  res/Qr.xml — three concentric mint-green sweep rings, a sweep needle with
+  a leading blip, and two off-axis accent blips) so the new app's launcher
+  icon is visually analogous to the original "BLE Radar" icon. Paired with
+  @color/ic_launcher_background as the adaptive-icon background layer.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M54,54 m-30,0 a30,30 0 1,0 60,0 a30,30 0 1,0 -60,0"
+        android:strokeColor="#FF39D98A"
+        android:strokeWidth="3"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M54,54 m-20,0 a20,20 0 1,0 40,0 a20,20 0 1,0 -40,0"
+        android:strokeColor="#FF39D98A"
+        android:strokeWidth="2.5"
+        android:strokeAlpha="0.7"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M54,54 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0"
+        android:strokeColor="#FF39D98A"
+        android:strokeWidth="2"
+        android:strokeAlpha="0.45"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M54,54 L54,24 L58,28 L54,54 Z"
+        android:fillColor="#FF39D98A"
+        android:fillAlpha="0.9" />
+    <path
+        android:pathData="M54,54 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"
+        android:fillColor="#FF39D98A" />
+    <path
+        android:pathData="M70,38 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"
+        android:fillColor="#FFFF7A45" />
+    <path
+        android:pathData="M38,66 m-3.5,0 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0"
+        android:fillColor="#FF4CC2FF" />
+</vector>

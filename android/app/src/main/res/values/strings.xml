@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HSE BLE Radar</string>
+    <string name="notif_channel">Scanning</string>
+    <string name="notif_channel_description">Shows an ongoing notification while HSE BLE Radar is actively scanning for nearby Bluetooth Low Energy devices.</string>
+    <string name="notif_title">BLE Radar is scanning</string>
+    <string name="notif_title_idle">BLE Radar is idle</string>
+    <string name="action_start">Start scan</string>
+    <string name="action_stop">Stop scan</string>
+    <string name="status_idle">Idle — press Start scan</string>
+    <string name="status_scanning_fmt">Scanning… %1$d device(s) in range</string>
+    <string name="status_permission_required">Bluetooth and location permission are required to scan</string>
+    <string name="status_bluetooth_off">Turn on Bluetooth to start scanning</string>
+    <string name="format_distance_meters">%1$s m</string>
+    <string name="format_distance_unknown">— m</string>
+    <string name="device_unnamed">Unnamed device</string>
+    <string name="permission_rationale_title">Permission needed</string>
+    <string name="permission_rationale_message">HSE BLE Radar needs Bluetooth and location permission to detect nearby devices. Grant them in Settings to continue.</string>
+    <string name="permission_open_settings">Open settings</string>
+</resources>
