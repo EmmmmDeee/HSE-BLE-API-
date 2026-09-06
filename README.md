@@ -17,6 +17,13 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
 - `crates/bleradar-core::infrastructure` — temporal metamorphic infrastructure
   correlation across domains, DNS, addresses, certificates, hosting, HTTP,
   public assets, application structure, and archived states.
+- `crates/bleradar-core::{entity,coords,tags}` — the Huntsman Search Engine
+  (HSE) dependency-free entity model imported for the radar domain: SHA-256
+  deterministic UIDs, per-kind normalisation, a cross-source corroboration
+  confidence model with derived classification tiers, GREATEST-semantics
+  merge, a universal coordinate parser (decimal/DMS/DDM/`geo:` URI/Plus
+  Code/Maidenhead), and the canonical tag vocabulary. See
+  `docs/HSE_IMPORT.md`.
 - `crates/bleradar-compat` — complete native ABI runtime/reachability census plus a separate source-replacement parity registry.
 - `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
