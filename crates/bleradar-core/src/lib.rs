@@ -11,6 +11,7 @@ mod geo;
 mod identity;
 mod infrastructure;
 mod osint;
+mod pipeline;
 mod signal;
 mod tracking;
 mod validation;
@@ -74,6 +75,10 @@ pub use osint::{
     SearchFamilyStatistics, SearchFeedback, SearchFinding, SearchLimits, SearchOutcome,
     SearchPhase, SearchPivot, SearchPivotSeed, SearchPivotState, SearchPriority,
     SearchPriorityFactors, SearchRanking, SearchRepresentation,
+};
+pub use pipeline::{
+    DiminishingGainStopCriterion, GraphEdge, InformationGainSample, InvestigationPipeline, NodeId,
+    PipelineError, PipelineStage, TemporalGeoGraph, TemporalSpan,
 };
 pub use signal::{
     FilterError, ProximityBand, RssiEma, SignalTrend, ble_distance_m, proximity_label, signal_trend,
