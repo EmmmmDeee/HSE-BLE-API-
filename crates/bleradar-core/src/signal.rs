@@ -235,6 +235,39 @@ pub fn proximity_label(rssi_dbm: f64) -> Option<ProximityBand> {
     })
 }
 
+/// Maps a distance estimate in metres to a coarse proximity label.
+///
+/// This is deliberately separate from [`proximity_label`], whose argument is
+/// RSSI in dBm. Returns `None` for non-finite or negative distances.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::{proximity_label_from_distance_m, ProximityBand};
+/// assert_eq!(
+///     proximity_label_from_distance_m(2.0),
+///     Some(ProximityBand::Near)
+/// );
+/// assert_eq!(
+///     proximity_label_from_distance_m(f64::NAN),
+///     None
+/// );
+/// ```
+#[must_use]
+pub fn proximity_label_from_distance_m(distance_m: f64) -> Option<ProximityBand> {
+    if !distance_m.is_finite() || distance_m < 0.0 {
+        return None;
+    }
+    Some(if distance_m <= 1.0 {
+        ProximityBand::Immediate
+    } else if distance_m <= 2.0 {
+        ProximityBand::Near
+    } else if distance_m <= 5.0 {
+        ProximityBand::Mid
+    } else {
+        ProximityBand::Far
+    })
+}
+
 /// Log-distance estimate in metres from RSSI, calibrated RSSI at 1 m, and path-loss exponent.
 ///
 /// Returns `None` for non-finite input, a non-positive path-loss exponent, or

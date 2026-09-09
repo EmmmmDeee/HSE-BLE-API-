@@ -10,8 +10,8 @@
 
 use bleradar_core::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, GeoError, LatLon, ProximityBand,
-    RssiEma, bearing_deg, ble_distance_m, haversine_m, proximity_label, wifi_channel_to_frequency,
-    wifi_frequency_to_channel,
+    RssiEma, bearing_deg, ble_distance_m, haversine_m, proximity_label,
+    proximity_label_from_distance_m, wifi_channel_to_frequency, wifi_frequency_to_channel,
 };
 
 /// Deterministic xorshift64 generator. Seeds are fixed per test so failures
@@ -152,6 +152,20 @@ fn prop_proximity_band_is_monotonic_in_signal_strength() {
                 >= closeness(proximity_label(weaker).expect("finite weaker RSSI")),
             "stronger signal {stronger} classified farther than {weaker}"
         );
+    }
+}
+
+#[test]
+fn prop_distance_proximity_band_is_monotonic() {
+    let bands = [
+        proximity_label_from_distance_m(0.0).unwrap(),
+        proximity_label_from_distance_m(1.0).unwrap(),
+        proximity_label_from_distance_m(2.0).unwrap(),
+        proximity_label_from_distance_m(5.0).unwrap(),
+        proximity_label_from_distance_m(25.0).unwrap(),
+    ];
+    for window in bands.windows(2) {
+        assert!(window[0] <= window[1]);
     }
 }
 

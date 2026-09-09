@@ -85,7 +85,8 @@ pub use runtime::{Runtime, ScanCommand, ScanMode};
 pub use signal::{
     BleCalibration, CalibrationProfile, FilterError, ProximityBand, RssiEma, SignalTrend,
     ble_distance_m, ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
-    filtered_rssi, proximity_label, signal_confidence_percent, signal_trend,
+    filtered_rssi, proximity_label, proximity_label_from_distance_m, signal_confidence_percent,
+    signal_trend,
 };
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass, MapPoint,

@@ -6,8 +6,9 @@ use bleradar_core::{
     SignalTrend, TrackError, TrackingProfile, TrackingSnapshotInput, bearing_deg, ble_distance_m,
     ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal, canonical_mac,
     filtered_rssi, haversine_m, is_locally_administered, proximity_label,
-    signal_confidence_percent, signal_trend, tracking_profile, tracking_profile_from_ordinal,
-    tracking_snapshot, wifi_channel_to_frequency, wifi_frequency_to_channel,
+    proximity_label_from_distance_m, signal_confidence_percent, signal_trend, tracking_profile,
+    tracking_profile_from_ordinal, tracking_snapshot, wifi_channel_to_frequency,
+    wifi_frequency_to_channel,
 };
 
 /// Builds a `DeviceObservation` from its varying fields; `tx_power_dbm` is
@@ -289,6 +290,45 @@ fn proximity_label_rejects_non_finite_rssi() {
     assert_eq!(proximity_label(f64::NAN), None);
     assert_eq!(proximity_label(f64::INFINITY), None);
     assert_eq!(proximity_label(f64::NEG_INFINITY), None);
+}
+
+#[test]
+fn distance_proximity_label_preserves_boundaries_and_invalid_inputs() {
+    assert_eq!(
+        proximity_label_from_distance_m(0.0),
+        Some(ProximityBand::Immediate)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(1.0),
+        Some(ProximityBand::Immediate)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(1.000_001),
+        Some(ProximityBand::Near)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(2.0),
+        Some(ProximityBand::Near)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(2.000_001),
+        Some(ProximityBand::Mid)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(5.0),
+        Some(ProximityBand::Mid)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(5.000_001),
+        Some(ProximityBand::Far)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(25.0),
+        Some(ProximityBand::Far)
+    );
+    assert_eq!(proximity_label_from_distance_m(-1.0), None);
+    assert_eq!(proximity_label_from_distance_m(f64::NAN), None);
+    assert_eq!(proximity_label_from_distance_m(f64::INFINITY), None);
 }
 
 #[test]

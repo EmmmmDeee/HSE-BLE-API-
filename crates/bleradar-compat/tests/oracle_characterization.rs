@@ -2,8 +2,8 @@
 
 use bleradar_compat::{ParityStatus, parity_status};
 use bleradar_core::{
-    LatLon, ProximityBand, ble_distance_m, haversine_m, proximity_label, wifi_channel_to_frequency,
-    wifi_frequency_to_channel,
+    LatLon, ProximityBand, ble_distance_m, haversine_m, proximity_label,
+    proximity_label_from_distance_m, wifi_channel_to_frequency, wifi_frequency_to_channel,
 };
 
 const ORACLE_EQUATORIAL_DEGREE_M: f64 = 111_195.080_233_532_9;
@@ -63,6 +63,22 @@ fn oracle_proximity_fixture_exposes_input_semantics_gap() {
     assert_eq!(
         parity_status("proximity_label"),
         Some(ParityStatus::SourceAnalog)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(1.0),
+        Some(ProximityBand::Immediate)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(2.0),
+        Some(ProximityBand::Near)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(5.0),
+        Some(ProximityBand::Mid)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(25.0),
+        Some(ProximityBand::Far)
     );
 }
 
