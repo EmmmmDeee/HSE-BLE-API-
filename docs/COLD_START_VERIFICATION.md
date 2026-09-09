@@ -66,6 +66,15 @@ Package identity from live `aapt dump badging`:
 `com.hse.bleradar` versionName `1.0.0`, minSdk 26, targetSdk 34, native-code
 `arm64-v8a`, launchable `com.hse.bleradar.MainActivity`.
 
+**Reproducibility note (live 2026-09-09):** two successive `cargo xtask build-apk`
+runs produced **bit-identical** zip payloads for every entry
+(`AndroidManifest.xml`, `classes.dex`, `lib/arm64-v8a/libbleradar_jni.so`,
+resources, icons). The outer APK SHA-256 can still differ between builds
+because the APK Signature Block embeds a wall-clock signing time that
+`apksigner` does not fully pin even under `SOURCE_DATE_EPOCH`. Treat
+per-entry content hashes (or `cargo xtask verify-android-live`) as the
+authoritative completeness proof, not a single whole-file digest.
+
 This layer proves the **reconstructed** APK builds and packages correctly. It
 does **not** claim differential parity with
 `BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk` on Bionic.

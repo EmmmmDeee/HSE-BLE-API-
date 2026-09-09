@@ -1438,6 +1438,11 @@ fn cmd_build_apk() -> Result<(), String> {
             .arg("--out")
             .arg(&signed_apk)
             .arg(&aligned_apk);
+        // Pin signing-time related inputs when the tool honors them so
+        // repeated builds of an unchanged payload do not churn the committed
+        // APK hash solely due to wall-clock timestamps.
+        c.env("SOURCE_DATE_EPOCH", "1700000000");
+        c.env("TZ", "UTC");
         c
     })?;
 
