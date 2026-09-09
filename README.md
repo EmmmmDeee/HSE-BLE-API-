@@ -222,6 +222,19 @@ real JVM → JNI → Rust smoke harness. It proves both the failure path (wrong
 library path yields `UnsatisfiedLinkError`) and the success path (library loads,
 ABI version matches, and JNI calls return the expected values).
 
+## Strongest current Android live proof
+
+```sh
+cargo xtask verify-android-live
+```
+
+This runs the strongest end-to-end proof currently possible in this sandbox:
+the live JVM → JNI → Rust proof above, a full `cargo xtask build-apk`, then
+post-build verification that the generated APK contains the required manifest,
+DEX, and JNI library entries, that the built DEX defines the critical Android
+classes, and that the cross-compiled native library exports the required JNI
+entrypoints.
+
 ## Parity report
 
 ```sh

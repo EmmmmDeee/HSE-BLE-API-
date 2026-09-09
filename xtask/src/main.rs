@@ -46,6 +46,7 @@ fn main() -> ExitCode {
         "vendor-advisory-db" => cmd_vendor_advisory_db(),
         "build-apk" => cmd_build_apk(),
         "verify-jni-live" => cmd_verify_jni_live(),
+        "verify-android-live" => cmd_verify_android_live(),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -83,6 +84,7 @@ fn print_usage() {
          \x20 vendor-advisory-db         materialize the offline cargo-deny advisory db\n\
          \x20 build-apk                  cross-compile + package + sign the Android radar APK\n\
          \x20 verify-jni-live            run a live Java→JNI→Rust verification against NativeRadar.java\n\
+         \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/test/doc/checks/audit/deny)"
@@ -698,6 +700,32 @@ const NATIVE_RADAR_JAVA_PATH: &str = "android/app/src/main/java/com/hse/bleradar
 /// `NativeRadar.ensureLoaded()`'s `System.loadLibrary("bleradar_jni")`.
 const NATIVE_LIB_FILE_NAME: &str = "libbleradar_jni.so";
 
+/// APK entries the current hand-built Android package must contain to remain
+/// installable and reach the JNI bridge.
+const REQUIRED_APK_ENTRIES: &[&str] = &[
+    "AndroidManifest.xml",
+    "classes.dex",
+    "lib/arm64-v8a/libbleradar_jni.so",
+];
+
+/// Critical Java classes the built `classes.dex` must define for the app's
+/// launch, scan, and JNI paths.
+const REQUIRED_DEX_CLASSES: &[&str] = &[
+    "com/hse/bleradar/MainActivity",
+    "com/hse/bleradar/NativeRadar",
+    "com/hse/bleradar/RadarScanService",
+    "com/hse/bleradar/BleScanEngine",
+];
+
+/// Required exported JNI entrypoints the Android build must expose from the
+/// cross-compiled native library.
+const REQUIRED_JNI_EXPORTS: &[&str] = &[
+    "Java_com_hse_bleradar_NativeRadar_abiVersion",
+    "Java_com_hse_bleradar_NativeRadar_bleDistanceM",
+    "Java_com_hse_bleradar_NativeRadar_proximityLabel",
+    "Java_com_hse_bleradar_NativeRadar_signalTrend",
+];
+
 /// Rust standard-library target `cargo xtask build-apk` cross-compiles the JNI
 /// bridge for.
 const ANDROID_RUST_TARGET: &str = "aarch64-linux-android";
@@ -906,6 +934,28 @@ public final class JniSmoke {{
 }}
 "#
     )
+}
+
+/// Requires `actual` to contain every `expected` member, reporting the missing
+/// subset in deterministic input order for actionable proof failures.
+fn require_expected_members(
+    actual: &[String],
+    expected: &[&str],
+    collection_name: &str,
+) -> Result<(), String> {
+    let missing: Vec<&str> = expected
+        .iter()
+        .copied()
+        .filter(|expected_member| !actual.iter().any(|actual_member| actual_member == expected_member))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{collection_name} missing required members: {}",
+            missing.join(", ")
+        ))
+    }
 }
 
 /// Locates an installed Android SDK: `ANDROID_HOME`/`ANDROID_SDK_ROOT` if
@@ -1412,6 +1462,34 @@ fn cmd_verify_jni_live() -> Result<(), String> {
         c
     })?;
 
+    Ok(())
+}
+
+fn cmd_verify_android_live() -> Result<(), String> {
+    let root = repo_root()?;
+
+    println!("== live JNI proof ==");
+    cmd_verify_jni_live()?;
+
+    println!("== APK build proof ==");
+    cmd_build_apk()?;
+
+    let apk_path = root.join(APK_OUTPUT_NAME);
+    let apk_entries = zip_reader::entry_names(&read_bytes(&apk_path)?)
+        .map_err(|e| format!("parsing {}: {e}", apk_path.display()))?;
+    require_expected_members(&apk_entries, REQUIRED_APK_ENTRIES, "APK entry set")?;
+
+    let dex_path = root.join("target/android-apk/dex/classes.dex");
+    let dex_classes =
+        dex::class_names(&read_bytes(&dex_path)?).map_err(|e| format!("parsing {}: {e}", dex_path.display()))?;
+    require_expected_members(&dex_classes, REQUIRED_DEX_CLASSES, "DEX class set")?;
+
+    let native_lib_path = root.join("target/aarch64-linux-android/release").join(NATIVE_LIB_FILE_NAME);
+    let native_exports = elf::defined_func_and_object_symbols(&read_bytes(&native_lib_path)?)
+        .map_err(|e| format!("parsing {}: {e}", native_lib_path.display()))?;
+    require_expected_members(&native_exports, REQUIRED_JNI_EXPORTS, "JNI export set")?;
+
+    println!("== verify-android-live complete ==");
     Ok(())
 }
 
@@ -2013,6 +2091,21 @@ mod tests {
         assert!(source.contains("NativeRadar.abiVersion() == 11"));
         assert!(source.contains("Double.isNaN(NativeRadar.bleDistanceM(-70.0, -59.0, 0.0))"));
         assert!(source.contains("expected NativeRadar to be unavailable"));
+    }
+
+    #[test]
+    fn require_expected_members_accepts_complete_sets() {
+        let actual = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        assert_eq!(require_expected_members(&actual, &["one", "three"], "demo"), Ok(()));
+    }
+
+    #[test]
+    fn require_expected_members_reports_missing_members_in_expected_order() {
+        let actual = vec!["present".to_string()];
+        assert_eq!(
+            require_expected_members(&actual, &["missing-b", "present", "missing-a"], "demo"),
+            Err("demo missing required members: missing-b, missing-a".to_string())
+        );
     }
 
     #[test]
