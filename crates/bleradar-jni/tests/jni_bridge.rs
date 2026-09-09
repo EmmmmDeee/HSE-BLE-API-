@@ -94,14 +94,14 @@ fn tracking_snapshot_exports_a_coherent_bundle() {
         rssi_spread_db: 4.0,
         sample_count: 6,
         calibration_profile_ordinal: 0,
-        tracking_profile_ordinal: 0,
+        tracking_profile_ordinal: 1,
         age_ms: 250,
     };
     let filtered = tracking_filtered_rssi_or_nan(input);
     let distance = tracking_distance_m_or_nan(input);
     let lower = tracking_distance_lower_bound_m_or_nan(input);
     let upper = tracking_distance_upper_bound_m_or_nan(input);
-    assert!((filtered - (-70.0)).abs() < 1e-9);
+    assert!((filtered - (-69.0)).abs() < 1e-9);
     assert!(distance.is_finite());
     assert!(lower < distance);
     assert!(upper > distance);
@@ -113,20 +113,21 @@ fn tracking_snapshot_exports_a_coherent_bundle() {
 
 #[test]
 fn tracking_snapshot_uses_invalid_sentinels() {
-    let invalid_alpha = TrackingSnapshotJniInput {
+    let invalid_profile = TrackingSnapshotJniInput {
         previous_filtered_dbm: f64::NAN,
         current_rssi_dbm: -70.0,
         rssi_spread_db: 0.0,
         sample_count: 1,
         calibration_profile_ordinal: 0,
-        tracking_profile_ordinal: 0,
+        tracking_profile_ordinal: 99,
         age_ms: 0,
     };
     let invalid_count = TrackingSnapshotJniInput {
         sample_count: -1,
-        ..invalid_alpha
+        tracking_profile_ordinal: 0,
+        ..invalid_profile
     };
-    assert!(tracking_filtered_rssi_or_nan(invalid_alpha).is_nan());
+    assert!(tracking_filtered_rssi_or_nan(invalid_profile).is_nan());
     assert!(tracking_distance_m_or_nan(invalid_count).is_nan());
     assert_eq!(tracking_confidence_percent_or_negative(invalid_count), -1);
     assert_eq!(tracking_freshness_ordinal(invalid_count), 2);

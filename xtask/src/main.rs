@@ -946,29 +946,29 @@ public final class JniSmoke {{
                 Double.isNaN(NativeRadar.calibrationProfileRssiAt1mDbm(99)),
                 "invalid calibration profile did not yield NaN sentinel");
         double tracked = NativeRadar.trackingFilteredRssi(
-                -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 250L);
-        require(Math.abs(tracked - (-70.0)) < 1e-9, "unexpected tracked RSSI: " + tracked);
+                -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L);
+        require(Math.abs(tracked - (-69.0)) < 1e-9, "unexpected tracked RSSI: " + tracked);
         double trackedDistance = NativeRadar.trackingDistanceM(
-                -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 250L);
+                -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L);
         require(trackedDistance > 1.0, "unexpected tracked distance: " + trackedDistance);
         require(
                 NativeRadar.trackingTrend(
-                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 250L)
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
                         == NativeRadar.TREND_STRONGER,
                 "unexpected tracked trend");
         require(
                 NativeRadar.trackingProximity(
-                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 250L)
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
                         == NativeRadar.PROXIMITY_MID,
                 "unexpected tracked proximity");
         require(
                 NativeRadar.trackingConfidencePercent(
-                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 250L)
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
                         >= 50,
                 "unexpected tracked confidence");
         require(
                 NativeRadar.trackingFreshness(
-                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 250L)
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
                         == NativeRadar.FRESHNESS_LIVE,
                 "unexpected tracked freshness");
         require(
