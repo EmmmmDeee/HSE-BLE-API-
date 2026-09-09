@@ -38,8 +38,43 @@ workspace's `Cargo.lock` contains zero third-party crates, so the advisory
 surface is empty, and both tools confirm it rather than leaving the command
 unrun. See `docs/AUTONOMOUS_DECISIONS.md` #28.
 
-Android SDK packaging tools are available in the current environment, but the
-original Android source/Gradle project, ARM64 emulator or device, and signing
-key are not. Android/Bionic characterization therefore remains open under
-MIG-003. This document continues to distinguish archive reproducibility from
-compiler/runtime verification.
+## Layer 3 — reconstructed Android APK live build (executed 2026-09-09)
+
+The hand-built radar app under `android/app/src/main` is packaged without
+Gradle by the Rust-native runner:
+
+```sh
+cargo xtask build-apk
+cargo xtask verify-android-live   # JNI dual-path + build-apk + entry/DEX/JNI gates
+```
+
+Live results on this host (Android SDK at `/usr/local/lib/android/sdk`,
+build-tools 37.0.0, NDK 27.3.13750724, platform android-36):
+
+| Check | Outcome |
+|---|---|
+| Cross-compile `bleradar-jni` → `aarch64-linux-android` release | **Validated** |
+| aapt2 compile/link, javac, d8, zipalign, apksigner (v2+v3) | **Validated** |
+| Output `HSE-BLE-Radar-arm64-v1.0.0.apk` | **Validated** (installable package artifact) |
+| Required APK entries (manifest, classes.dex, arm64 `.so`, resources.arsc) | **Validated** |
+| Required DEX classes (MainActivity, NativeRadar, RadarScanService, BleScanEngine) | **Validated** |
+| Required JNI exports (20 `Java_com_hse_bleradar_NativeRadar_*`) match `NativeRadar.java` natives 1:1 | **Validated** |
+| `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=6) |
+| On-device install / BLE scan / original-oracle differential | **Unverified** — no emulator, physical device, or original signing key (MIG-003) |
+
+Package identity from live `aapt dump badging`:
+`com.hse.bleradar` versionName `1.0.0`, minSdk 26, targetSdk 34, native-code
+`arm64-v8a`, launchable `com.hse.bleradar.MainActivity`.
+
+**Reproducibility note (live 2026-09-09):** two successive `cargo xtask build-apk`
+runs produced **bit-identical** zip payloads for every entry
+(`AndroidManifest.xml`, `classes.dex`, `lib/arm64-v8a/libbleradar_jni.so`,
+resources, icons). The outer APK SHA-256 can still differ between builds
+because the APK Signature Block embeds a wall-clock signing time that
+`apksigner` does not fully pin even under `SOURCE_DATE_EPOCH`. Treat
+per-entry content hashes (or `cargo xtask verify-android-live`) as the
+authoritative completeness proof, not a single whole-file digest.
+
+This layer proves the **reconstructed** APK builds and packages correctly. It
+does **not** claim differential parity with
+`BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk` on Bionic.

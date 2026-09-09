@@ -74,14 +74,15 @@ pub fn filtered_rssi_or_nan(previous_filtered_dbm: f64, current_rssi_dbm: f64, a
 /// Encodes [`ProximityBand`] as a small ordinal (`0` = [`ProximityBand::Immediate`],
 /// `1` = [`ProximityBand::Near`], `2` = [`ProximityBand::Mid`], `3` = [`ProximityBand::Far`])
 /// since JNI has no shared enum type; `NativeRadar.java` mirrors this mapping
-/// in matching `int` constants.
+/// in matching `int` constants. Non-finite RSSI maps to `3` (Far) so the UI
+/// never treats an invalid reading as Immediate/Near.
 #[must_use]
 pub fn proximity_label_ordinal(rssi_dbm: f64) -> i32 {
     match proximity_label(rssi_dbm) {
-        ProximityBand::Immediate => 0,
-        ProximityBand::Near => 1,
-        ProximityBand::Mid => 2,
-        ProximityBand::Far => 3,
+        Some(ProximityBand::Immediate) => 0,
+        Some(ProximityBand::Near) => 1,
+        Some(ProximityBand::Mid) => 2,
+        Some(ProximityBand::Far) | None => 3,
     }
 }
 
@@ -91,12 +92,15 @@ pub fn proximity_label_ordinal(rssi_dbm: f64) -> i32 {
 /// Encodes [`SignalTrend`] as a small ordinal (`0` = [`SignalTrend::Stronger`],
 /// `1` = [`SignalTrend::Weaker`], `2` = [`SignalTrend::Stable`]); see
 /// [`proximity_label_ordinal`] for why an ordinal rather than a shared enum.
+/// Non-finite inputs map to `2` (Stable) — the least-committing UI state —
+/// matching the prior silent fallback while the Rust core itself returns
+/// `None` so typed callers can distinguish "unknown" from "stable".
 #[must_use]
 pub fn signal_trend_ordinal(previous_dbm: f64, current_dbm: f64, deadband_db: f64) -> i32 {
     match signal_trend(previous_dbm, current_dbm, deadband_db) {
-        SignalTrend::Stronger => 0,
-        SignalTrend::Weaker => 1,
-        SignalTrend::Stable => 2,
+        Some(SignalTrend::Stronger) => 0,
+        Some(SignalTrend::Weaker) => 1,
+        Some(SignalTrend::Stable) | None => 2,
     }
 }
 
@@ -256,7 +260,8 @@ pub fn tracking_proximity_ordinal(input: TrackingSnapshotJniInput) -> i32 {
 #[must_use]
 pub fn tracking_confidence_percent_or_negative(input: TrackingSnapshotJniInput) -> i32 {
     tracking_snapshot_from_input(input)
-        .map_or(-1, |snapshot| i32::from(snapshot.confidence_percent))
+        .and_then(|snapshot| snapshot.confidence_percent)
+        .map_or(-1, i32::from)
 }
 
 /// Pure, unit-testable core of `NativeRadar.trackingFreshness(...)`.

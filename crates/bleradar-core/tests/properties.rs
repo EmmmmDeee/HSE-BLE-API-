@@ -148,7 +148,8 @@ fn prop_proximity_band_is_monotonic_in_signal_strength() {
         let r2 = rng.range(-120.0, -20.0);
         let (stronger, weaker) = if r1 >= r2 { (r1, r2) } else { (r2, r1) };
         assert!(
-            closeness(proximity_label(stronger)) >= closeness(proximity_label(weaker)),
+            closeness(proximity_label(stronger).expect("finite stronger RSSI"))
+                >= closeness(proximity_label(weaker).expect("finite weaker RSSI")),
             "stronger signal {stronger} classified farther than {weaker}"
         );
     }

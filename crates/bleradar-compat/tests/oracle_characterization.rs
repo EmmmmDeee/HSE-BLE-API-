@@ -59,7 +59,7 @@ fn oracle_haversine_fixture_gap_is_closed() {
 fn oracle_proximity_fixture_exposes_input_semantics_gap() {
     // The oracle accepts metres and maps 2 m to "near"; the source analogue
     // accepts dBm and therefore interprets the same scalar as "immediate".
-    assert_eq!(proximity_label(2.0), ProximityBand::Immediate);
+    assert_eq!(proximity_label(2.0), Some(ProximityBand::Immediate));
     assert_eq!(
         parity_status("proximity_label"),
         Some(ParityStatus::SourceAnalog)

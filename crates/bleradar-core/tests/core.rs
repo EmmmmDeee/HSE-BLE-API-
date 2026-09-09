@@ -5,9 +5,9 @@ use bleradar_core::{
     FreshnessClass, GeoError, IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice,
     SignalTrend, TrackError, TrackingProfile, TrackingSnapshotInput, bearing_deg, ble_distance_m,
     ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal, canonical_mac,
-    filtered_rssi, haversine_m, is_locally_administered, signal_confidence_percent, signal_trend,
-    tracking_profile, tracking_profile_from_ordinal, tracking_snapshot, wifi_channel_to_frequency,
-    wifi_frequency_to_channel,
+    filtered_rssi, haversine_m, is_locally_administered, proximity_label,
+    signal_confidence_percent, signal_trend, tracking_profile, tracking_profile_from_ordinal,
+    tracking_snapshot, wifi_channel_to_frequency, wifi_frequency_to_channel,
 };
 
 /// Builds a `DeviceObservation` from its varying fields; `tx_power_dbm` is
@@ -102,7 +102,10 @@ fn ema_and_trend_are_deterministic() {
     let mut f = RssiEma::new(0.5).unwrap();
     assert_eq!(f.push(-80.0).unwrap(), -80.0);
     assert_eq!(f.push(-60.0).unwrap(), -70.0);
-    assert_eq!(signal_trend(-80.0, -70.0, 2.0), SignalTrend::Stronger);
+    assert_eq!(signal_trend(-80.0, -70.0, 2.0), Some(SignalTrend::Stronger));
+    assert_eq!(signal_trend(f64::NAN, -70.0, 2.0), None);
+    assert_eq!(signal_trend(-80.0, f64::INFINITY, 2.0), None);
+    assert_eq!(signal_trend(-80.0, -70.0, f64::NAN), None);
 }
 
 #[test]
@@ -215,7 +218,7 @@ fn tracking_snapshot_derives_a_coherent_bundle() {
     assert!(snapshot.distance_m.unwrap() > 1.0);
     assert!(snapshot.distance_lower_bound_m.unwrap() < snapshot.distance_m.unwrap());
     assert!(snapshot.distance_upper_bound_m.unwrap() > snapshot.distance_m.unwrap());
-    assert!(snapshot.confidence_percent > 0);
+    assert!(snapshot.confidence_percent.unwrap() > 0);
     assert_eq!(snapshot.freshness, FreshnessClass::Live);
 }
 
@@ -234,6 +237,46 @@ fn tracking_snapshot_bootstraps_and_classifies_stale_observations() {
     assert_eq!(snapshot.filtered_rssi_dbm, -59.0);
     assert_eq!(snapshot.trend, SignalTrend::Stable);
     assert_eq!(snapshot.freshness, FreshnessClass::Stale);
+}
+
+#[test]
+fn tracking_snapshot_keeps_filtered_signal_when_spread_is_invalid() {
+    // Live repro (2026-09-09): invalid rssi_spread_db previously short-circuited
+    // the entire snapshot via `?`, erasing a finite filtered RSSI/trend/
+    // proximity/freshness bundle. Bounds and confidence must fail alone.
+    let base = TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: -70.0,
+        current_rssi_dbm: -68.0,
+        rssi_spread_db: 3.0,
+        sample_count: 5,
+        calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Standard,
+        age_ms: 1_000,
+    };
+    assert!(tracking_snapshot(base).is_some());
+
+    for spread in [f64::NAN, -1.0, f64::INFINITY] {
+        let mut input = base;
+        input.rssi_spread_db = spread;
+        let snapshot = tracking_snapshot(input).unwrap_or_else(|| {
+            panic!("invalid spread {spread:?} erased the filtered-signal snapshot")
+        });
+        assert!(snapshot.filtered_rssi_dbm.is_finite());
+        assert!(snapshot.distance_m.is_some());
+        assert_eq!(snapshot.distance_lower_bound_m, None);
+        assert_eq!(snapshot.distance_upper_bound_m, None);
+        assert_eq!(snapshot.confidence_percent, None);
+        assert_eq!(snapshot.freshness, FreshnessClass::Live);
+    }
+}
+
+#[test]
+fn proximity_label_rejects_non_finite_rssi() {
+    assert_eq!(proximity_label(-40.0), Some(ProximityBand::Immediate));
+    assert_eq!(proximity_label(-95.0), Some(ProximityBand::Far));
+    assert_eq!(proximity_label(f64::NAN), None);
+    assert_eq!(proximity_label(f64::INFINITY), None);
+    assert_eq!(proximity_label(f64::NEG_INFINITY), None);
 }
 
 #[test]
