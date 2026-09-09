@@ -54,7 +54,8 @@ impl RssiEma {
     /// Adds a sample and returns the filtered value.
     ///
     /// # Errors
-    /// Returns [`FilterError::NonFiniteSample`] if `rssi_dbm` is NaN or infinite.
+    /// Returns [`FilterError::NonFiniteSample`] if `rssi_dbm` is NaN or infinite,
+    /// or [`FilterError::NonFiniteResult`] if the computed value is not finite.
     pub fn push(&mut self, rssi_dbm: f64) -> Result<f64, FilterError> {
         if !rssi_dbm.is_finite() {
             return Err(FilterError::NonFiniteSample);
