@@ -28,11 +28,11 @@ public final class NativeRadar {
     /** {@link #signalTrend(double, double, double)} result: change fell within the deadband. */
     public static final int TREND_STABLE = 2;
 
-    /** {@link #trackingFreshness(double, double, double, double, double, int, double, double, long, long, long)} result: currently live. */
+    /** {@link #trackingFreshness(double, double, double, double, double, int, int, long, long, long)} result: currently live. */
     public static final int FRESHNESS_LIVE = 0;
-    /** {@link #trackingFreshness(double, double, double, double, double, int, double, double, long, long, long)} result: recent but no longer live. */
+    /** {@link #trackingFreshness(double, double, double, double, double, int, int, long, long, long)} result: recent but no longer live. */
     public static final int FRESHNESS_RECENT = 1;
-    /** {@link #trackingFreshness(double, double, double, double, double, int, double, double, long, long, long)} result: stale. */
+    /** {@link #trackingFreshness(double, double, double, double, double, int, int, long, long, long)} result: stale. */
     public static final int FRESHNESS_STALE = 2;
 
     /** {@link #defaultCalibrationProfile()} / calibration-profile selector: conservative baseline default. */
@@ -43,7 +43,7 @@ public final class NativeRadar {
     public static final int CALIBRATION_OPEN_SPACE = 2;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 4;
+    public static final int EXPECTED_ABI_VERSION = 5;
 
     private static volatile boolean loaded;
     private static volatile Throwable loadError;
@@ -157,8 +157,7 @@ public final class NativeRadar {
             double trendDeadbandDb,
             double rssiSpreadDb,
             int sampleCount,
-            double rssiAt1mDbm,
-            double pathLossExponent,
+            int calibrationProfile,
             long ageMs,
             long liveWindowMs,
             long recentWindowMs);
@@ -171,8 +170,7 @@ public final class NativeRadar {
             double trendDeadbandDb,
             double rssiSpreadDb,
             int sampleCount,
-            double rssiAt1mDbm,
-            double pathLossExponent,
+            int calibrationProfile,
             long ageMs,
             long liveWindowMs,
             long recentWindowMs);
@@ -185,8 +183,7 @@ public final class NativeRadar {
             double trendDeadbandDb,
             double rssiSpreadDb,
             int sampleCount,
-            double rssiAt1mDbm,
-            double pathLossExponent,
+            int calibrationProfile,
             long ageMs,
             long liveWindowMs,
             long recentWindowMs);
@@ -199,8 +196,7 @@ public final class NativeRadar {
             double trendDeadbandDb,
             double rssiSpreadDb,
             int sampleCount,
-            double rssiAt1mDbm,
-            double pathLossExponent,
+            int calibrationProfile,
             long ageMs,
             long liveWindowMs,
             long recentWindowMs);
@@ -213,8 +209,7 @@ public final class NativeRadar {
             double trendDeadbandDb,
             double rssiSpreadDb,
             int sampleCount,
-            double rssiAt1mDbm,
-            double pathLossExponent,
+            int calibrationProfile,
             long ageMs,
             long liveWindowMs,
             long recentWindowMs);
@@ -227,8 +222,7 @@ public final class NativeRadar {
             double trendDeadbandDb,
             double rssiSpreadDb,
             int sampleCount,
-            double rssiAt1mDbm,
-            double pathLossExponent,
+            int calibrationProfile,
             long ageMs,
             long liveWindowMs,
             long recentWindowMs);
@@ -241,8 +235,7 @@ public final class NativeRadar {
             double trendDeadbandDb,
             double rssiSpreadDb,
             int sampleCount,
-            double rssiAt1mDbm,
-            double pathLossExponent,
+            int calibrationProfile,
             long ageMs,
             long liveWindowMs,
             long recentWindowMs);
@@ -255,8 +248,7 @@ public final class NativeRadar {
             double trendDeadbandDb,
             double rssiSpreadDb,
             int sampleCount,
-            double rssiAt1mDbm,
-            double pathLossExponent,
+            int calibrationProfile,
             long ageMs,
             long liveWindowMs,
             long recentWindowMs);

@@ -1,8 +1,9 @@
 //! Device-centric observation and map-tracking state.
 
 use crate::{
-    LatLon, ProximityBand, RssiEma, SignalTrend, ble_distance_m, ble_distance_range_m,
-    filtered_rssi, haversine_m, proximity_label, signal_confidence_percent, signal_trend,
+    CalibrationProfile, LatLon, ProximityBand, RssiEma, SignalTrend, ble_distance_m,
+    ble_distance_range_m, calibration_profile as resolve_calibration_profile, filtered_rssi,
+    haversine_m, proximity_label, signal_confidence_percent, signal_trend,
 };
 
 /// Assumed horizontal accuracy, in metres, for an observation carrying no GPS fix.
@@ -149,10 +150,8 @@ pub struct TrackingSnapshotInput {
     pub rssi_spread_db: f64,
     /// Number of filtered samples represented by the spread/history.
     pub sample_count: usize,
-    /// Calibration reference RSSI at 1 metre.
-    pub rssi_at_1m_dbm: f64,
-    /// Calibration path-loss exponent.
-    pub path_loss_exponent: f64,
+    /// Rust-owned calibration profile.
+    pub calibration_profile: CalibrationProfile,
     /// Age of the latest observation relative to "now".
     pub age_ms: u64,
     /// Tight live freshness window.
@@ -164,6 +163,7 @@ pub struct TrackingSnapshotInput {
 /// Derives one coherent per-device signal snapshot from raw tracking inputs.
 #[must_use]
 pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapshot> {
+    let calibration = resolve_calibration_profile(input.calibration_profile);
     let filtered_rssi_dbm = filtered_rssi(
         input.previous_filtered_rssi_dbm,
         input.current_rssi_dbm,
@@ -181,14 +181,14 @@ pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapsho
     let proximity = proximity_label(filtered_rssi_dbm);
     let distance_m = ble_distance_m(
         filtered_rssi_dbm,
-        input.rssi_at_1m_dbm,
-        input.path_loss_exponent,
+        calibration.rssi_at_1m_dbm,
+        calibration.path_loss_exponent,
     )?;
     let (distance_lower_bound_m, distance_upper_bound_m) = ble_distance_range_m(
         filtered_rssi_dbm,
         input.rssi_spread_db,
-        input.rssi_at_1m_dbm,
-        input.path_loss_exponent,
+        calibration.rssi_at_1m_dbm,
+        calibration.path_loss_exponent,
     )
     .map(|(lower, upper)| (Some(lower), Some(upper)))?;
     let confidence_percent = signal_confidence_percent(input.sample_count, input.rssi_spread_db)?;

@@ -942,29 +942,29 @@ public final class JniSmoke {{
                 Double.isNaN(NativeRadar.calibrationProfileRssiAt1mDbm(99)),
                 "invalid calibration profile did not yield NaN sentinel");
         double tracked = NativeRadar.trackingFilteredRssi(
-                -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L);
+                -80.0, -60.0, 0.5, 3.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, 250L, 1_000L, 30_000L);
         require(Math.abs(tracked - (-70.0)) < 1e-9, "unexpected tracked RSSI: " + tracked);
         double trackedDistance = NativeRadar.trackingDistanceM(
-                -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L);
+                -80.0, -60.0, 0.5, 3.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, 250L, 1_000L, 30_000L);
         require(trackedDistance > 1.0, "unexpected tracked distance: " + trackedDistance);
         require(
                 NativeRadar.trackingTrend(
-                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L)
+                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, 250L, 1_000L, 30_000L)
                         == NativeRadar.TREND_STRONGER,
                 "unexpected tracked trend");
         require(
                 NativeRadar.trackingProximity(
-                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L)
+                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, 250L, 1_000L, 30_000L)
                         == NativeRadar.PROXIMITY_MID,
                 "unexpected tracked proximity");
         require(
                 NativeRadar.trackingConfidencePercent(
-                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L)
+                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, 250L, 1_000L, 30_000L)
                         >= 50,
                 "unexpected tracked confidence");
         require(
                 NativeRadar.trackingFreshness(
-                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L)
+                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, 250L, 1_000L, 30_000L)
                         == NativeRadar.FRESHNESS_LIVE,
                 "unexpected tracked freshness");
         require(
@@ -972,7 +972,7 @@ public final class JniSmoke {{
                 "invalid input did not yield NaN sentinel");
         require(
                 Double.isNaN(NativeRadar.trackingDistanceM(
-                        Double.NaN, -70.0, 0.0, 3.0, 0.0, -1, -59.0, 2.0, 0L, 1_000L, 30_000L)),
+                        Double.NaN, -70.0, 0.0, 3.0, 0.0, -1, NativeRadar.CALIBRATION_BASELINE, 0L, 1_000L, 30_000L)),
                 "invalid tracking input did not yield NaN sentinel");
     }}
 

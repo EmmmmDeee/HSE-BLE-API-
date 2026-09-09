@@ -32,19 +32,15 @@ final class BleScanEngine {
 
     /** Deadband used for the strengthening/weakening trend classification. */
     private static final double TREND_DEADBAND_DB = 3.0;
-    /** RSSI EMA alpha applied by the Rust core via {@link NativeRadar#trackingFilteredRssi(double, double, double, double, double, int, double, double, long, long, long)}. */
+    /** RSSI EMA alpha applied by the Rust core via {@link NativeRadar#trackingFilteredRssi(double, double, double, double, double, int, int, long, long, long)}. */
     private static final double RSSI_SMOOTHING_ALPHA = 0.35;
     /** Observations within this window are considered live. */
     private static final long LIVE_FRESHNESS_WINDOW_MILLIS = 5_000L;
     /** Long-idle devices are pruned to keep the simple UI focused on live signals. */
     private static final long STALE_RETENTION_WINDOW_MILLIS = 30_000L;
-    /** Keep UI simple for now: Android selects only the Rust-owned default profile. */
-    private static final int CALIBRATION_PROFILE = NativeRadar.CALIBRATION_BASELINE;
-
     private final Context appContext;
     private final Map<String, Blip> blipsByAddress = new ConcurrentHashMap<>();
-    private final double calibrationRssiAt1mDbm;
-    private final double calibrationPathLossExponent;
+    private final int calibrationProfile;
     private BluetoothLeScanner scanner;
     private volatile boolean scanning;
 
@@ -70,15 +66,9 @@ final class BleScanEngine {
 
     BleScanEngine(Context context) {
         this.appContext = context.getApplicationContext();
-        if (NativeRadar.isAvailable()) {
-            double rssiAt1mDbm = NativeRadar.calibrationProfileRssiAt1mDbm(CALIBRATION_PROFILE);
-            double pathLossExponent = NativeRadar.calibrationProfilePathLossExponent(CALIBRATION_PROFILE);
-            this.calibrationRssiAt1mDbm = Double.isFinite(rssiAt1mDbm) ? rssiAt1mDbm : -59.0;
-            this.calibrationPathLossExponent = Double.isFinite(pathLossExponent) ? pathLossExponent : 2.0;
-        } else {
-            this.calibrationRssiAt1mDbm = -59.0;
-            this.calibrationPathLossExponent = 2.0;
-        }
+        this.calibrationProfile = NativeRadar.isAvailable()
+                ? NativeRadar.defaultCalibrationProfile()
+                : NativeRadar.CALIBRATION_BASELINE;
     }
 
     static boolean hasRequiredPermissions(Context context) {
@@ -199,8 +189,7 @@ final class BleScanEngine {
                     TREND_DEADBAND_DB,
                     0.0,
                     Math.max(1, blip.sampleCount()),
-                    calibrationRssiAt1mDbm,
-                    calibrationPathLossExponent,
+                    calibrationProfile,
                     0L,
                     LIVE_FRESHNESS_WINDOW_MILLIS,
                     STALE_RETENTION_WINDOW_MILLIS);
@@ -218,8 +207,7 @@ final class BleScanEngine {
                     TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
-                    calibrationRssiAt1mDbm,
-                    calibrationPathLossExponent,
+                    calibrationProfile,
                     0L,
                     LIVE_FRESHNESS_WINDOW_MILLIS,
                     STALE_RETENTION_WINDOW_MILLIS);
@@ -230,8 +218,7 @@ final class BleScanEngine {
                     TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
-                    calibrationRssiAt1mDbm,
-                    calibrationPathLossExponent,
+                    calibrationProfile,
                     0L,
                     LIVE_FRESHNESS_WINDOW_MILLIS,
                     STALE_RETENTION_WINDOW_MILLIS);
@@ -242,8 +229,7 @@ final class BleScanEngine {
                     TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
-                    calibrationRssiAt1mDbm,
-                    calibrationPathLossExponent,
+                    calibrationProfile,
                     0L,
                     LIVE_FRESHNESS_WINDOW_MILLIS,
                     STALE_RETENTION_WINDOW_MILLIS);
@@ -254,8 +240,7 @@ final class BleScanEngine {
                     TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
-                    calibrationRssiAt1mDbm,
-                    calibrationPathLossExponent,
+                    calibrationProfile,
                     0L,
                     LIVE_FRESHNESS_WINDOW_MILLIS,
                     STALE_RETENTION_WINDOW_MILLIS);
@@ -266,8 +251,7 @@ final class BleScanEngine {
                     TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
-                    calibrationRssiAt1mDbm,
-                    calibrationPathLossExponent,
+                    calibrationProfile,
                     0L,
                     LIVE_FRESHNESS_WINDOW_MILLIS,
                     STALE_RETENTION_WINDOW_MILLIS);
@@ -278,8 +262,7 @@ final class BleScanEngine {
                     TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
-                    calibrationRssiAt1mDbm,
-                    calibrationPathLossExponent,
+                    calibrationProfile,
                     0L,
                     LIVE_FRESHNESS_WINDOW_MILLIS,
                     STALE_RETENTION_WINDOW_MILLIS);
@@ -291,8 +274,7 @@ final class BleScanEngine {
                     TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
-                    calibrationRssiAt1mDbm,
-                    calibrationPathLossExponent,
+                    calibrationProfile,
                     0L,
                     LIVE_FRESHNESS_WINDOW_MILLIS,
                     STALE_RETENTION_WINDOW_MILLIS);
@@ -338,8 +320,7 @@ final class BleScanEngine {
                     TREND_DEADBAND_DB,
                     blip.recentRssiSpreadDb(),
                     Math.max(1, blip.sampleCount()),
-                    calibrationRssiAt1mDbm,
-                    calibrationPathLossExponent,
+                    calibrationProfile,
                     ageMs,
                     LIVE_FRESHNESS_WINDOW_MILLIS,
                     STALE_RETENTION_WINDOW_MILLIS);
@@ -359,8 +340,7 @@ final class BleScanEngine {
                         TREND_DEADBAND_DB,
                         blip.recentRssiSpreadDb(),
                         Math.max(1, blip.sampleCount()),
-                        calibrationRssiAt1mDbm,
-                        calibrationPathLossExponent,
+                        calibrationProfile,
                         ageMs,
                         LIVE_FRESHNESS_WINDOW_MILLIS,
                         STALE_RETENTION_WINDOW_MILLIS) == NativeRadar.FRESHNESS_STALE;
