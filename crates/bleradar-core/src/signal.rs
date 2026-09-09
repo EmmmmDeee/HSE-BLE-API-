@@ -77,11 +77,7 @@ impl RssiEma {
 /// Treats a non-finite `previous_filtered_dbm` as "no prior sample yet" and
 /// returns `current_rssi_dbm` unchanged in that case.
 #[must_use]
-pub fn filtered_rssi(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-) -> Option<f64> {
+pub fn filtered_rssi(previous_filtered_dbm: f64, current_rssi_dbm: f64, alpha: f64) -> Option<f64> {
     if !current_rssi_dbm.is_finite() {
         return None;
     }
@@ -200,16 +196,8 @@ pub fn ble_distance_range_m(
         return None;
     }
     let spread = rssi_spread_db.abs();
-    let lower = ble_distance_m(
-        rssi_dbm + spread,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-    )?;
-    let upper = ble_distance_m(
-        rssi_dbm - spread,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-    )?;
+    let lower = ble_distance_m(rssi_dbm + spread, rssi_at_1m_dbm, path_loss_exponent)?;
+    let upper = ble_distance_m(rssi_dbm - spread, rssi_at_1m_dbm, path_loss_exponent)?;
     Some((lower.min(upper), lower.max(upper)))
 }
 

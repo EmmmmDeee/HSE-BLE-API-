@@ -133,8 +133,7 @@ pub fn signal_confidence_percent_or_negative(sample_count: i32, rssi_spread_db: 
     if sample_count < 0 {
         return -1;
     }
-    signal_confidence_percent(sample_count as usize, rssi_spread_db)
-        .map_or(-1, i32::from)
+    signal_confidence_percent(sample_count as usize, rssi_spread_db).map_or(-1, i32::from)
 }
 
 /// `NativeRadar.filteredRssi(double, double, double): double` — see
