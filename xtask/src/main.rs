@@ -1347,7 +1347,9 @@ fn cmd_verify_jni_live() -> Result<(), String> {
         c
     })?;
 
-    let host_lib = root.join("target/debug").join(host_cdylib_file_name("bleradar_jni"));
+    let host_lib = root
+        .join("target/debug")
+        .join(host_cdylib_file_name("bleradar_jni"));
     if !host_lib.is_file() {
         return Err(format!(
             "expected host-built native library missing: {}",
@@ -1363,8 +1365,11 @@ fn cmd_verify_jni_live() -> Result<(), String> {
     recreate_dirs(&[&package_dir, &classes_dir, &empty_library_dir])?;
     fs::copy(&java_path, package_dir.join("NativeRadar.java"))
         .map_err(|e| format!("copying {} into live verifier: {e}", java_path.display()))?;
-    fs::write(src_dir.join("JniSmoke.java"), jni_smoke_java_source(expected_abi_version))
-        .map_err(|e| format!("writing JniSmoke.java: {e}"))?;
+    fs::write(
+        src_dir.join("JniSmoke.java"),
+        jni_smoke_java_source(expected_abi_version),
+    )
+    .map_err(|e| format!("writing JniSmoke.java: {e}"))?;
 
     println!("== javac NativeRadar.java + JniSmoke.java ==");
     run_status({
@@ -1390,9 +1395,12 @@ fn cmd_verify_jni_live() -> Result<(), String> {
         c
     })?;
 
-    let library_dir = host_lib
-        .parent()
-        .ok_or_else(|| format!("host library has no parent directory: {}", host_lib.display()))?;
+    let library_dir = host_lib.parent().ok_or_else(|| {
+        format!(
+            "host library has no parent directory: {}",
+            host_lib.display()
+        )
+    })?;
     println!("== java success-path proof ==");
     run_status({
         let mut c = Command::new("java");
@@ -1987,7 +1995,9 @@ mod tests {
 
     #[test]
     fn find_java_static_final_int_reports_missing_or_invalid_constants() {
-        assert!(find_java_static_final_int("class NativeRadar {}", "EXPECTED_ABI_VERSION").is_err());
+        assert!(
+            find_java_static_final_int("class NativeRadar {}", "EXPECTED_ABI_VERSION").is_err()
+        );
         assert!(
             find_java_static_final_int(
                 "public static final int EXPECTED_ABI_VERSION = nope;",
