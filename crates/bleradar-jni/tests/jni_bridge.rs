@@ -8,8 +8,8 @@ use bleradar_jni::{
     filtered_rssi_or_nan, proximity_label_ordinal, signal_confidence_percent_or_negative,
     signal_trend_ordinal, tracking_confidence_percent_or_negative,
     tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
-    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
-    tracking_distance_proximity_ordinal, tracking_freshness_ordinal, tracking_proximity_ordinal,
+    tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
+    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
     tracking_trend_ordinal,
 };
 
@@ -124,10 +124,13 @@ fn distance_proximity_ordinal_uses_calibrated_boundaries() {
         tracking_profile_ordinal: 0,
         age_ms: 0,
     };
-    assert_eq!(tracking_distance_proximity_ordinal(input(1.0)), 0);
-    assert_eq!(tracking_distance_proximity_ordinal(input(2.0)), 1);
-    assert_eq!(tracking_distance_proximity_ordinal(input(5.0)), 2);
-    assert_eq!(tracking_distance_proximity_ordinal(input(25.0)), 3);
+    assert_eq!(tracking_distance_proximity_ordinal(input(0.999)), 0);
+    assert_eq!(tracking_distance_proximity_ordinal(input(1.001)), 1);
+    assert_eq!(tracking_distance_proximity_ordinal(input(1.999)), 1);
+    assert_eq!(tracking_distance_proximity_ordinal(input(2.001)), 2);
+    assert_eq!(tracking_distance_proximity_ordinal(input(4.999)), 2);
+    assert_eq!(tracking_distance_proximity_ordinal(input(5.001)), 3);
+    assert_eq!(tracking_distance_proximity_ordinal(input(24.999)), 3);
 }
 
 #[test]
