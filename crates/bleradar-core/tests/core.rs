@@ -317,6 +317,30 @@ fn map_points_remain_observed_not_inferred() {
 }
 
 #[test]
+fn map_point_confidence_preserves_accuracy_tiers() {
+    let position = LatLon::new(-26.8, 152.8).unwrap();
+    let cases = [
+        (3.0, 95),
+        (5.0, 90),
+        (10.0, 80),
+        (20.0, 65),
+        (50.0, 45),
+        (50.1, 25),
+    ];
+    for (accuracy_m, expected_confidence) in cases {
+        let mut track = DeviceTrack::new(0.5).unwrap();
+        track
+            .push(observation(1, Some(position), Some(accuracy_m), -55.0))
+            .unwrap();
+        assert_eq!(
+            track.observed_map_points()[0].confidence.value(),
+            expected_confidence,
+            "unexpected confidence for {accuracy_m}m accuracy"
+        );
+    }
+}
+
+#[test]
 fn stronger_samples_produce_hotter_state() {
     let mut track = DeviceTrack::new(0.5).unwrap();
     track.push(observation(1, None, None, -80.0)).unwrap();

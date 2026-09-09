@@ -12,6 +12,17 @@ const DEFAULT_GPS_ACCURACY_M: f64 = 50.0;
 /// Half-life for historical observations in a spatial estimate.
 const SPATIAL_RECENCY_HALF_LIFE_MS: f64 = 30_000.0;
 
+/// Confidence tiers for GPS-backed map positions, ordered from most precise
+/// to least precise. Accuracy above the final threshold uses the fallback tier.
+const ACCURACY_CONFIDENCE_TIERS: &[(f64, u8)] = &[
+    (3.0, 95),
+    (5.0, 90),
+    (10.0, 80),
+    (20.0, 65),
+    (50.0, 45),
+];
+const LOW_ACCURACY_CONFIDENCE: u8 = 25;
+
 /// Deadband, in dB, below which a filtered-RSSI change is treated as stable.
 const TREND_DEADBAND_DB: f64 = 2.0;
 
@@ -523,19 +534,10 @@ fn observation_weight(accuracy_m: f64, rssi_dbm: f64, max_rssi_dbm: f64, age_ms:
 }
 
 fn confidence_from_accuracy(accuracy_m: f64) -> Confidence {
-    let score = if accuracy_m <= 3.0 {
-        95
-    } else if accuracy_m <= 5.0 {
-        90
-    } else if accuracy_m <= 10.0 {
-        80
-    } else if accuracy_m <= 20.0 {
-        65
-    } else if accuracy_m <= 50.0 {
-        45
-    } else {
-        25
-    };
+    let score = ACCURACY_CONFIDENCE_TIERS
+        .iter()
+        .find(|(threshold_m, _)| accuracy_m <= *threshold_m)
+        .map_or(LOW_ACCURACY_CONFIDENCE, |(_, score)| *score);
     Confidence::new(score)
 }
 
