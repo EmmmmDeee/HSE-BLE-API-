@@ -29,7 +29,7 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
   Code/Maidenhead), and the canonical tag vocabulary. See
   `docs/HSE_IMPORT.md`.
 - `crates/bleradar-compat` — complete native ABI runtime/reachability census plus a separate source-replacement parity registry.
-- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
+- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, live Java→JNI→Rust verification, and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
 - `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, and verification records.
 - `benchmarks/` — benchmark harness notes.
@@ -209,6 +209,18 @@ cargo xtask gates
 These same gates run on every push and pull request via
 `.github/workflows/gates.yml`. Autonomous maintenance sessions operate under
 `docs/AUTONOMOUS_ENGINE.md`.
+
+## Live JNI proof
+
+```sh
+cargo xtask verify-jni-live
+```
+
+This compiles the host `bleradar-jni` library, compiles the repository's
+`android/app/src/main/java/com/hse/bleradar/NativeRadar.java`, then executes a
+real JVM → JNI → Rust smoke harness. It proves both the failure path (wrong
+library path yields `UnsatisfiedLinkError`) and the success path (library loads,
+ABI version matches, and JNI calls return the expected values).
 
 ## Parity report
 
