@@ -1,12 +1,11 @@
 //! Behavioral regression tests for the reconstructed BLE Radar domain core.
 
 use bleradar_core::{
-    AddressKind, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, GeoError,
-    FreshnessClass, IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice,
-    SignalTrend, TrackError, TrackingSnapshotInput, bearing_deg, ble_distance_m,
-    ble_distance_range_m, canonical_mac, filtered_rssi, haversine_m, is_locally_administered,
-    signal_confidence_percent, signal_trend, tracking_snapshot, wifi_channel_to_frequency,
-    wifi_frequency_to_channel,
+    AddressKind, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass,
+    GeoError, IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice, SignalTrend,
+    TrackError, TrackingSnapshotInput, bearing_deg, ble_distance_m, ble_distance_range_m,
+    canonical_mac, filtered_rssi, haversine_m, is_locally_administered, signal_confidence_percent,
+    signal_trend, tracking_snapshot, wifi_channel_to_frequency, wifi_frequency_to_channel,
 };
 
 /// Builds a `DeviceObservation` from its varying fields; `tx_power_dbm` is

@@ -98,9 +98,14 @@ impl FreshnessClass {
     /// Derives a freshness class from age and configured windows.
     #[must_use]
     pub const fn from_age(age_ms: u64, live_window_ms: u64, recent_window_ms: u64) -> Self {
+        let effective_recent_window_ms = if recent_window_ms > live_window_ms {
+            recent_window_ms
+        } else {
+            live_window_ms
+        };
         if age_ms <= live_window_ms {
             Self::Live
-        } else if age_ms <= recent_window_ms.max(live_window_ms) {
+        } else if age_ms <= effective_recent_window_ms {
             Self::Recent
         } else {
             Self::Stale
@@ -193,7 +198,7 @@ pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapsho
         filtered_rssi_dbm,
         trend,
         proximity,
-        distance_m,
+        distance_m: Some(distance_m),
         distance_lower_bound_m,
         distance_upper_bound_m,
         confidence_percent,

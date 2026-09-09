@@ -137,224 +137,97 @@ pub fn signal_confidence_percent_or_negative(sample_count: i32, rssi_spread_db: 
     signal_confidence_percent(sample_count as usize, rssi_spread_db).map_or(-1, i32::from)
 }
 
-fn tracking_snapshot_from_inputs(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-    trend_deadband_db: f64,
-    rssi_spread_db: f64,
-    sample_count: i32,
-    rssi_at_1m_dbm: f64,
-    path_loss_exponent: f64,
-    age_ms: i64,
-    live_window_ms: i64,
-    recent_window_ms: i64,
-) -> Option<TrackingSnapshot> {
-    let sample_count = usize::try_from(sample_count).ok()?;
-    let age_ms = u64::try_from(age_ms).ok()?;
-    let live_window_ms = u64::try_from(live_window_ms).ok()?;
-    let recent_window_ms = u64::try_from(recent_window_ms).ok()?;
+/// JNI-friendly input bundle for the canonical `NativeRadar.tracking*` surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackingSnapshotJniInput {
+    /// Previously filtered RSSI, or NaN when bootstrapping.
+    pub previous_filtered_dbm: f64,
+    /// Latest raw RSSI sample.
+    pub current_rssi_dbm: f64,
+    /// EMA alpha.
+    pub alpha: f64,
+    /// Trend deadband.
+    pub trend_deadband_db: f64,
+    /// Recent filtered-RSSI spread.
+    pub rssi_spread_db: f64,
+    /// Number of filtered samples in the current history window.
+    pub sample_count: i32,
+    /// Calibration reference RSSI at 1 metre.
+    pub rssi_at_1m_dbm: f64,
+    /// Calibration path-loss exponent.
+    pub path_loss_exponent: f64,
+    /// Observation age relative to "now".
+    pub age_ms: i64,
+    /// Live freshness window.
+    pub live_window_ms: i64,
+    /// Recent freshness window.
+    pub recent_window_ms: i64,
+}
+
+fn tracking_snapshot_from_input(input: TrackingSnapshotJniInput) -> Option<TrackingSnapshot> {
+    let sample_count = usize::try_from(input.sample_count).ok()?;
+    let age_ms = u64::try_from(input.age_ms).ok()?;
+    let live_window_ms = u64::try_from(input.live_window_ms).ok()?;
+    let recent_window_ms = u64::try_from(input.recent_window_ms).ok()?;
     tracking_snapshot(TrackingSnapshotInput {
-        previous_filtered_rssi_dbm: previous_filtered_dbm,
-        current_rssi_dbm,
-        rssi_alpha: alpha,
-        trend_deadband_db,
-        rssi_spread_db,
+        previous_filtered_rssi_dbm: input.previous_filtered_dbm,
+        current_rssi_dbm: input.current_rssi_dbm,
+        rssi_alpha: input.alpha,
+        trend_deadband_db: input.trend_deadband_db,
+        rssi_spread_db: input.rssi_spread_db,
         sample_count,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
+        rssi_at_1m_dbm: input.rssi_at_1m_dbm,
+        path_loss_exponent: input.path_loss_exponent,
         age_ms,
         live_window_ms,
         recent_window_ms,
     })
 }
 
-/// Pure, unit-testable core of the `NativeRadar.tracking*` JNI surface.
+/// Pure, unit-testable core of `NativeRadar.trackingFilteredRssi(...)`.
 #[must_use]
-pub fn tracking_filtered_rssi_or_nan(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-    trend_deadband_db: f64,
-    rssi_spread_db: f64,
-    sample_count: i32,
-    rssi_at_1m_dbm: f64,
-    path_loss_exponent: f64,
-    age_ms: i64,
-    live_window_ms: i64,
-    recent_window_ms: i64,
-) -> f64 {
-    tracking_snapshot_from_inputs(
-        previous_filtered_dbm,
-        current_rssi_dbm,
-        alpha,
-        trend_deadband_db,
-        rssi_spread_db,
-        sample_count,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-        age_ms,
-        live_window_ms,
-        recent_window_ms,
-    )
-    .map_or(f64::NAN, |snapshot| snapshot.filtered_rssi_dbm)
+pub fn tracking_filtered_rssi_or_nan(input: TrackingSnapshotJniInput) -> f64 {
+    tracking_snapshot_from_input(input).map_or(f64::NAN, |snapshot| snapshot.filtered_rssi_dbm)
 }
 
+/// Pure, unit-testable core of `NativeRadar.trackingDistanceM(...)`.
 #[must_use]
-pub fn tracking_distance_m_or_nan(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-    trend_deadband_db: f64,
-    rssi_spread_db: f64,
-    sample_count: i32,
-    rssi_at_1m_dbm: f64,
-    path_loss_exponent: f64,
-    age_ms: i64,
-    live_window_ms: i64,
-    recent_window_ms: i64,
-) -> f64 {
-    tracking_snapshot_from_inputs(
-        previous_filtered_dbm,
-        current_rssi_dbm,
-        alpha,
-        trend_deadband_db,
-        rssi_spread_db,
-        sample_count,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-        age_ms,
-        live_window_ms,
-        recent_window_ms,
-    )
-    .and_then(|snapshot| snapshot.distance_m)
-    .unwrap_or(f64::NAN)
+pub fn tracking_distance_m_or_nan(input: TrackingSnapshotJniInput) -> f64 {
+    tracking_snapshot_from_input(input)
+        .and_then(|snapshot| snapshot.distance_m)
+        .unwrap_or(f64::NAN)
 }
 
+/// Pure, unit-testable core of `NativeRadar.trackingDistanceLowerBoundM(...)`.
 #[must_use]
-pub fn tracking_distance_lower_bound_m_or_nan(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-    trend_deadband_db: f64,
-    rssi_spread_db: f64,
-    sample_count: i32,
-    rssi_at_1m_dbm: f64,
-    path_loss_exponent: f64,
-    age_ms: i64,
-    live_window_ms: i64,
-    recent_window_ms: i64,
-) -> f64 {
-    tracking_snapshot_from_inputs(
-        previous_filtered_dbm,
-        current_rssi_dbm,
-        alpha,
-        trend_deadband_db,
-        rssi_spread_db,
-        sample_count,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-        age_ms,
-        live_window_ms,
-        recent_window_ms,
-    )
-    .and_then(|snapshot| snapshot.distance_lower_bound_m)
-    .unwrap_or(f64::NAN)
+pub fn tracking_distance_lower_bound_m_or_nan(input: TrackingSnapshotJniInput) -> f64 {
+    tracking_snapshot_from_input(input)
+        .and_then(|snapshot| snapshot.distance_lower_bound_m)
+        .unwrap_or(f64::NAN)
 }
 
+/// Pure, unit-testable core of `NativeRadar.trackingDistanceUpperBoundM(...)`.
 #[must_use]
-pub fn tracking_distance_upper_bound_m_or_nan(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-    trend_deadband_db: f64,
-    rssi_spread_db: f64,
-    sample_count: i32,
-    rssi_at_1m_dbm: f64,
-    path_loss_exponent: f64,
-    age_ms: i64,
-    live_window_ms: i64,
-    recent_window_ms: i64,
-) -> f64 {
-    tracking_snapshot_from_inputs(
-        previous_filtered_dbm,
-        current_rssi_dbm,
-        alpha,
-        trend_deadband_db,
-        rssi_spread_db,
-        sample_count,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-        age_ms,
-        live_window_ms,
-        recent_window_ms,
-    )
-    .and_then(|snapshot| snapshot.distance_upper_bound_m)
-    .unwrap_or(f64::NAN)
+pub fn tracking_distance_upper_bound_m_or_nan(input: TrackingSnapshotJniInput) -> f64 {
+    tracking_snapshot_from_input(input)
+        .and_then(|snapshot| snapshot.distance_upper_bound_m)
+        .unwrap_or(f64::NAN)
 }
 
+/// Pure, unit-testable core of `NativeRadar.trackingTrend(...)`.
 #[must_use]
-pub fn tracking_trend_ordinal(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-    trend_deadband_db: f64,
-    rssi_spread_db: f64,
-    sample_count: i32,
-    rssi_at_1m_dbm: f64,
-    path_loss_exponent: f64,
-    age_ms: i64,
-    live_window_ms: i64,
-    recent_window_ms: i64,
-) -> i32 {
-    tracking_snapshot_from_inputs(
-        previous_filtered_dbm,
-        current_rssi_dbm,
-        alpha,
-        trend_deadband_db,
-        rssi_spread_db,
-        sample_count,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-        age_ms,
-        live_window_ms,
-        recent_window_ms,
-    )
-    .map_or(2, |snapshot| match snapshot.trend {
+pub fn tracking_trend_ordinal(input: TrackingSnapshotJniInput) -> i32 {
+    tracking_snapshot_from_input(input).map_or(2, |snapshot| match snapshot.trend {
         SignalTrend::Stronger => 0,
         SignalTrend::Weaker => 1,
         SignalTrend::Stable => 2,
     })
 }
 
+/// Pure, unit-testable core of `NativeRadar.trackingProximity(...)`.
 #[must_use]
-pub fn tracking_proximity_ordinal(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-    trend_deadband_db: f64,
-    rssi_spread_db: f64,
-    sample_count: i32,
-    rssi_at_1m_dbm: f64,
-    path_loss_exponent: f64,
-    age_ms: i64,
-    live_window_ms: i64,
-    recent_window_ms: i64,
-) -> i32 {
-    tracking_snapshot_from_inputs(
-        previous_filtered_dbm,
-        current_rssi_dbm,
-        alpha,
-        trend_deadband_db,
-        rssi_spread_db,
-        sample_count,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-        age_ms,
-        live_window_ms,
-        recent_window_ms,
-    )
-    .map_or(3, |snapshot| match snapshot.proximity {
+pub fn tracking_proximity_ordinal(input: TrackingSnapshotJniInput) -> i32 {
+    tracking_snapshot_from_input(input).map_or(3, |snapshot| match snapshot.proximity {
         ProximityBand::Immediate => 0,
         ProximityBand::Near => 1,
         ProximityBand::Mid => 2,
@@ -362,64 +235,17 @@ pub fn tracking_proximity_ordinal(
     })
 }
 
+/// Pure, unit-testable core of `NativeRadar.trackingConfidencePercent(...)`.
 #[must_use]
-pub fn tracking_confidence_percent_or_negative(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-    trend_deadband_db: f64,
-    rssi_spread_db: f64,
-    sample_count: i32,
-    rssi_at_1m_dbm: f64,
-    path_loss_exponent: f64,
-    age_ms: i64,
-    live_window_ms: i64,
-    recent_window_ms: i64,
-) -> i32 {
-    tracking_snapshot_from_inputs(
-        previous_filtered_dbm,
-        current_rssi_dbm,
-        alpha,
-        trend_deadband_db,
-        rssi_spread_db,
-        sample_count,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-        age_ms,
-        live_window_ms,
-        recent_window_ms,
-    )
-    .map_or(-1, |snapshot| i32::from(snapshot.confidence_percent))
+pub fn tracking_confidence_percent_or_negative(input: TrackingSnapshotJniInput) -> i32 {
+    tracking_snapshot_from_input(input)
+        .map_or(-1, |snapshot| i32::from(snapshot.confidence_percent))
 }
 
+/// Pure, unit-testable core of `NativeRadar.trackingFreshness(...)`.
 #[must_use]
-pub fn tracking_freshness_ordinal(
-    previous_filtered_dbm: f64,
-    current_rssi_dbm: f64,
-    alpha: f64,
-    trend_deadband_db: f64,
-    rssi_spread_db: f64,
-    sample_count: i32,
-    rssi_at_1m_dbm: f64,
-    path_loss_exponent: f64,
-    age_ms: i64,
-    live_window_ms: i64,
-    recent_window_ms: i64,
-) -> i32 {
-    tracking_snapshot_from_inputs(
-        previous_filtered_dbm,
-        current_rssi_dbm,
-        alpha,
-        trend_deadband_db,
-        rssi_spread_db,
-        sample_count,
-        rssi_at_1m_dbm,
-        path_loss_exponent,
-        age_ms,
-        live_window_ms,
-        recent_window_ms,
-    )
-    .map_or(2, |snapshot| match snapshot.freshness {
+pub fn tracking_freshness_ordinal(input: TrackingSnapshotJniInput) -> i32 {
+    tracking_snapshot_from_input(input).map_or(2, |snapshot| match snapshot.freshness {
         FreshnessClass::Live => 0,
         FreshnessClass::Recent => 1,
         FreshnessClass::Stale => 2,
@@ -528,6 +354,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_signalConfidencePercent
 }
 
 /// `NativeRadar.trackingFilteredRssi(...): double`.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFilteredRssi(
     _env: JniOpaquePtr,
@@ -544,7 +371,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFilteredRssi(
     live_window_ms: i64,
     recent_window_ms: i64,
 ) -> f64 {
-    tracking_filtered_rssi_or_nan(
+    tracking_filtered_rssi_or_nan(TrackingSnapshotJniInput {
         previous_filtered_dbm,
         current_rssi_dbm,
         alpha,
@@ -556,10 +383,11 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFilteredRssi(
         age_ms,
         live_window_ms,
         recent_window_ms,
-    )
+    })
 }
 
 /// `NativeRadar.trackingDistanceM(...): double`.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceM(
     _env: JniOpaquePtr,
@@ -576,7 +404,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceM(
     live_window_ms: i64,
     recent_window_ms: i64,
 ) -> f64 {
-    tracking_distance_m_or_nan(
+    tracking_distance_m_or_nan(TrackingSnapshotJniInput {
         previous_filtered_dbm,
         current_rssi_dbm,
         alpha,
@@ -588,10 +416,11 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceM(
         age_ms,
         live_window_ms,
         recent_window_ms,
-    )
+    })
 }
 
 /// `NativeRadar.trackingDistanceLowerBoundM(...): double`.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceLowerBoundM(
     _env: JniOpaquePtr,
@@ -608,7 +437,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceLowerBo
     live_window_ms: i64,
     recent_window_ms: i64,
 ) -> f64 {
-    tracking_distance_lower_bound_m_or_nan(
+    tracking_distance_lower_bound_m_or_nan(TrackingSnapshotJniInput {
         previous_filtered_dbm,
         current_rssi_dbm,
         alpha,
@@ -620,10 +449,11 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceLowerBo
         age_ms,
         live_window_ms,
         recent_window_ms,
-    )
+    })
 }
 
 /// `NativeRadar.trackingDistanceUpperBoundM(...): double`.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceUpperBoundM(
     _env: JniOpaquePtr,
@@ -640,7 +470,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceUpperBo
     live_window_ms: i64,
     recent_window_ms: i64,
 ) -> f64 {
-    tracking_distance_upper_bound_m_or_nan(
+    tracking_distance_upper_bound_m_or_nan(TrackingSnapshotJniInput {
         previous_filtered_dbm,
         current_rssi_dbm,
         alpha,
@@ -652,10 +482,11 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceUpperBo
         age_ms,
         live_window_ms,
         recent_window_ms,
-    )
+    })
 }
 
 /// `NativeRadar.trackingTrend(...): int`.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingTrend(
     _env: JniOpaquePtr,
@@ -672,7 +503,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingTrend(
     live_window_ms: i64,
     recent_window_ms: i64,
 ) -> i32 {
-    tracking_trend_ordinal(
+    tracking_trend_ordinal(TrackingSnapshotJniInput {
         previous_filtered_dbm,
         current_rssi_dbm,
         alpha,
@@ -684,10 +515,11 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingTrend(
         age_ms,
         live_window_ms,
         recent_window_ms,
-    )
+    })
 }
 
 /// `NativeRadar.trackingProximity(...): int`.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingProximity(
     _env: JniOpaquePtr,
@@ -704,7 +536,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingProximity(
     live_window_ms: i64,
     recent_window_ms: i64,
 ) -> i32 {
-    tracking_proximity_ordinal(
+    tracking_proximity_ordinal(TrackingSnapshotJniInput {
         previous_filtered_dbm,
         current_rssi_dbm,
         alpha,
@@ -716,10 +548,11 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingProximity(
         age_ms,
         live_window_ms,
         recent_window_ms,
-    )
+    })
 }
 
 /// `NativeRadar.trackingConfidencePercent(...): int`.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingConfidencePercent(
     _env: JniOpaquePtr,
@@ -736,7 +569,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingConfidencePerce
     live_window_ms: i64,
     recent_window_ms: i64,
 ) -> i32 {
-    tracking_confidence_percent_or_negative(
+    tracking_confidence_percent_or_negative(TrackingSnapshotJniInput {
         previous_filtered_dbm,
         current_rssi_dbm,
         alpha,
@@ -748,10 +581,11 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingConfidencePerce
         age_ms,
         live_window_ms,
         recent_window_ms,
-    )
+    })
 }
 
 /// `NativeRadar.trackingFreshness(...): int`.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFreshness(
     _env: JniOpaquePtr,
@@ -768,7 +602,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFreshness(
     live_window_ms: i64,
     recent_window_ms: i64,
 ) -> i32 {
-    tracking_freshness_ordinal(
+    tracking_freshness_ordinal(TrackingSnapshotJniInput {
         previous_filtered_dbm,
         current_rssi_dbm,
         alpha,
@@ -780,7 +614,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFreshness(
         age_ms,
         live_window_ms,
         recent_window_ms,
-    )
+    })
 }
 
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side

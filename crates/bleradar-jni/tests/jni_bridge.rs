@@ -2,12 +2,13 @@
 //! `android/app/src/main/java/com/hse/bleradar/NativeRadar.java` depends on.
 
 use bleradar_jni::{
-    ble_distance_m_or_nan, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
-    filtered_rssi_or_nan, proximity_label_ordinal, signal_confidence_percent_or_negative,
-    signal_trend_ordinal, tracking_confidence_percent_or_negative,
-    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
-    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
-    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
+    TrackingSnapshotJniInput, ble_distance_m_or_nan, distance_lower_bound_m_or_nan,
+    distance_upper_bound_m_or_nan, filtered_rssi_or_nan, proximity_label_ordinal,
+    signal_confidence_percent_or_negative, signal_trend_ordinal,
+    tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
+    tracking_distance_m_or_nan, tracking_distance_upper_bound_m_or_nan,
+    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
+    tracking_trend_ordinal,
 };
 
 #[test]
@@ -75,24 +76,55 @@ fn confidence_percent_uses_negative_one_as_invalid_sentinel() {
 
 #[test]
 fn tracking_snapshot_exports_a_coherent_bundle() {
-    let filtered = tracking_filtered_rssi_or_nan(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000);
-    let distance = tracking_distance_m_or_nan(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000);
-    let lower = tracking_distance_lower_bound_m_or_nan(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000);
-    let upper = tracking_distance_upper_bound_m_or_nan(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000);
+    let input = TrackingSnapshotJniInput {
+        previous_filtered_dbm: -80.0,
+        current_rssi_dbm: -60.0,
+        alpha: 0.5,
+        trend_deadband_db: 3.0,
+        rssi_spread_db: 4.0,
+        sample_count: 6,
+        rssi_at_1m_dbm: -59.0,
+        path_loss_exponent: 2.0,
+        age_ms: 250,
+        live_window_ms: 1_000,
+        recent_window_ms: 30_000,
+    };
+    let filtered = tracking_filtered_rssi_or_nan(input);
+    let distance = tracking_distance_m_or_nan(input);
+    let lower = tracking_distance_lower_bound_m_or_nan(input);
+    let upper = tracking_distance_upper_bound_m_or_nan(input);
     assert!((filtered - (-70.0)).abs() < 1e-9);
     assert!(distance.is_finite());
     assert!(lower < distance);
     assert!(upper > distance);
-    assert_eq!(tracking_trend_ordinal(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000), 0);
-    assert_eq!(tracking_proximity_ordinal(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000), 2);
-    assert!(tracking_confidence_percent_or_negative(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000) > 0);
-    assert_eq!(tracking_freshness_ordinal(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000), 0);
+    assert_eq!(tracking_trend_ordinal(input), 0);
+    assert_eq!(tracking_proximity_ordinal(input), 2);
+    assert!(tracking_confidence_percent_or_negative(input) > 0);
+    assert_eq!(tracking_freshness_ordinal(input), 0);
 }
 
 #[test]
 fn tracking_snapshot_uses_invalid_sentinels() {
-    assert!(tracking_filtered_rssi_or_nan(f64::NAN, -70.0, 0.0, 3.0, 0.0, 1, -59.0, 2.0, 0, 1_000, 30_000).is_nan());
-    assert!(tracking_distance_m_or_nan(f64::NAN, -70.0, 0.35, 3.0, 0.0, -1, -59.0, 2.0, 0, 1_000, 30_000).is_nan());
-    assert_eq!(tracking_confidence_percent_or_negative(f64::NAN, -70.0, 0.35, 3.0, 0.0, -1, -59.0, 2.0, 0, 1_000, 30_000), -1);
-    assert_eq!(tracking_freshness_ordinal(f64::NAN, -70.0, 0.35, 3.0, 0.0, -1, -59.0, 2.0, 0, 1_000, 30_000), 2);
+    let invalid_alpha = TrackingSnapshotJniInput {
+        previous_filtered_dbm: f64::NAN,
+        current_rssi_dbm: -70.0,
+        alpha: 0.0,
+        trend_deadband_db: 3.0,
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        rssi_at_1m_dbm: -59.0,
+        path_loss_exponent: 2.0,
+        age_ms: 0,
+        live_window_ms: 1_000,
+        recent_window_ms: 30_000,
+    };
+    let invalid_count = TrackingSnapshotJniInput {
+        sample_count: -1,
+        alpha: 0.35,
+        ..invalid_alpha
+    };
+    assert!(tracking_filtered_rssi_or_nan(invalid_alpha).is_nan());
+    assert!(tracking_distance_m_or_nan(invalid_count).is_nan());
+    assert_eq!(tracking_confidence_percent_or_negative(invalid_count), -1);
+    assert_eq!(tracking_freshness_ordinal(invalid_count), 2);
 }
