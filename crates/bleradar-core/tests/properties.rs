@@ -157,6 +157,14 @@ fn prop_proximity_band_is_monotonic_in_signal_strength() {
 
 #[test]
 fn prop_distance_proximity_band_is_monotonic() {
+    fn distance_order(band: ProximityBand) -> u8 {
+        match band {
+            ProximityBand::Immediate => 0,
+            ProximityBand::Near => 1,
+            ProximityBand::Mid => 2,
+            ProximityBand::Far => 3,
+        }
+    }
     let bands = [
         proximity_label_from_distance_m(0.0).unwrap(),
         proximity_label_from_distance_m(1.0).unwrap(),
@@ -165,7 +173,7 @@ fn prop_distance_proximity_band_is_monotonic() {
         proximity_label_from_distance_m(25.0).unwrap(),
     ];
     for window in bands.windows(2) {
-        assert!(window[0] <= window[1]);
+        assert!(distance_order(window[0]) <= distance_order(window[1]));
     }
 }
 
