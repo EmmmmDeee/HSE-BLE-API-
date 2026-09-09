@@ -131,7 +131,10 @@ fn filtered_rssi_bootstraps_and_then_applies_ema() {
 fn ema_rejects_invalid_samples_without_mutating_state() {
     let mut ema = RssiEma::new(0.5).unwrap();
     assert_eq!(ema.push(-80.0), Ok(-80.0));
-    assert_eq!(ema.push(f64::NAN), Err(bleradar_core::FilterError::NonFiniteSample));
+    assert_eq!(
+        ema.push(f64::NAN),
+        Err(bleradar_core::FilterError::NonFiniteSample)
+    );
     assert_eq!(ema.value(), Some(-80.0));
     assert_eq!(filtered_rssi(-80.0, f64::INFINITY, 0.5), None);
 }
