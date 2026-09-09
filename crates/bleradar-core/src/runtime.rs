@@ -4,6 +4,16 @@
 //! This module owns the deterministic tick policy so scheduling decisions do not
 //! have to be duplicated between the JVM service and native state.
 
+const WIFI_PERIOD: u64 = 3;
+const THREAT_PERIOD: u64 = 3;
+const CORRELATION_PERIOD: u64 = 4;
+const PRUNE_PERIOD: u64 = 60;
+const PRUNE_PHASE: u64 = PRUNE_PERIOD - 1;
+const REARM_PERIOD: u64 = 240;
+const REARM_PHASE: u64 = REARM_PERIOD - 1;
+const PRUNE_MAX_AGE_MS: u64 = 30 * 60 * 1_000;
+const PRUNE_MIN_SIGHTINGS: u16 = 3;
+
 /// Scan modes recovered from the Android service's scheduler contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanMode {
@@ -91,41 +101,47 @@ impl Runtime {
         self.tick
     }
 
-    /// Advances one five-second service period and emits due actions.
+    /// Plans the actions due at the current tick without advancing the runtime.
     ///
     /// The current tick is evaluated before it is incremented, so tick zero
     /// starts Wi-Fi and the periodic actions retain the oracle's zero-based
     /// phase. Commands are returned in the verified order: Wi-Fi, classic,
     /// threat, correlation, prune, and BLE rearm.
     #[must_use]
-    pub fn advance_tick(&mut self) -> Vec<ScanCommand> {
-        let tick = self.tick;
+    pub fn plan_tick(&self) -> Vec<ScanCommand> {
         let mut commands = Vec::with_capacity(6);
 
-        if tick.is_multiple_of(3) {
+        if self.tick.is_multiple_of(WIFI_PERIOD) {
             commands.push(ScanCommand::WifiScan);
         }
-        if tick.is_multiple_of(self.mode.classic_period()) {
+        if self.tick.is_multiple_of(self.mode.classic_period()) {
             commands.push(ScanCommand::ClassicScan);
         }
-        if tick.is_multiple_of(3) {
+        if self.tick.is_multiple_of(THREAT_PERIOD) {
             commands.push(ScanCommand::RefreshThreats);
         }
-        if tick.is_multiple_of(4) {
+        if self.tick.is_multiple_of(CORRELATION_PERIOD) {
             commands.push(ScanCommand::Correlate);
         }
-        if tick % 60 == 59 {
+        if self.tick % PRUNE_PERIOD == PRUNE_PHASE {
             commands.push(ScanCommand::Prune {
-                max_age_ms: 30 * 60 * 1_000,
-                min_sightings: 3,
+                max_age_ms: PRUNE_MAX_AGE_MS,
+                min_sightings: PRUNE_MIN_SIGHTINGS,
             });
         }
-        if tick % 240 == 239 {
+        if self.tick % REARM_PERIOD == REARM_PHASE {
             commands.push(ScanCommand::RearmBle {
                 mode: self.mode.ble_ordinal(),
             });
         }
 
+        commands
+    }
+
+    /// Advances one five-second service period and emits due actions.
+    #[must_use]
+    pub fn advance_tick(&mut self) -> Vec<ScanCommand> {
+        let commands = self.plan_tick();
         self.tick = self.tick.wrapping_add(1);
         commands
     }
