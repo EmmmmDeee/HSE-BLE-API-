@@ -12,6 +12,7 @@ mod identity;
 mod infrastructure;
 mod osint;
 mod pipeline;
+mod runtime;
 mod signal;
 mod tracking;
 mod validation;
@@ -80,6 +81,7 @@ pub use pipeline::{
     DiminishingGainStopCriterion, GraphEdge, InformationGainSample, InvestigationPipeline, NodeId,
     PipelineError, PipelineStage, TemporalGeoGraph, TemporalSpan,
 };
+pub use runtime::{Runtime, ScanCommand, ScanMode};
 pub use signal::{
     BleCalibration, CalibrationProfile, FilterError, ProximityBand, RssiEma, SignalTrend,
     ble_distance_m, ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
