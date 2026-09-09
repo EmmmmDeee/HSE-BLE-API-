@@ -192,12 +192,10 @@ mod tests {
         }
         assert_eq!(
             runtime.advance_tick(),
-            vec![
-                ScanCommand::Prune {
-                    max_age_ms: 1_800_000,
-                    min_sightings: 3,
-                },
-            ]
+            vec![ScanCommand::Prune {
+                max_age_ms: 1_800_000,
+                min_sightings: 3,
+            },]
         );
     }
 }
