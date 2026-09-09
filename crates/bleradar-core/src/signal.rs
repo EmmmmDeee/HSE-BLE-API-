@@ -126,6 +126,68 @@ pub enum ProximityBand {
     Far,
 }
 
+/// Rust-owned BLE distance calibration profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationProfile {
+    /// Conservative general-purpose default matching the historic app constants.
+    Baseline,
+    /// More attenuation for cluttered indoor environments.
+    Indoor,
+    /// Lower attenuation for more open spaces.
+    OpenSpace,
+}
+
+impl CalibrationProfile {
+    /// Stable ordinal used by JNI/Android.
+    #[must_use]
+    pub const fn ordinal(self) -> i32 {
+        match self {
+            Self::Baseline => 0,
+            Self::Indoor => 1,
+            Self::OpenSpace => 2,
+        }
+    }
+}
+
+/// BLE distance calibration parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BleCalibration {
+    /// Reference RSSI at 1 metre.
+    pub rssi_at_1m_dbm: f64,
+    /// Path-loss exponent.
+    pub path_loss_exponent: f64,
+}
+
+/// Decodes a stable calibration-profile ordinal.
+#[must_use]
+pub const fn calibration_profile_from_ordinal(ordinal: i32) -> Option<CalibrationProfile> {
+    match ordinal {
+        0 => Some(CalibrationProfile::Baseline),
+        1 => Some(CalibrationProfile::Indoor),
+        2 => Some(CalibrationProfile::OpenSpace),
+        _ => None,
+    }
+}
+
+/// Canonical calibration parameters for a named profile.
+#[must_use]
+pub const fn calibration_profile(profile: CalibrationProfile) -> BleCalibration {
+    match profile {
+        CalibrationProfile::Baseline => BleCalibration {
+            rssi_at_1m_dbm: -59.0,
+            path_loss_exponent: 2.0,
+        },
+        CalibrationProfile::Indoor => BleCalibration {
+            rssi_at_1m_dbm: -62.0,
+            path_loss_exponent: 2.6,
+        },
+        CalibrationProfile::OpenSpace => BleCalibration {
+            rssi_at_1m_dbm: -56.0,
+            path_loss_exponent: 1.8,
+        },
+    }
+}
+
 // Minimum filtered RSSI (dBm) admitted to each coarse proximity band.
 const IMMEDIATE_MIN_DBM: f64 = -50.0;
 const NEAR_MIN_DBM: f64 = -65.0;

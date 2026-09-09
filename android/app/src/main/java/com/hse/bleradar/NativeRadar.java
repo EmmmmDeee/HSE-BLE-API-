@@ -35,8 +35,15 @@ public final class NativeRadar {
     /** {@link #trackingFreshness(double, double, double, double, double, int, double, double, long, long, long)} result: stale. */
     public static final int FRESHNESS_STALE = 2;
 
+    /** {@link #defaultCalibrationProfile()} / calibration-profile selector: conservative baseline default. */
+    public static final int CALIBRATION_BASELINE = 0;
+    /** {@link #defaultCalibrationProfile()} / calibration-profile selector: higher attenuation indoor profile. */
+    public static final int CALIBRATION_INDOOR = 1;
+    /** {@link #defaultCalibrationProfile()} / calibration-profile selector: lower attenuation open-space profile. */
+    public static final int CALIBRATION_OPEN_SPACE = 2;
+
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 3;
+    public static final int EXPECTED_ABI_VERSION = 4;
 
     private static volatile boolean loaded;
     private static volatile Throwable loadError;
@@ -129,6 +136,15 @@ public final class NativeRadar {
      * or {@code -1} when the inputs are invalid.
      */
     public static native int signalConfidencePercent(int sampleCount, double rssiSpreadDb);
+
+    /** Rust-owned reference RSSI at 1 metre for the selected calibration profile, or {@link Double#NaN}. */
+    public static native double calibrationProfileRssiAt1mDbm(int profile);
+
+    /** Rust-owned path-loss exponent for the selected calibration profile, or {@link Double#NaN}. */
+    public static native double calibrationProfilePathLossExponent(int profile);
+
+    /** The Rust-owned default calibration profile. */
+    public static native int defaultCalibrationProfile();
 
     /**
      * Canonical Rust-owned tracking snapshot field: filtered RSSI after ingesting the latest sample,

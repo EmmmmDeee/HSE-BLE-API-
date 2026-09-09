@@ -722,6 +722,9 @@ const REQUIRED_DEX_CLASSES: &[&str] = &[
 const REQUIRED_JNI_EXPORTS: &[&str] = &[
     "Java_com_hse_bleradar_NativeRadar_abiVersion",
     "Java_com_hse_bleradar_NativeRadar_bleDistanceM",
+    "Java_com_hse_bleradar_NativeRadar_calibrationProfilePathLossExponent",
+    "Java_com_hse_bleradar_NativeRadar_calibrationProfileRssiAt1mDbm",
+    "Java_com_hse_bleradar_NativeRadar_defaultCalibrationProfile",
     "Java_com_hse_bleradar_NativeRadar_distanceLowerBoundM",
     "Java_com_hse_bleradar_NativeRadar_distanceUpperBoundM",
     "Java_com_hse_bleradar_NativeRadar_filteredRssi",
@@ -926,6 +929,18 @@ public final class JniSmoke {{
         require(
                 NativeRadar.signalConfidencePercent(8, 1.5) >= 70,
                 "unexpected confidence score");
+        require(
+                NativeRadar.defaultCalibrationProfile() == NativeRadar.CALIBRATION_BASELINE,
+                "unexpected default calibration profile");
+        require(
+                Math.abs(NativeRadar.calibrationProfileRssiAt1mDbm(NativeRadar.CALIBRATION_BASELINE) - (-59.0)) < 1e-9,
+                "unexpected baseline calibration RSSI");
+        require(
+                Math.abs(NativeRadar.calibrationProfilePathLossExponent(NativeRadar.CALIBRATION_BASELINE) - 2.0) < 1e-9,
+                "unexpected baseline calibration exponent");
+        require(
+                Double.isNaN(NativeRadar.calibrationProfileRssiAt1mDbm(99)),
+                "invalid calibration profile did not yield NaN sentinel");
         double tracked = NativeRadar.trackingFilteredRssi(
                 -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L);
         require(Math.abs(tracked - (-70.0)) < 1e-9, "unexpected tracked RSSI: " + tracked);
@@ -2146,6 +2161,8 @@ mod tests {
     fn jni_smoke_java_source_embeds_expected_checks() {
         let source = jni_smoke_java_source(11);
         assert!(source.contains("NativeRadar.abiVersion() == 11"));
+        assert!(source.contains("NativeRadar.defaultCalibrationProfile() == NativeRadar.CALIBRATION_BASELINE"));
+        assert!(source.contains("Double.isNaN(NativeRadar.calibrationProfileRssiAt1mDbm(99))"));
         assert!(source.contains("Double.isNaN(NativeRadar.bleDistanceM(-70.0, -59.0, 0.0))"));
         assert!(source.contains("expected NativeRadar to be unavailable"));
     }

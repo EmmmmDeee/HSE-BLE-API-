@@ -35,9 +35,10 @@
 //! them in lockstep.
 
 use bleradar_core::{
-    FreshnessClass, ProximityBand, SignalTrend, TrackingSnapshot, TrackingSnapshotInput,
-    ble_distance_m, ble_distance_range_m, filtered_rssi, proximity_label,
-    signal_confidence_percent, signal_trend, tracking_snapshot,
+    CalibrationProfile, FreshnessClass, ProximityBand, SignalTrend, TrackingSnapshot,
+    TrackingSnapshotInput, ble_distance_m, ble_distance_range_m, calibration_profile,
+    calibration_profile_from_ordinal, filtered_rssi, proximity_label, signal_confidence_percent,
+    signal_trend, tracking_snapshot,
 };
 
 /// Opaque, never-dereferenced pointer type standing in for the JNI `JNIEnv*`
@@ -135,6 +136,28 @@ pub fn signal_confidence_percent_or_negative(sample_count: i32, rssi_spread_db: 
         return -1;
     }
     signal_confidence_percent(sample_count as usize, rssi_spread_db).map_or(-1, i32::from)
+}
+
+/// Pure, unit-testable core of `NativeRadar.calibrationProfileRssiAt1mDbm(...)`.
+#[must_use]
+pub fn calibration_profile_rssi_at_1m_dbm_or_nan(profile_ordinal: i32) -> f64 {
+    calibration_profile_from_ordinal(profile_ordinal)
+        .map(calibration_profile)
+        .map_or(f64::NAN, |profile| profile.rssi_at_1m_dbm)
+}
+
+/// Pure, unit-testable core of `NativeRadar.calibrationProfilePathLossExponent(...)`.
+#[must_use]
+pub fn calibration_profile_path_loss_exponent_or_nan(profile_ordinal: i32) -> f64 {
+    calibration_profile_from_ordinal(profile_ordinal)
+        .map(calibration_profile)
+        .map_or(f64::NAN, |profile| profile.path_loss_exponent)
+}
+
+/// Pure, unit-testable core of `NativeRadar.defaultCalibrationProfile()`.
+#[must_use]
+pub const fn default_calibration_profile_ordinal() -> i32 {
+    CalibrationProfile::Baseline.ordinal()
 }
 
 /// JNI-friendly input bundle for the canonical `NativeRadar.tracking*` surface.
@@ -351,6 +374,35 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_signalConfidencePercent
     rssi_spread_db: f64,
 ) -> i32 {
     signal_confidence_percent_or_negative(sample_count, rssi_spread_db)
+}
+
+/// `NativeRadar.calibrationProfileRssiAt1mDbm(int): double`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_calibrationProfileRssiAt1mDbm(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    profile_ordinal: i32,
+) -> f64 {
+    calibration_profile_rssi_at_1m_dbm_or_nan(profile_ordinal)
+}
+
+/// `NativeRadar.calibrationProfilePathLossExponent(int): double`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_calibrationProfilePathLossExponent(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    profile_ordinal: i32,
+) -> f64 {
+    calibration_profile_path_loss_exponent_or_nan(profile_ordinal)
+}
+
+/// `NativeRadar.defaultCalibrationProfile(): int`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_defaultCalibrationProfile(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+) -> i32 {
+    default_calibration_profile_ordinal()
 }
 
 /// `NativeRadar.trackingFilteredRssi(...): double`.
@@ -625,5 +677,5 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    3
+    4
 }

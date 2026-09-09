@@ -1,11 +1,12 @@
 //! Behavioral regression tests for the reconstructed BLE Radar domain core.
 
 use bleradar_core::{
-    AddressKind, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass,
-    GeoError, IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice, SignalTrend,
-    TrackError, TrackingSnapshotInput, bearing_deg, ble_distance_m, ble_distance_range_m,
-    canonical_mac, filtered_rssi, haversine_m, is_locally_administered, signal_confidence_percent,
-    signal_trend, tracking_snapshot, wifi_channel_to_frequency, wifi_frequency_to_channel,
+    AddressKind, CalibrationProfile, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind,
+    FreshnessClass, GeoError, IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice,
+    SignalTrend, TrackError, TrackingSnapshotInput, bearing_deg, ble_distance_m,
+    ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal, canonical_mac,
+    filtered_rssi, haversine_m, is_locally_administered, signal_confidence_percent, signal_trend,
+    tracking_snapshot, wifi_channel_to_frequency, wifi_frequency_to_channel,
 };
 
 /// Builds a `DeviceObservation` from its varying fields; `tx_power_dbm` is
@@ -148,6 +149,31 @@ fn signal_confidence_rewards_stability_and_sample_support() {
 fn signal_confidence_rejects_invalid_spread() {
     assert!(signal_confidence_percent(1, -1.0).is_none());
     assert!(signal_confidence_percent(1, f64::INFINITY).is_none());
+}
+
+#[test]
+fn calibration_profiles_are_stable_and_distinct() {
+    assert_eq!(
+        calibration_profile_from_ordinal(0),
+        Some(CalibrationProfile::Baseline)
+    );
+    assert_eq!(
+        calibration_profile_from_ordinal(1),
+        Some(CalibrationProfile::Indoor)
+    );
+    assert_eq!(
+        calibration_profile_from_ordinal(2),
+        Some(CalibrationProfile::OpenSpace)
+    );
+    assert_eq!(calibration_profile_from_ordinal(99), None);
+
+    let baseline = calibration_profile(CalibrationProfile::Baseline);
+    let indoor = calibration_profile(CalibrationProfile::Indoor);
+    let open = calibration_profile(CalibrationProfile::OpenSpace);
+    assert_eq!(baseline.rssi_at_1m_dbm, -59.0);
+    assert_eq!(baseline.path_loss_exponent, 2.0);
+    assert!(indoor.path_loss_exponent > baseline.path_loss_exponent);
+    assert!(open.path_loss_exponent < baseline.path_loss_exponent);
 }
 
 #[test]
