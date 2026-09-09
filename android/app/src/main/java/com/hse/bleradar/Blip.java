@@ -22,6 +22,13 @@ final class Blip {
     volatile int freshness = NativeRadar.FRESHNESS_STALE;
     volatile int confidencePercent;
     volatile long lastSeenUptimeMillis;
+    /**
+     * Most recently observed device-advertised TX power in dBm, or
+     * {@link Double#NaN} when the device has never reported one. Retained
+     * across scan results so {@link NativeRadar}'s freshness/pruning calls
+     * (which do not carry a fresh scan result) can keep using it.
+     */
+    volatile double txPowerDbm = Double.NaN;
     final float angleDegrees;
     private final double[] recentRssiDbm = new double[RECENT_SIGNAL_WINDOW];
     private int recentSampleCount;

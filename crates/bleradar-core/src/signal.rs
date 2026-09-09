@@ -317,6 +317,45 @@ pub fn ble_distance_range_m(
     Some((lower.min(upper), lower.max(upper)))
 }
 
+// Plausible bounds for a BLE advertised/calibrated TX power reading, in dBm.
+// Values outside this range (including Android's `ScanResult.TX_POWER_NOT_PRESENT`
+// sentinel, 127) are corrupt or absent rather than genuine per-device calibration.
+const PLAUSIBLE_TX_POWER_MIN_DBM: f64 = -100.0;
+const PLAUSIBLE_TX_POWER_MAX_DBM: f64 = 20.0;
+
+/// Resolves the RSSI-at-1-metre calibration value actually used for a
+/// distance estimate: the device's own advertised/calibrated TX power when
+/// present and plausible, otherwise the generic [`CalibrationProfile`]
+/// constant.
+///
+/// A per-device calibration value is materially more accurate than one
+/// constant shared by every device, so it is preferred whenever the
+/// advertisement supplies a plausible one. Returns `profile_rssi_at_1m_dbm`
+/// unchanged for a `None`, non-finite, or out-of-range `tx_power_dbm`
+/// (including a decoded Android `TX_POWER_NOT_PRESENT` sentinel).
+///
+/// # Examples
+/// ```
+/// use bleradar_core::effective_rssi_at_1m_dbm;
+/// assert_eq!(effective_rssi_at_1m_dbm(Some(-63.0), -59.0), -63.0);
+/// assert_eq!(effective_rssi_at_1m_dbm(None, -59.0), -59.0);
+/// assert_eq!(effective_rssi_at_1m_dbm(Some(f64::NAN), -59.0), -59.0);
+/// // Android's `ScanResult.TX_POWER_NOT_PRESENT` (127) is out of range.
+/// assert_eq!(effective_rssi_at_1m_dbm(Some(127.0), -59.0), -59.0);
+/// ```
+#[must_use]
+pub fn effective_rssi_at_1m_dbm(tx_power_dbm: Option<f64>, profile_rssi_at_1m_dbm: f64) -> f64 {
+    match tx_power_dbm {
+        Some(value)
+            if value.is_finite()
+                && (PLAUSIBLE_TX_POWER_MIN_DBM..=PLAUSIBLE_TX_POWER_MAX_DBM).contains(&value) =>
+        {
+            value
+        }
+        _ => profile_rssi_at_1m_dbm,
+    }
+}
+
 /// Deterministic confidence score for a tracked signal from sample support and
 /// recent RSSI spread.
 ///

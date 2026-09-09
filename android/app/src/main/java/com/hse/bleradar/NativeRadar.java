@@ -28,11 +28,11 @@ public final class NativeRadar {
     /** {@link #signalTrend(double, double, double)} result: change fell within the deadband. */
     public static final int TREND_STABLE = 2;
 
-    /** {@link #trackingFreshness(double, double, double, int, int, int, long)} result: currently live. */
+    /** {@link #trackingFreshness(double, double, double, int, int, int, long, double)} result: currently live. */
     public static final int FRESHNESS_LIVE = 0;
-    /** {@link #trackingFreshness(double, double, double, int, int, int, long)} result: recent but no longer live. */
+    /** {@link #trackingFreshness(double, double, double, int, int, int, long, double)} result: recent but no longer live. */
     public static final int FRESHNESS_RECENT = 1;
-    /** {@link #trackingFreshness(double, double, double, int, int, int, long)} result: stale. */
+    /** {@link #trackingFreshness(double, double, double, int, int, int, long, double)} result: stale. */
     public static final int FRESHNESS_STALE = 2;
 
     /** {@link #defaultCalibrationProfile()} / calibration-profile selector: conservative baseline default. */
@@ -48,7 +48,7 @@ public final class NativeRadar {
     public static final int TRACKING_RESPONSIVE = 1;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 6;
+    public static final int EXPECTED_ABI_VERSION = 7;
 
     private static volatile boolean loaded;
     private static volatile Throwable loadError;
@@ -158,6 +158,13 @@ public final class NativeRadar {
      * Canonical Rust-owned tracking snapshot field: filtered RSSI after ingesting the latest sample,
      * or {@link Double#NaN} when the filtered signal or profile inputs are invalid. Invalid spread
      * only removes the range bounds and confidence; it does not erase a valid filtered signal.
+     *
+     * <p>Every {@code tracking*} method below shares the same trailing {@code txPowerDbm}
+     * parameter: the device's advertised/calibrated TX power in dBm (for example
+     * {@code ScanResult.getTxPower()}), or {@link Double#NaN} when absent. When present and
+     * within a plausible range it overrides the selected calibration profile's generic
+     * reference power for every distance-derived field, giving materially more accurate
+     * per-device distance estimates than the profile constant alone.
      */
     public static native double trackingFilteredRssi(
             double previousFilteredDbm,
@@ -166,7 +173,8 @@ public final class NativeRadar {
             int sampleCount,
             int calibrationProfile,
             int trackingProfile,
-            long ageMs);
+            long ageMs,
+            double txPowerDbm);
 
     /** Canonical Rust-owned tracking snapshot field: central distance estimate, or {@link Double#NaN}. */
     public static native double trackingDistanceM(
@@ -176,7 +184,8 @@ public final class NativeRadar {
             int sampleCount,
             int calibrationProfile,
             int trackingProfile,
-            long ageMs);
+            long ageMs,
+            double txPowerDbm);
 
     /** Canonical Rust-owned tracking snapshot field: conservative near range bound, or {@link Double#NaN}. */
     public static native double trackingDistanceLowerBoundM(
@@ -186,7 +195,8 @@ public final class NativeRadar {
             int sampleCount,
             int calibrationProfile,
             int trackingProfile,
-            long ageMs);
+            long ageMs,
+            double txPowerDbm);
 
     /** Canonical Rust-owned tracking snapshot field: conservative far range bound, or {@link Double#NaN}. */
     public static native double trackingDistanceUpperBoundM(
@@ -196,7 +206,8 @@ public final class NativeRadar {
             int sampleCount,
             int calibrationProfile,
             int trackingProfile,
-            long ageMs);
+            long ageMs,
+            double txPowerDbm);
 
     /** Canonical Rust-owned tracking snapshot field: one of the {@code TREND_*} constants above. */
     public static native int trackingTrend(
@@ -206,7 +217,8 @@ public final class NativeRadar {
             int sampleCount,
             int calibrationProfile,
             int trackingProfile,
-            long ageMs);
+            long ageMs,
+            double txPowerDbm);
 
     /** Canonical Rust-owned tracking snapshot field: one of the {@code PROXIMITY_*} constants above. */
     public static native int trackingProximity(
@@ -216,11 +228,12 @@ public final class NativeRadar {
             int sampleCount,
             int calibrationProfile,
             int trackingProfile,
-            long ageMs);
+            long ageMs,
+            double txPowerDbm);
 
     /**
      * Additive distance-derived proximity classification. Unlike
-     * {@link #trackingProximity(double, double, double, int, int, int, long)},
+     * {@link #trackingProximity(double, double, double, int, int, int, long, double)},
      * this uses the calibrated distance estimate while the legacy RSSI-based
      * method remains available for compatibility.
      * Invalid or unrepresentable distance falls back to {@link #PROXIMITY_FAR}.
@@ -232,7 +245,8 @@ public final class NativeRadar {
             int sampleCount,
             int calibrationProfile,
             int trackingProfile,
-            long ageMs);
+            long ageMs,
+            double txPowerDbm);
 
     /** Canonical Rust-owned tracking snapshot field: deterministic 0-100 confidence, or {@code -1}. */
     public static native int trackingConfidencePercent(
@@ -242,7 +256,8 @@ public final class NativeRadar {
             int sampleCount,
             int calibrationProfile,
             int trackingProfile,
-            long ageMs);
+            long ageMs,
+            double txPowerDbm);
 
     /** Canonical Rust-owned tracking snapshot field: one of the {@code FRESHNESS_*} constants above. */
     public static native int trackingFreshness(
@@ -252,7 +267,8 @@ public final class NativeRadar {
             int sampleCount,
             int calibrationProfile,
             int trackingProfile,
-            long ageMs);
+            long ageMs,
+            double txPowerDbm);
 
     /** Build-time sanity check; should equal {@link #EXPECTED_ABI_VERSION}. */
     public static native int abiVersion();

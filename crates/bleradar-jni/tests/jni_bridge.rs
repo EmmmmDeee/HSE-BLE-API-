@@ -97,6 +97,7 @@ fn tracking_snapshot_exports_a_coherent_bundle() {
         calibration_profile_ordinal: 0,
         tracking_profile_ordinal: 1,
         age_ms: 250,
+        tx_power_dbm: f64::NAN,
     };
     let filtered = tracking_filtered_rssi_or_nan(input);
     let distance = tracking_distance_m_or_nan(input);
@@ -114,6 +115,34 @@ fn tracking_snapshot_exports_a_coherent_bundle() {
 }
 
 #[test]
+fn tracking_distance_prefers_plausible_device_tx_power_over_profile_calibration() {
+    let base = TrackingSnapshotJniInput {
+        previous_filtered_dbm: f64::NAN,
+        current_rssi_dbm: -70.0,
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        calibration_profile_ordinal: 0,
+        tracking_profile_ordinal: 0,
+        age_ms: 0,
+        tx_power_dbm: f64::NAN,
+    };
+    let without_tx_power = tracking_distance_m_or_nan(base);
+    let with_tx_power = tracking_distance_m_or_nan(TrackingSnapshotJniInput {
+        tx_power_dbm: -70.0,
+        ..base
+    });
+    assert!((with_tx_power - 1.0).abs() < 1e-9);
+    assert!(with_tx_power < without_tx_power);
+    // Android's `ScanResult.TX_POWER_NOT_PRESENT` sentinel must fall back to
+    // the profile calibration, not corrupt the estimate.
+    let not_present = tracking_distance_m_or_nan(TrackingSnapshotJniInput {
+        tx_power_dbm: 127.0,
+        ..base
+    });
+    assert_eq!(not_present, without_tx_power);
+}
+
+#[test]
 fn distance_proximity_ordinal_uses_calibrated_boundaries() {
     let input = |distance_m: f64| TrackingSnapshotJniInput {
         previous_filtered_dbm: f64::NAN,
@@ -123,6 +152,7 @@ fn distance_proximity_ordinal_uses_calibrated_boundaries() {
         calibration_profile_ordinal: 0,
         tracking_profile_ordinal: 0,
         age_ms: 0,
+        tx_power_dbm: f64::NAN,
     };
     assert_eq!(tracking_distance_proximity_ordinal(input(0.999)), 0);
     assert_eq!(tracking_distance_proximity_ordinal(input(1.001)), 1);
@@ -143,6 +173,7 @@ fn tracking_snapshot_uses_invalid_sentinels() {
         calibration_profile_ordinal: 0,
         tracking_profile_ordinal: 99,
         age_ms: 0,
+        tx_power_dbm: f64::NAN,
     };
     let invalid_count = TrackingSnapshotJniInput {
         sample_count: -1,
@@ -167,6 +198,7 @@ fn tracking_snapshot_survives_invalid_spread() {
         calibration_profile_ordinal: 0,
         tracking_profile_ordinal: 0,
         age_ms: 1_000,
+        tx_power_dbm: f64::NAN,
     };
     let filtered = tracking_filtered_rssi_or_nan(input);
     assert!(

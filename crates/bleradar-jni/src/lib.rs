@@ -187,6 +187,8 @@ pub struct TrackingSnapshotJniInput {
     pub tracking_profile_ordinal: i32,
     /// Observation age relative to "now".
     pub age_ms: i64,
+    /// Device-advertised/calibrated TX power in dBm, or NaN when absent.
+    pub tx_power_dbm: f64,
 }
 
 fn tracking_snapshot_from_input(input: TrackingSnapshotJniInput) -> Option<TrackingSnapshot> {
@@ -194,6 +196,7 @@ fn tracking_snapshot_from_input(input: TrackingSnapshotJniInput) -> Option<Track
     let age_ms = u64::try_from(input.age_ms).ok()?;
     let calibration_profile = calibration_profile_from_ordinal(input.calibration_profile_ordinal)?;
     let tracking_profile = tracking_profile_from_ordinal(input.tracking_profile_ordinal)?;
+    let tx_power_dbm = input.tx_power_dbm.is_finite().then_some(input.tx_power_dbm);
     tracking_snapshot(TrackingSnapshotInput {
         previous_filtered_rssi_dbm: input.previous_filtered_dbm,
         current_rssi_dbm: input.current_rssi_dbm,
@@ -202,6 +205,7 @@ fn tracking_snapshot_from_input(input: TrackingSnapshotJniInput) -> Option<Track
         calibration_profile,
         tracking_profile,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -441,6 +445,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFilteredRssi(
     calibration_profile_ordinal: i32,
     tracking_profile_ordinal: i32,
     age_ms: i64,
+    tx_power_dbm: f64,
 ) -> f64 {
     tracking_filtered_rssi_or_nan(TrackingSnapshotJniInput {
         previous_filtered_dbm,
@@ -450,6 +455,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFilteredRssi(
         calibration_profile_ordinal,
         tracking_profile_ordinal,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -465,6 +471,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceM(
     calibration_profile_ordinal: i32,
     tracking_profile_ordinal: i32,
     age_ms: i64,
+    tx_power_dbm: f64,
 ) -> f64 {
     tracking_distance_m_or_nan(TrackingSnapshotJniInput {
         previous_filtered_dbm,
@@ -474,6 +481,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceM(
         calibration_profile_ordinal,
         tracking_profile_ordinal,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -489,6 +497,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceLowerBo
     calibration_profile_ordinal: i32,
     tracking_profile_ordinal: i32,
     age_ms: i64,
+    tx_power_dbm: f64,
 ) -> f64 {
     tracking_distance_lower_bound_m_or_nan(TrackingSnapshotJniInput {
         previous_filtered_dbm,
@@ -498,6 +507,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceLowerBo
         calibration_profile_ordinal,
         tracking_profile_ordinal,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -513,6 +523,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceUpperBo
     calibration_profile_ordinal: i32,
     tracking_profile_ordinal: i32,
     age_ms: i64,
+    tx_power_dbm: f64,
 ) -> f64 {
     tracking_distance_upper_bound_m_or_nan(TrackingSnapshotJniInput {
         previous_filtered_dbm,
@@ -522,6 +533,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceUpperBo
         calibration_profile_ordinal,
         tracking_profile_ordinal,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -537,6 +549,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingTrend(
     calibration_profile_ordinal: i32,
     tracking_profile_ordinal: i32,
     age_ms: i64,
+    tx_power_dbm: f64,
 ) -> i32 {
     tracking_trend_ordinal(TrackingSnapshotJniInput {
         previous_filtered_dbm,
@@ -546,6 +559,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingTrend(
         calibration_profile_ordinal,
         tracking_profile_ordinal,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -561,6 +575,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingProximity(
     calibration_profile_ordinal: i32,
     tracking_profile_ordinal: i32,
     age_ms: i64,
+    tx_power_dbm: f64,
 ) -> i32 {
     tracking_proximity_ordinal(TrackingSnapshotJniInput {
         previous_filtered_dbm,
@@ -570,6 +585,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingProximity(
         calibration_profile_ordinal,
         tracking_profile_ordinal,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -586,6 +602,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceProximi
     calibration_profile_ordinal: i32,
     tracking_profile_ordinal: i32,
     age_ms: i64,
+    tx_power_dbm: f64,
 ) -> i32 {
     tracking_distance_proximity_ordinal(TrackingSnapshotJniInput {
         previous_filtered_dbm,
@@ -595,6 +612,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceProximi
         calibration_profile_ordinal,
         tracking_profile_ordinal,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -610,6 +628,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingConfidencePerce
     calibration_profile_ordinal: i32,
     tracking_profile_ordinal: i32,
     age_ms: i64,
+    tx_power_dbm: f64,
 ) -> i32 {
     tracking_confidence_percent_or_negative(TrackingSnapshotJniInput {
         previous_filtered_dbm,
@@ -619,6 +638,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingConfidencePerce
         calibration_profile_ordinal,
         tracking_profile_ordinal,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -634,6 +654,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFreshness(
     calibration_profile_ordinal: i32,
     tracking_profile_ordinal: i32,
     age_ms: i64,
+    tx_power_dbm: f64,
 ) -> i32 {
     tracking_freshness_ordinal(TrackingSnapshotJniInput {
         previous_filtered_dbm,
@@ -643,6 +664,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFreshness(
         calibration_profile_ordinal,
         tracking_profile_ordinal,
         age_ms,
+        tx_power_dbm,
     })
 }
 
@@ -654,5 +676,5 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    6
+    7
 }
