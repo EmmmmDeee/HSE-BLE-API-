@@ -128,6 +128,15 @@ fn filtered_rssi_bootstraps_and_then_applies_ema() {
 }
 
 #[test]
+fn ema_rejects_invalid_samples_without_mutating_state() {
+    let mut ema = RssiEma::new(0.5).unwrap();
+    assert_eq!(ema.push(-80.0), Ok(-80.0));
+    assert_eq!(ema.push(f64::NAN), Err(bleradar_core::FilterError::NonFiniteSample));
+    assert_eq!(ema.value(), Some(-80.0));
+    assert_eq!(filtered_rssi(-80.0, f64::INFINITY, 0.5), None);
+}
+
+#[test]
 fn distance_range_expands_around_the_estimate() {
     let (near, far) = ble_distance_range_m(-59.0, 6.0, -59.0, 2.0).unwrap();
     assert!(near < 1.0);

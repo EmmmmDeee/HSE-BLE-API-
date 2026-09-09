@@ -95,9 +95,9 @@ public final class NativeRadar {
     }
 
     /**
-     * Stateless EMA helper returning the next filtered RSSI, or {@link Double#NaN} when
-     * the current sample or alpha is invalid. Pass {@link Double#NaN} as the previous
-     * filtered value to bootstrap from the current sample.
+     * Stateless EMA helper returning the next finite filtered RSSI, or {@link Double#NaN}
+     * when the current sample, alpha, or computed result is invalid. Pass
+     * {@link Double#NaN} as the previous filtered value to bootstrap from the current sample.
      */
     public static native double filteredRssi(double previousFilteredDbm, double currentRssiDbm, double alpha);
 
@@ -156,7 +156,8 @@ public final class NativeRadar {
 
     /**
      * Canonical Rust-owned tracking snapshot field: filtered RSSI after ingesting the latest sample,
-     * or {@link Double#NaN} when the snapshot inputs are invalid.
+     * or {@link Double#NaN} when the filtered signal or profile inputs are invalid. Invalid spread
+     * only removes the range bounds and confidence; it does not erase a valid filtered signal.
      */
     public static native double trackingFilteredRssi(
             double previousFilteredDbm,

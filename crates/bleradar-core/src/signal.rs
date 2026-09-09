@@ -7,6 +7,8 @@ pub enum FilterError {
     InvalidAlpha,
     /// RSSI sample was NaN or infinite.
     NonFiniteSample,
+    /// The filtered result was NaN or infinite.
+    NonFiniteResult,
 }
 
 impl std::fmt::Display for FilterError {
@@ -14,6 +16,7 @@ impl std::fmt::Display for FilterError {
         f.write_str(match self {
             Self::InvalidAlpha => "EMA alpha must be within (0, 1]",
             Self::NonFiniteSample => "RSSI sample was NaN or infinite",
+            Self::NonFiniteResult => "EMA result was NaN or infinite",
         })
     }
 }
@@ -60,6 +63,9 @@ impl RssiEma {
             Some(old) => self.alpha.mul_add(rssi_dbm, (1.0 - self.alpha) * old),
             None => rssi_dbm,
         };
+        if !next.is_finite() {
+            return Err(FilterError::NonFiniteResult);
+        }
         self.value = Some(next);
         Ok(next)
     }
