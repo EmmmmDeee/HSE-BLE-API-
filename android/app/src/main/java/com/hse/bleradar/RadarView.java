@@ -403,6 +403,9 @@ public final class RadarView extends View {
     }
 
     private static float clamp(float value, float lower, float upper) {
+        if (lower > upper) {
+            return (lower + upper) / 2f;
+        }
         return Math.max(lower, Math.min(upper, value));
     }
 
