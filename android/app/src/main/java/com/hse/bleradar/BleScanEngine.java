@@ -30,17 +30,12 @@ final class BleScanEngine {
 
     private static final String TAG = "BleScanEngine";
 
-    /** Deadband used for the strengthening/weakening trend classification. */
-    private static final double TREND_DEADBAND_DB = 3.0;
-    /** RSSI EMA alpha applied by the Rust core via {@link NativeRadar#trackingFilteredRssi(double, double, double, double, double, int, int, long, long, long)}. */
-    private static final double RSSI_SMOOTHING_ALPHA = 0.35;
-    /** Observations within this window are considered live. */
-    private static final long LIVE_FRESHNESS_WINDOW_MILLIS = 5_000L;
     /** Long-idle devices are pruned to keep the simple UI focused on live signals. */
     private static final long STALE_RETENTION_WINDOW_MILLIS = 30_000L;
     private final Context appContext;
     private final Map<String, Blip> blipsByAddress = new ConcurrentHashMap<>();
     private final int calibrationProfile;
+    private final int trackingProfile;
     private BluetoothLeScanner scanner;
     private volatile boolean scanning;
 
@@ -69,6 +64,9 @@ final class BleScanEngine {
         this.calibrationProfile = NativeRadar.isAvailable()
                 ? NativeRadar.defaultCalibrationProfile()
                 : NativeRadar.CALIBRATION_BASELINE;
+        this.trackingProfile = NativeRadar.isAvailable()
+                ? NativeRadar.defaultTrackingProfile()
+                : NativeRadar.TRACKING_STANDARD;
     }
 
     static boolean hasRequiredPermissions(Context context) {
@@ -185,14 +183,11 @@ final class BleScanEngine {
             double smoothed = NativeRadar.trackingFilteredRssi(
                     previous,
                     rawRssi,
-                    RSSI_SMOOTHING_ALPHA,
-                    TREND_DEADBAND_DB,
                     0.0,
                     Math.max(1, blip.sampleCount()),
                     calibrationProfile,
-                    0L,
-                    LIVE_FRESHNESS_WINDOW_MILLIS,
-                    STALE_RETENTION_WINDOW_MILLIS);
+                    trackingProfile,
+                    0L);
             if (!Double.isFinite(smoothed)) {
                 smoothed = rawRssi;
             }
@@ -203,81 +198,60 @@ final class BleScanEngine {
             blip.trend = NativeRadar.trackingTrend(
                     previous,
                     rawRssi,
-                    RSSI_SMOOTHING_ALPHA,
-                    TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
                     calibrationProfile,
-                    0L,
-                    LIVE_FRESHNESS_WINDOW_MILLIS,
-                    STALE_RETENTION_WINDOW_MILLIS);
+                    trackingProfile,
+                    0L);
             blip.distanceMetres = NativeRadar.trackingDistanceM(
                     previous,
                     rawRssi,
-                    RSSI_SMOOTHING_ALPHA,
-                    TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
                     calibrationProfile,
-                    0L,
-                    LIVE_FRESHNESS_WINDOW_MILLIS,
-                    STALE_RETENTION_WINDOW_MILLIS);
+                    trackingProfile,
+                    0L);
             blip.distanceLowerBoundMetres = NativeRadar.trackingDistanceLowerBoundM(
                     previous,
                     rawRssi,
-                    RSSI_SMOOTHING_ALPHA,
-                    TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
                     calibrationProfile,
-                    0L,
-                    LIVE_FRESHNESS_WINDOW_MILLIS,
-                    STALE_RETENTION_WINDOW_MILLIS);
+                    trackingProfile,
+                    0L);
             blip.distanceUpperBoundMetres = NativeRadar.trackingDistanceUpperBoundM(
                     previous,
                     rawRssi,
-                    RSSI_SMOOTHING_ALPHA,
-                    TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
                     calibrationProfile,
-                    0L,
-                    LIVE_FRESHNESS_WINDOW_MILLIS,
-                    STALE_RETENTION_WINDOW_MILLIS);
+                    trackingProfile,
+                    0L);
             blip.proximity = NativeRadar.trackingProximity(
                     previous,
                     rawRssi,
-                    RSSI_SMOOTHING_ALPHA,
-                    TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
                     calibrationProfile,
-                    0L,
-                    LIVE_FRESHNESS_WINDOW_MILLIS,
-                    STALE_RETENTION_WINDOW_MILLIS);
+                    trackingProfile,
+                    0L);
             int confidencePercent = NativeRadar.trackingConfidencePercent(
                     previous,
                     rawRssi,
-                    RSSI_SMOOTHING_ALPHA,
-                    TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
                     calibrationProfile,
-                    0L,
-                    LIVE_FRESHNESS_WINDOW_MILLIS,
-                    STALE_RETENTION_WINDOW_MILLIS);
+                    trackingProfile,
+                    0L);
             blip.confidencePercent = Math.max(0, confidencePercent);
             blip.freshness = NativeRadar.trackingFreshness(
                     previous,
                     rawRssi,
-                    RSSI_SMOOTHING_ALPHA,
-                    TREND_DEADBAND_DB,
                     spreadDb,
                     sampleCount,
                     calibrationProfile,
-                    0L,
-                    LIVE_FRESHNESS_WINDOW_MILLIS,
-                    STALE_RETENTION_WINDOW_MILLIS);
+                    trackingProfile,
+                    0L);
         } else {
             blip.lastRssiDbm = rawRssi;
             blip.distanceMetres = Double.NaN;
@@ -316,14 +290,11 @@ final class BleScanEngine {
             blip.freshness = NativeRadar.trackingFreshness(
                     blip.lastRssiDbm,
                     blip.lastRssiDbm,
-                    1.0,
-                    TREND_DEADBAND_DB,
                     blip.recentRssiSpreadDb(),
                     Math.max(1, blip.sampleCount()),
                     calibrationProfile,
-                    ageMs,
-                    LIVE_FRESHNESS_WINDOW_MILLIS,
-                    STALE_RETENTION_WINDOW_MILLIS);
+                    trackingProfile,
+                    ageMs);
         }
     }
 
@@ -336,14 +307,11 @@ final class BleScanEngine {
                         || NativeRadar.trackingFreshness(
                         blip.lastRssiDbm,
                         blip.lastRssiDbm,
-                        1.0,
-                        TREND_DEADBAND_DB,
                         blip.recentRssiSpreadDb(),
                         Math.max(1, blip.sampleCount()),
                         calibrationProfile,
-                        ageMs,
-                        LIVE_FRESHNESS_WINDOW_MILLIS,
-                        STALE_RETENTION_WINDOW_MILLIS) == NativeRadar.FRESHNESS_STALE;
+                        trackingProfile,
+                        ageMs) == NativeRadar.FRESHNESS_STALE;
             }
             return ageMs > STALE_RETENTION_WINDOW_MILLIS;
         });

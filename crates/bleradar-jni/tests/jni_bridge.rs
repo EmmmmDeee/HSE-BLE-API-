@@ -4,8 +4,9 @@
 use bleradar_jni::{
     TrackingSnapshotJniInput, ble_distance_m_or_nan, calibration_profile_path_loss_exponent_or_nan,
     calibration_profile_rssi_at_1m_dbm_or_nan, default_calibration_profile_ordinal,
-    distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan, filtered_rssi_or_nan,
-    proximity_label_ordinal, signal_confidence_percent_or_negative, signal_trend_ordinal,
+    default_tracking_profile_ordinal, distance_lower_bound_m_or_nan,
+    distance_upper_bound_m_or_nan, filtered_rssi_or_nan, proximity_label_ordinal,
+    signal_confidence_percent_or_negative, signal_trend_ordinal,
     tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
     tracking_distance_m_or_nan, tracking_distance_upper_bound_m_or_nan,
     tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
@@ -78,6 +79,7 @@ fn confidence_percent_uses_negative_one_as_invalid_sentinel() {
 #[test]
 fn calibration_profiles_expose_rust_owned_defaults() {
     assert_eq!(default_calibration_profile_ordinal(), 0);
+    assert_eq!(default_tracking_profile_ordinal(), 0);
     assert_eq!(calibration_profile_rssi_at_1m_dbm_or_nan(0), -59.0);
     assert_eq!(calibration_profile_path_loss_exponent_or_nan(0), 2.0);
     assert!(calibration_profile_path_loss_exponent_or_nan(1) > 2.0);
@@ -90,14 +92,11 @@ fn tracking_snapshot_exports_a_coherent_bundle() {
     let input = TrackingSnapshotJniInput {
         previous_filtered_dbm: -80.0,
         current_rssi_dbm: -60.0,
-        alpha: 0.5,
-        trend_deadband_db: 3.0,
         rssi_spread_db: 4.0,
         sample_count: 6,
         calibration_profile_ordinal: 0,
+        tracking_profile_ordinal: 0,
         age_ms: 250,
-        live_window_ms: 1_000,
-        recent_window_ms: 30_000,
     };
     let filtered = tracking_filtered_rssi_or_nan(input);
     let distance = tracking_distance_m_or_nan(input);
@@ -118,18 +117,14 @@ fn tracking_snapshot_uses_invalid_sentinels() {
     let invalid_alpha = TrackingSnapshotJniInput {
         previous_filtered_dbm: f64::NAN,
         current_rssi_dbm: -70.0,
-        alpha: 0.0,
-        trend_deadband_db: 3.0,
         rssi_spread_db: 0.0,
         sample_count: 1,
         calibration_profile_ordinal: 0,
+        tracking_profile_ordinal: 0,
         age_ms: 0,
-        live_window_ms: 1_000,
-        recent_window_ms: 30_000,
     };
     let invalid_count = TrackingSnapshotJniInput {
         sample_count: -1,
-        alpha: 0.35,
         ..invalid_alpha
     };
     assert!(tracking_filtered_rssi_or_nan(invalid_alpha).is_nan());

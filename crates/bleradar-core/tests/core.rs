@@ -3,10 +3,11 @@
 use bleradar_core::{
     AddressKind, CalibrationProfile, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind,
     FreshnessClass, GeoError, IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice,
-    SignalTrend, TrackError, TrackingSnapshotInput, bearing_deg, ble_distance_m,
+    SignalTrend, TrackError, TrackingProfile, TrackingSnapshotInput, bearing_deg, ble_distance_m,
     ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal, canonical_mac,
     filtered_rssi, haversine_m, is_locally_administered, signal_confidence_percent, signal_trend,
-    tracking_snapshot, wifi_channel_to_frequency, wifi_frequency_to_channel,
+    tracking_profile, tracking_profile_from_ordinal, tracking_snapshot, wifi_channel_to_frequency,
+    wifi_frequency_to_channel,
 };
 
 /// Builds a `DeviceObservation` from its varying fields; `tx_power_dbm` is
@@ -177,21 +178,38 @@ fn calibration_profiles_are_stable_and_distinct() {
 }
 
 #[test]
+fn tracking_profiles_are_stable_and_distinct() {
+    assert_eq!(
+        tracking_profile_from_ordinal(0),
+        Some(TrackingProfile::Standard)
+    );
+    assert_eq!(
+        tracking_profile_from_ordinal(1),
+        Some(TrackingProfile::Responsive)
+    );
+    assert_eq!(tracking_profile_from_ordinal(99), None);
+
+    let standard = tracking_profile(TrackingProfile::Standard);
+    let responsive = tracking_profile(TrackingProfile::Responsive);
+    assert_eq!(standard.rssi_alpha, 0.35);
+    assert_eq!(standard.trend_deadband_db, 3.0);
+    assert!(responsive.rssi_alpha > standard.rssi_alpha);
+    assert!(responsive.trend_deadband_db < standard.trend_deadband_db);
+}
+
+#[test]
 fn tracking_snapshot_derives_a_coherent_bundle() {
     let snapshot = tracking_snapshot(TrackingSnapshotInput {
         previous_filtered_rssi_dbm: -80.0,
         current_rssi_dbm: -60.0,
-        rssi_alpha: 0.5,
-        trend_deadband_db: 3.0,
         rssi_spread_db: 4.0,
         sample_count: 6,
         calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Responsive,
         age_ms: 1_000,
-        live_window_ms: 2_000,
-        recent_window_ms: 10_000,
     })
     .unwrap();
-    assert!((snapshot.filtered_rssi_dbm - (-70.0)).abs() < 1e-9);
+    assert!((snapshot.filtered_rssi_dbm - (-69.0)).abs() < 1e-9);
     assert_eq!(snapshot.trend, SignalTrend::Stronger);
     assert_eq!(snapshot.proximity, ProximityBand::Mid);
     assert!(snapshot.distance_m.unwrap() > 1.0);
@@ -206,14 +224,11 @@ fn tracking_snapshot_bootstraps_and_classifies_stale_observations() {
     let snapshot = tracking_snapshot(TrackingSnapshotInput {
         previous_filtered_rssi_dbm: f64::NAN,
         current_rssi_dbm: -59.0,
-        rssi_alpha: 0.35,
-        trend_deadband_db: 3.0,
         rssi_spread_db: 0.0,
         sample_count: 1,
         calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Standard,
         age_ms: 31_000,
-        live_window_ms: 2_000,
-        recent_window_ms: 30_000,
     })
     .unwrap();
     assert_eq!(snapshot.filtered_rssi_dbm, -59.0);

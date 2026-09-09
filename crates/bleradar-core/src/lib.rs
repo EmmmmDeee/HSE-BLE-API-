@@ -87,7 +87,8 @@ pub use signal::{
 };
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass, MapPoint,
-    SelectedDevice, SpatialEstimate, TrackError, TrackingSnapshot, TrackingSnapshotInput,
+    SelectedDevice, SpatialEstimate, TrackError, TrackingPolicy, TrackingProfile,
+    TrackingSnapshot, TrackingSnapshotInput, tracking_profile, tracking_profile_from_ordinal,
     tracking_snapshot,
 };
 pub use verification::{
