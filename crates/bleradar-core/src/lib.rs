@@ -87,9 +87,8 @@ pub use signal::{
 };
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass, MapPoint,
-    SelectedDevice, SpatialEstimate, TrackError, TrackingPolicy, TrackingProfile,
-    TrackingSnapshot, TrackingSnapshotInput, tracking_profile, tracking_profile_from_ordinal,
-    tracking_snapshot,
+    SelectedDevice, SpatialEstimate, TrackError, TrackingPolicy, TrackingProfile, TrackingSnapshot,
+    TrackingSnapshotInput, tracking_profile, tracking_profile_from_ordinal, tracking_snapshot,
 };
 pub use verification::{
     DifferentialCase, DifferentialReport, DifferentialViolation, ExecutionOutcome, FailureCause,

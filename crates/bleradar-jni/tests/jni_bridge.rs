@@ -4,13 +4,12 @@
 use bleradar_jni::{
     TrackingSnapshotJniInput, ble_distance_m_or_nan, calibration_profile_path_loss_exponent_or_nan,
     calibration_profile_rssi_at_1m_dbm_or_nan, default_calibration_profile_ordinal,
-    default_tracking_profile_ordinal, distance_lower_bound_m_or_nan,
-    distance_upper_bound_m_or_nan, filtered_rssi_or_nan, proximity_label_ordinal,
-    signal_confidence_percent_or_negative, signal_trend_ordinal,
-    tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
-    tracking_distance_m_or_nan, tracking_distance_upper_bound_m_or_nan,
-    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
-    tracking_trend_ordinal,
+    default_tracking_profile_ordinal, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
+    filtered_rssi_or_nan, proximity_label_ordinal, signal_confidence_percent_or_negative,
+    signal_trend_ordinal, tracking_confidence_percent_or_negative,
+    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
+    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
+    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
 };
 
 #[test]
