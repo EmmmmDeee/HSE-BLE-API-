@@ -14,13 +14,8 @@ const SPATIAL_RECENCY_HALF_LIFE_MS: f64 = 30_000.0;
 
 /// Confidence tiers for GPS-backed map positions, ordered from most precise
 /// to least precise. Accuracy above the final threshold uses the fallback tier.
-const ACCURACY_CONFIDENCE_TIERS: &[(f64, u8)] = &[
-    (3.0, 95),
-    (5.0, 90),
-    (10.0, 80),
-    (20.0, 65),
-    (50.0, 45),
-];
+const ACCURACY_CONFIDENCE_TIERS: &[(f64, u8)] =
+    &[(3.0, 95), (5.0, 90), (10.0, 80), (20.0, 65), (50.0, 45)];
 const LOW_ACCURACY_CONFIDENCE: u8 = 25;
 
 /// Deadband, in dB, below which a filtered-RSSI change is treated as stable.
