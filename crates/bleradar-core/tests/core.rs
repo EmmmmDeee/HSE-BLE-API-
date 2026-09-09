@@ -2,9 +2,10 @@
 
 use bleradar_core::{
     AddressKind, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, GeoError,
-    IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice, SignalTrend, TrackError,
-    bearing_deg, ble_distance_m, ble_distance_range_m, canonical_mac, filtered_rssi, haversine_m,
-    is_locally_administered, signal_confidence_percent, signal_trend, wifi_channel_to_frequency,
+    FreshnessClass, IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice,
+    SignalTrend, TrackError, TrackingSnapshotInput, bearing_deg, ble_distance_m,
+    ble_distance_range_m, canonical_mac, filtered_rssi, haversine_m, is_locally_administered,
+    signal_confidence_percent, signal_trend, tracking_snapshot, wifi_channel_to_frequency,
     wifi_frequency_to_channel,
 };
 
@@ -148,6 +149,53 @@ fn signal_confidence_rewards_stability_and_sample_support() {
 fn signal_confidence_rejects_invalid_spread() {
     assert!(signal_confidence_percent(1, -1.0).is_none());
     assert!(signal_confidence_percent(1, f64::INFINITY).is_none());
+}
+
+#[test]
+fn tracking_snapshot_derives_a_coherent_bundle() {
+    let snapshot = tracking_snapshot(TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: -80.0,
+        current_rssi_dbm: -60.0,
+        rssi_alpha: 0.5,
+        trend_deadband_db: 3.0,
+        rssi_spread_db: 4.0,
+        sample_count: 6,
+        rssi_at_1m_dbm: -59.0,
+        path_loss_exponent: 2.0,
+        age_ms: 1_000,
+        live_window_ms: 2_000,
+        recent_window_ms: 10_000,
+    })
+    .unwrap();
+    assert!((snapshot.filtered_rssi_dbm - (-70.0)).abs() < 1e-9);
+    assert_eq!(snapshot.trend, SignalTrend::Stronger);
+    assert_eq!(snapshot.proximity, ProximityBand::Mid);
+    assert!(snapshot.distance_m.unwrap() > 1.0);
+    assert!(snapshot.distance_lower_bound_m.unwrap() < snapshot.distance_m.unwrap());
+    assert!(snapshot.distance_upper_bound_m.unwrap() > snapshot.distance_m.unwrap());
+    assert!(snapshot.confidence_percent > 0);
+    assert_eq!(snapshot.freshness, FreshnessClass::Live);
+}
+
+#[test]
+fn tracking_snapshot_bootstraps_and_classifies_stale_observations() {
+    let snapshot = tracking_snapshot(TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: f64::NAN,
+        current_rssi_dbm: -59.0,
+        rssi_alpha: 0.35,
+        trend_deadband_db: 3.0,
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        rssi_at_1m_dbm: -59.0,
+        path_loss_exponent: 2.0,
+        age_ms: 31_000,
+        live_window_ms: 2_000,
+        recent_window_ms: 30_000,
+    })
+    .unwrap();
+    assert_eq!(snapshot.filtered_rssi_dbm, -59.0);
+    assert_eq!(snapshot.trend, SignalTrend::Stable);
+    assert_eq!(snapshot.freshness, FreshnessClass::Stale);
 }
 
 #[test]

@@ -19,6 +19,7 @@ final class Blip {
     volatile double distanceUpperBoundMetres = Double.NaN;
     volatile int proximity = NativeRadar.PROXIMITY_FAR;
     volatile int trend = NativeRadar.TREND_STABLE;
+    volatile int freshness = NativeRadar.FRESHNESS_STALE;
     volatile int confidencePercent;
     volatile long lastSeenUptimeMillis;
     final float angleDegrees;

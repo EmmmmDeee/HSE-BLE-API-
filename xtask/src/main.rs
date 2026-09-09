@@ -728,6 +728,14 @@ const REQUIRED_JNI_EXPORTS: &[&str] = &[
     "Java_com_hse_bleradar_NativeRadar_proximityLabel",
     "Java_com_hse_bleradar_NativeRadar_signalConfidencePercent",
     "Java_com_hse_bleradar_NativeRadar_signalTrend",
+    "Java_com_hse_bleradar_NativeRadar_trackingConfidencePercent",
+    "Java_com_hse_bleradar_NativeRadar_trackingDistanceLowerBoundM",
+    "Java_com_hse_bleradar_NativeRadar_trackingDistanceM",
+    "Java_com_hse_bleradar_NativeRadar_trackingDistanceUpperBoundM",
+    "Java_com_hse_bleradar_NativeRadar_trackingFilteredRssi",
+    "Java_com_hse_bleradar_NativeRadar_trackingFreshness",
+    "Java_com_hse_bleradar_NativeRadar_trackingProximity",
+    "Java_com_hse_bleradar_NativeRadar_trackingTrend",
 ];
 
 /// Rust standard-library target `cargo xtask build-apk` cross-compiles the JNI
@@ -918,9 +926,39 @@ public final class JniSmoke {{
         require(
                 NativeRadar.signalConfidencePercent(8, 1.5) >= 70,
                 "unexpected confidence score");
+        double tracked = NativeRadar.trackingFilteredRssi(
+                -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L);
+        require(Math.abs(tracked - (-70.0)) < 1e-9, "unexpected tracked RSSI: " + tracked);
+        double trackedDistance = NativeRadar.trackingDistanceM(
+                -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L);
+        require(trackedDistance > 1.0, "unexpected tracked distance: " + trackedDistance);
+        require(
+                NativeRadar.trackingTrend(
+                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L)
+                        == NativeRadar.TREND_STRONGER,
+                "unexpected tracked trend");
+        require(
+                NativeRadar.trackingProximity(
+                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L)
+                        == NativeRadar.PROXIMITY_MID,
+                "unexpected tracked proximity");
+        require(
+                NativeRadar.trackingConfidencePercent(
+                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L)
+                        >= 50,
+                "unexpected tracked confidence");
+        require(
+                NativeRadar.trackingFreshness(
+                        -80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250L, 1_000L, 30_000L)
+                        == NativeRadar.FRESHNESS_LIVE,
+                "unexpected tracked freshness");
         require(
                 Double.isNaN(NativeRadar.bleDistanceM(-70.0, -59.0, 0.0)),
                 "invalid input did not yield NaN sentinel");
+        require(
+                Double.isNaN(NativeRadar.trackingDistanceM(
+                        Double.NaN, -70.0, 0.0, 3.0, 0.0, -1, -59.0, 2.0, 0L, 1_000L, 30_000L)),
+                "invalid tracking input did not yield NaN sentinel");
     }}
 
     private static void verifyFailurePath() {{

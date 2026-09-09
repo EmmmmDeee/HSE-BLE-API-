@@ -4,7 +4,10 @@
 use bleradar_jni::{
     ble_distance_m_or_nan, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
     filtered_rssi_or_nan, proximity_label_ordinal, signal_confidence_percent_or_negative,
-    signal_trend_ordinal,
+    signal_trend_ordinal, tracking_confidence_percent_or_negative,
+    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
+    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
+    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
 };
 
 #[test]
@@ -68,4 +71,28 @@ fn confidence_percent_uses_negative_one_as_invalid_sentinel() {
     assert_eq!(signal_confidence_percent_or_negative(-1, 2.0), -1);
     assert_eq!(signal_confidence_percent_or_negative(8, f64::NAN), -1);
     assert!(signal_confidence_percent_or_negative(8, 1.0) > 0);
+}
+
+#[test]
+fn tracking_snapshot_exports_a_coherent_bundle() {
+    let filtered = tracking_filtered_rssi_or_nan(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000);
+    let distance = tracking_distance_m_or_nan(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000);
+    let lower = tracking_distance_lower_bound_m_or_nan(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000);
+    let upper = tracking_distance_upper_bound_m_or_nan(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000);
+    assert!((filtered - (-70.0)).abs() < 1e-9);
+    assert!(distance.is_finite());
+    assert!(lower < distance);
+    assert!(upper > distance);
+    assert_eq!(tracking_trend_ordinal(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000), 0);
+    assert_eq!(tracking_proximity_ordinal(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000), 2);
+    assert!(tracking_confidence_percent_or_negative(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000) > 0);
+    assert_eq!(tracking_freshness_ordinal(-80.0, -60.0, 0.5, 3.0, 4.0, 6, -59.0, 2.0, 250, 1_000, 30_000), 0);
+}
+
+#[test]
+fn tracking_snapshot_uses_invalid_sentinels() {
+    assert!(tracking_filtered_rssi_or_nan(f64::NAN, -70.0, 0.0, 3.0, 0.0, 1, -59.0, 2.0, 0, 1_000, 30_000).is_nan());
+    assert!(tracking_distance_m_or_nan(f64::NAN, -70.0, 0.35, 3.0, 0.0, -1, -59.0, 2.0, 0, 1_000, 30_000).is_nan());
+    assert_eq!(tracking_confidence_percent_or_negative(f64::NAN, -70.0, 0.35, 3.0, 0.0, -1, -59.0, 2.0, 0, 1_000, 30_000), -1);
+    assert_eq!(tracking_freshness_ordinal(f64::NAN, -70.0, 0.35, 3.0, 0.0, -1, -59.0, 2.0, 0, 1_000, 30_000), 2);
 }

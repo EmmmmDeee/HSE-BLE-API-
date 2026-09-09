@@ -5,9 +5,10 @@ package com.hse.bleradar;
  * re-exports pure functions already implemented and tested in
  * {@code bleradar-core} ({@code filtered_rssi}, {@code ble_distance_m},
  * {@code ble_distance_range_m}, {@code proximity_label},
- * {@code signal_confidence_percent}, {@code signal_trend}). Keeping every
- * native declaration and ordinal mapping in one file makes the Java/Rust ABI
- * contract easy to audit against {@code crates/bleradar-jni/src/lib.rs}.
+ * {@code signal_confidence_percent}, {@code signal_trend},
+ * {@code tracking_snapshot}). Keeping every native declaration and ordinal
+ * mapping in one file makes the Java/Rust ABI contract easy to audit against
+ * {@code crates/bleradar-jni/src/lib.rs}.
  */
 public final class NativeRadar {
 
@@ -27,8 +28,15 @@ public final class NativeRadar {
     /** {@link #signalTrend(double, double, double)} result: change fell within the deadband. */
     public static final int TREND_STABLE = 2;
 
+    /** {@link #trackingFreshness(double, double, double, double, double, int, double, double, long, long, long)} result: currently live. */
+    public static final int FRESHNESS_LIVE = 0;
+    /** {@link #trackingFreshness(double, double, double, double, double, int, double, double, long, long, long)} result: recent but no longer live. */
+    public static final int FRESHNESS_RECENT = 1;
+    /** {@link #trackingFreshness(double, double, double, double, double, int, double, double, long, long, long)} result: stale. */
+    public static final int FRESHNESS_STALE = 2;
+
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 2;
+    public static final int EXPECTED_ABI_VERSION = 3;
 
     private static volatile boolean loaded;
     private static volatile Throwable loadError;
@@ -121,6 +129,121 @@ public final class NativeRadar {
      * or {@code -1} when the inputs are invalid.
      */
     public static native int signalConfidencePercent(int sampleCount, double rssiSpreadDb);
+
+    /**
+     * Canonical Rust-owned tracking snapshot field: filtered RSSI after ingesting the latest sample,
+     * or {@link Double#NaN} when the snapshot inputs are invalid.
+     */
+    public static native double trackingFilteredRssi(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double alpha,
+            double trendDeadbandDb,
+            double rssiSpreadDb,
+            int sampleCount,
+            double rssiAt1mDbm,
+            double pathLossExponent,
+            long ageMs,
+            long liveWindowMs,
+            long recentWindowMs);
+
+    /** Canonical Rust-owned tracking snapshot field: central distance estimate, or {@link Double#NaN}. */
+    public static native double trackingDistanceM(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double alpha,
+            double trendDeadbandDb,
+            double rssiSpreadDb,
+            int sampleCount,
+            double rssiAt1mDbm,
+            double pathLossExponent,
+            long ageMs,
+            long liveWindowMs,
+            long recentWindowMs);
+
+    /** Canonical Rust-owned tracking snapshot field: conservative near range bound, or {@link Double#NaN}. */
+    public static native double trackingDistanceLowerBoundM(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double alpha,
+            double trendDeadbandDb,
+            double rssiSpreadDb,
+            int sampleCount,
+            double rssiAt1mDbm,
+            double pathLossExponent,
+            long ageMs,
+            long liveWindowMs,
+            long recentWindowMs);
+
+    /** Canonical Rust-owned tracking snapshot field: conservative far range bound, or {@link Double#NaN}. */
+    public static native double trackingDistanceUpperBoundM(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double alpha,
+            double trendDeadbandDb,
+            double rssiSpreadDb,
+            int sampleCount,
+            double rssiAt1mDbm,
+            double pathLossExponent,
+            long ageMs,
+            long liveWindowMs,
+            long recentWindowMs);
+
+    /** Canonical Rust-owned tracking snapshot field: one of the {@code TREND_*} constants above. */
+    public static native int trackingTrend(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double alpha,
+            double trendDeadbandDb,
+            double rssiSpreadDb,
+            int sampleCount,
+            double rssiAt1mDbm,
+            double pathLossExponent,
+            long ageMs,
+            long liveWindowMs,
+            long recentWindowMs);
+
+    /** Canonical Rust-owned tracking snapshot field: one of the {@code PROXIMITY_*} constants above. */
+    public static native int trackingProximity(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double alpha,
+            double trendDeadbandDb,
+            double rssiSpreadDb,
+            int sampleCount,
+            double rssiAt1mDbm,
+            double pathLossExponent,
+            long ageMs,
+            long liveWindowMs,
+            long recentWindowMs);
+
+    /** Canonical Rust-owned tracking snapshot field: deterministic 0-100 confidence, or {@code -1}. */
+    public static native int trackingConfidencePercent(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double alpha,
+            double trendDeadbandDb,
+            double rssiSpreadDb,
+            int sampleCount,
+            double rssiAt1mDbm,
+            double pathLossExponent,
+            long ageMs,
+            long liveWindowMs,
+            long recentWindowMs);
+
+    /** Canonical Rust-owned tracking snapshot field: one of the {@code FRESHNESS_*} constants above. */
+    public static native int trackingFreshness(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double alpha,
+            double trendDeadbandDb,
+            double rssiSpreadDb,
+            int sampleCount,
+            double rssiAt1mDbm,
+            double pathLossExponent,
+            long ageMs,
+            long liveWindowMs,
+            long recentWindowMs);
 
     /** Build-time sanity check; should equal {@link #EXPECTED_ABI_VERSION}. */
     public static native int abiVersion();

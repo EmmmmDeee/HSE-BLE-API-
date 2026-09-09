@@ -85,8 +85,9 @@ pub use signal::{
     filtered_rssi, proximity_label, signal_confidence_percent, signal_trend,
 };
 pub use tracking::{
-    Confidence, DeviceObservation, DeviceTrack, EstimateKind, MapPoint, SelectedDevice,
-    SpatialEstimate, TrackError,
+    Confidence, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass, MapPoint,
+    SelectedDevice, SpatialEstimate, TrackError, TrackingSnapshot, TrackingSnapshotInput,
+    tracking_snapshot,
 };
 pub use verification::{
     DifferentialCase, DifferentialReport, DifferentialViolation, ExecutionOutcome, FailureCause,

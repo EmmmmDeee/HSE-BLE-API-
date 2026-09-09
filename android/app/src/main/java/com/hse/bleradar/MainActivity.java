@@ -297,6 +297,8 @@ public final class MainActivity extends android.app.Activity {
             String identityLine = name + "  ·  " + blip.address;
             String metricsLine = distance
                     + "   "
+                    + freshnessLabel(blip)
+                    + "   "
                     + confidenceLabel(blip)
                     + "   "
                     + trendLabel(blip.trend)
@@ -336,6 +338,17 @@ public final class MainActivity extends android.app.Activity {
 
         private String confidenceLabel(Blip blip) {
             return blip.confidencePercent > 0 ? blip.confidencePercent + "% conf" : "low conf";
+        }
+
+        private String freshnessLabel(Blip blip) {
+            switch (blip.freshness) {
+                case NativeRadar.FRESHNESS_LIVE:
+                    return "live";
+                case NativeRadar.FRESHNESS_RECENT:
+                    return "recent";
+                default:
+                    return "stale";
+            }
         }
 
         private String trendLabel(int trend) {
