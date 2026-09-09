@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Zero-dependency JNI bridge exposing bleradar-core's verified signal math to the Android radar app"
+# Never published to crates.io; keeps cargo-deny's licenses.private.ignore
+# covering the non-SPDX workspace `license = "Proprietary"` string (same as
+# bleradar-core / bleradar-compat). Live `cargo xtask deny` fails without this.
+publish = false
 
 [lib]
 # `cdylib` is loaded by the Android app via `System.loadLibrary`; `lib` keeps

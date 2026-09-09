@@ -191,8 +191,11 @@ pub struct TrackingSnapshot {
     pub distance_lower_bound_m: Option<f64>,
     /// Conservative upper distance bound in metres when representable.
     pub distance_upper_bound_m: Option<f64>,
-    /// Deterministic confidence score.
-    pub confidence_percent: u8,
+    /// Deterministic confidence score when the spread/support inputs are valid.
+    ///
+    /// Invalid spread must not erase an otherwise usable filtered-signal
+    /// snapshot; callers treat `None` as "confidence unavailable".
+    pub confidence_percent: Option<u8>,
     /// Recency class for ranking/pruning.
     pub freshness: FreshnessClass,
 }
@@ -217,6 +220,11 @@ pub struct TrackingSnapshotInput {
 }
 
 /// Derives one coherent per-device signal snapshot from raw tracking inputs.
+///
+/// Hard requirement: a finite filtered RSSI (and therefore a finite current
+/// sample plus a valid alpha from the tracking profile). Distance bounds and
+/// confidence depend on spread/support and fail independently so an invalid
+/// `rssi_spread_db` cannot erase an otherwise usable filtered-signal reading.
 #[must_use]
 pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapshot> {
     let calibration = resolve_calibration_profile(input.calibration_profile);
@@ -232,23 +240,27 @@ pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapsho
             filtered_rssi_dbm,
             tracking_policy.trend_deadband_db,
         )
+        .unwrap_or(SignalTrend::Stable)
     } else {
         SignalTrend::Stable
     };
-    let proximity = proximity_label(filtered_rssi_dbm);
+    // Filtered RSSI is finite here, so proximity classification cannot fail.
+    let proximity = proximity_label(filtered_rssi_dbm)?;
     let distance_m = ble_distance_m(
         filtered_rssi_dbm,
         calibration.rssi_at_1m_dbm,
         calibration.path_loss_exponent,
-    )?;
-    let (distance_lower_bound_m, distance_upper_bound_m) = ble_distance_range_m(
+    );
+    let (distance_lower_bound_m, distance_upper_bound_m) = match ble_distance_range_m(
         filtered_rssi_dbm,
         input.rssi_spread_db,
         calibration.rssi_at_1m_dbm,
         calibration.path_loss_exponent,
-    )
-    .map(|(lower, upper)| (Some(lower), Some(upper)))?;
-    let confidence_percent = signal_confidence_percent(input.sample_count, input.rssi_spread_db)?;
+    ) {
+        Some((lower, upper)) => (Some(lower), Some(upper)),
+        None => (None, None),
+    };
+    let confidence_percent = signal_confidence_percent(input.sample_count, input.rssi_spread_db);
     let freshness = FreshnessClass::from_age(
         input.age_ms,
         tracking_policy.live_window_ms,
@@ -258,7 +270,7 @@ pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapsho
         filtered_rssi_dbm,
         trend,
         proximity,
-        distance_m: Some(distance_m),
+        distance_m,
         distance_lower_bound_m,
         distance_upper_bound_m,
         confidence_percent,
@@ -356,7 +368,9 @@ impl DeviceTrack {
             .push(observation.rssi_dbm)
             .map_err(|_| TrackError::NonFiniteRssi)?;
         if let Some(previous) = self.filtered_rssi {
-            self.trend = signal_trend(previous, next, TREND_DEADBAND_DB);
+            // Both samples are finite here; `None` is only defensive.
+            self.trend =
+                signal_trend(previous, next, TREND_DEADBAND_DB).unwrap_or(SignalTrend::Stable);
         }
         self.filtered_rssi = Some(next);
         self.observations.push(observation);
@@ -384,7 +398,7 @@ impl DeviceTrack {
     /// Current coarse proximity band.
     #[must_use]
     pub fn proximity(&self) -> Option<ProximityBand> {
-        self.filtered_rssi.map(proximity_label)
+        self.filtered_rssi.and_then(proximity_label)
     }
 
     /// Returns directly observed map points for measurements that had a location fix.

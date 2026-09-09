@@ -100,17 +100,23 @@ pub enum SignalTrend {
 }
 
 /// Compares filtered RSSI samples. Less-negative RSSI is stronger.
+///
+/// Returns `None` when any input is non-finite so callers cannot mistake an
+/// unclassifiable pair for a genuine [`SignalTrend::Stable`] reading.
 #[must_use]
-pub fn signal_trend(previous_dbm: f64, current_dbm: f64, deadband_db: f64) -> SignalTrend {
+pub fn signal_trend(previous_dbm: f64, current_dbm: f64, deadband_db: f64) -> Option<SignalTrend> {
+    if !previous_dbm.is_finite() || !current_dbm.is_finite() || !deadband_db.is_finite() {
+        return None;
+    }
     let deadband = deadband_db.abs();
     let delta = current_dbm - previous_dbm;
-    if delta > deadband {
+    Some(if delta > deadband {
         SignalTrend::Stronger
     } else if delta < -deadband {
         SignalTrend::Weaker
     } else {
         SignalTrend::Stable
-    }
+    })
 }
 
 /// Coarse proximity band. This intentionally avoids false precision.
@@ -195,15 +201,23 @@ const MID_MIN_DBM: f64 = -80.0;
 
 /// Maps RSSI to a coarse proximity label without pretending to know exact distance.
 ///
+/// Returns `None` for non-finite RSSI so `+inf` cannot be reported as
+/// [`ProximityBand::Immediate`] and `NaN` cannot collapse into
+/// [`ProximityBand::Far`].
+///
 /// # Examples
 /// ```
 /// use bleradar_core::{proximity_label, ProximityBand};
-/// assert_eq!(proximity_label(-40.0), ProximityBand::Immediate);
-/// assert_eq!(proximity_label(-95.0), ProximityBand::Far);
+/// assert_eq!(proximity_label(-40.0), Some(ProximityBand::Immediate));
+/// assert_eq!(proximity_label(-95.0), Some(ProximityBand::Far));
+/// assert_eq!(proximity_label(f64::NAN), None);
 /// ```
 #[must_use]
-pub fn proximity_label(rssi_dbm: f64) -> ProximityBand {
-    if rssi_dbm >= IMMEDIATE_MIN_DBM {
+pub fn proximity_label(rssi_dbm: f64) -> Option<ProximityBand> {
+    if !rssi_dbm.is_finite() {
+        return None;
+    }
+    Some(if rssi_dbm >= IMMEDIATE_MIN_DBM {
         ProximityBand::Immediate
     } else if rssi_dbm >= NEAR_MIN_DBM {
         ProximityBand::Near
@@ -211,7 +225,7 @@ pub fn proximity_label(rssi_dbm: f64) -> ProximityBand {
         ProximityBand::Mid
     } else {
         ProximityBand::Far
-    }
+    })
 }
 
 /// Log-distance estimate in metres from RSSI, calibrated RSSI at 1 m, and path-loss exponent.

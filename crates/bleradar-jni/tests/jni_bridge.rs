@@ -132,3 +132,35 @@ fn tracking_snapshot_uses_invalid_sentinels() {
     assert_eq!(tracking_confidence_percent_or_negative(invalid_count), -1);
     assert_eq!(tracking_freshness_ordinal(invalid_count), 2);
 }
+
+#[test]
+fn tracking_snapshot_survives_invalid_spread() {
+    // Live adverse-condition proof: invalid spread must not erase filtered RSSI.
+    let input = TrackingSnapshotJniInput {
+        previous_filtered_dbm: -70.0,
+        current_rssi_dbm: -68.0,
+        rssi_spread_db: f64::NAN,
+        sample_count: 5,
+        calibration_profile_ordinal: 0,
+        tracking_profile_ordinal: 0,
+        age_ms: 1_000,
+    };
+    let filtered = tracking_filtered_rssi_or_nan(input);
+    assert!(
+        filtered.is_finite(),
+        "filtered RSSI must survive invalid spread"
+    );
+    assert!(tracking_distance_m_or_nan(input).is_finite());
+    assert!(tracking_distance_lower_bound_m_or_nan(input).is_nan());
+    assert!(tracking_distance_upper_bound_m_or_nan(input).is_nan());
+    assert_eq!(tracking_confidence_percent_or_negative(input), -1);
+    assert_eq!(tracking_freshness_ordinal(input), 0);
+}
+
+#[test]
+fn proximity_and_trend_ordinals_use_conservative_invalid_sentinels() {
+    assert_eq!(proximity_label_ordinal(f64::NAN), 3);
+    assert_eq!(proximity_label_ordinal(f64::INFINITY), 3);
+    assert_eq!(signal_trend_ordinal(f64::NAN, -70.0, 2.0), 2);
+    assert_eq!(signal_trend_ordinal(-80.0, f64::INFINITY, 2.0), 2);
+}

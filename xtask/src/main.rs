@@ -2165,8 +2165,13 @@ mod tests {
     fn jni_smoke_java_source_embeds_expected_checks() {
         let source = jni_smoke_java_source(11);
         assert!(source.contains("NativeRadar.abiVersion() == 11"));
-        assert!(source.contains("NativeRadar.defaultCalibrationProfile() == NativeRadar.CALIBRATION_BASELINE"));
-        assert!(source.contains("NativeRadar.defaultTrackingProfile() == NativeRadar.TRACKING_STANDARD"));
+        assert!(source.contains(
+            "NativeRadar.defaultCalibrationProfile() == NativeRadar.CALIBRATION_BASELINE"
+        ));
+        assert!(
+            source
+                .contains("NativeRadar.defaultTrackingProfile() == NativeRadar.TRACKING_STANDARD")
+        );
         assert!(source.contains("Double.isNaN(NativeRadar.calibrationProfileRssiAt1mDbm(99))"));
         assert!(source.contains("Double.isNaN(NativeRadar.bleDistanceM(-70.0, -59.0, 0.0))"));
         assert!(source.contains("expected NativeRadar to be unavailable"));

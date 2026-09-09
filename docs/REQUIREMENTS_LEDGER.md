@@ -374,25 +374,29 @@ As of the 2026-09-04 reconciliation, every Fusion/Evidence/Verification/
 Advancement/OSINT row previously listed here is `VERIFIED` (see the ledger
 reconciliation section above) and has been removed from this list.
 REQ-INFRA-002 (`Unknown`-as-leading-outcome) was closed and removed from this
-list on 2026-09-03; see the remediation log above. REQ-WEB-002's `Unknown`
-variant was likewise resolved (proven structurally never-leading, not
-merely untested) on 2026-09-03, narrowing this row from 5 to 4 remaining
-untested variants.
+list on 2026-09-03; see the remediation log above. REQ-WEB-002 was fully
+closed on 2026-09-04 (`CommonTemplate`/`ContentReuse`/`DevelopmentRelationship`/
+`Coincidence` leading-outcome tests plus the structural proof that `Unknown`
+never leads); the prior deferred bullet naming those four variants was
+stale documentation and is removed here after live re-check
+(`cargo test -p bleradar-core --locked --test website` → 13 passed, 2026-09-09).
 
-- **Website**: `CommonTemplate`/`ContentReuse`/`DevelopmentRelationship`/`Coincidence` as a test's leading-outcome scenario (REQ-WEB-002; `Unknown` closed 2026-09-03 — see above).
 - **Compat/runtime**: all 124 ABI contracts are registered, but five read-only
   store contracts have unknown reachability and the stateful/lifecycle/network behavior needed for
   replacement parity requires an ARM64 Android/Bionic harness (MIG-003). This is
-  an open evidence and migration backlog, not a non-Rust exception.
+  an open evidence and migration backlog, not a non-Rust exception. Live sandbox
+  proofs available today (`cargo xtask verify-jni-live`,
+  `cargo xtask verify-android-live`) validate the reconstructed JNI/APK path
+  only — they do not differentially verify the original oracle APK's 124 ABI
+  contracts on device, so REQ-COMPAT-004 remains `PARTIAL`.
 
 ## Termination statement
 
 Every requirement audited across the original pass and the 2026-09-02,
-2026-09-03, and 2026-09-04 reconciliations is now either `VERIFIED`, or is
-`IMPLEMENTED_UNVERIFIED`/`PARTIAL` with its specific missing test scenario
-named above — a bounded, traceable backlog now limited to REQ-WEB-002 (4 of
-8 variants remaining, `Unknown` closed 2026-09-03) and REQ-COMPAT-004. No
-`BROKEN` and no silently `MISSING`
+2026-09-03, 2026-09-04, and 2026-09-09 reconciliations is now either
+`VERIFIED`, or is `IMPLEMENTED_UNVERIFIED`/`PARTIAL` with its specific missing
+test scenario named above — a bounded, traceable backlog now limited to
+REQ-COMPAT-004. No `BROKEN` and no silently `MISSING`
 requirement was found anywhere in the seven engine modules, the four
 original core modules, `bleradar-compat`, or `xtask`, across the full audit
 scope. REQ-COMPAT-004 remains open until Android/Bionic characterization
