@@ -36,8 +36,10 @@ final class BleScanEngine {
     private static final double DEFAULT_PATH_LOSS_EXPONENT = 2.0;
     /** Deadband used for the strengthening/weakening trend classification. */
     private static final double TREND_DEADBAND_DB = 3.0;
-    /** Local smoothing factor for consecutive RSSI samples of the same device (not bleradar-core's EMA). */
+    /** RSSI EMA alpha applied by the Rust core via {@link NativeRadar#filteredRssi(double, double, double)}. */
     private static final double RSSI_SMOOTHING_ALPHA = 0.35;
+    /** Long-idle devices are pruned to keep the simple UI focused on live signals. */
+    private static final long STALE_RETENTION_WINDOW_MILLIS = 30_000L;
 
     private final Context appContext;
     private final Map<String, Blip> blipsByAddress = new ConcurrentHashMap<>();
@@ -142,7 +144,21 @@ final class BleScanEngine {
 
     /** A defensive copy of every device observed within the current session. */
     List<Blip> snapshot() {
-        return new ArrayList<>(blipsByAddress.values());
+        long now = SystemClock.uptimeMillis();
+        pruneStale(now);
+        List<Blip> snapshot = new ArrayList<>(blipsByAddress.values());
+        snapshot.sort((left, right) -> {
+            int byFreshness = Long.compare(right.lastSeenUptimeMillis, left.lastSeenUptimeMillis);
+            if (byFreshness != 0) {
+                return byFreshness;
+            }
+            int byConfidence = Integer.compare(right.confidencePercent, left.confidencePercent);
+            if (byConfidence != 0) {
+                return byConfidence;
+            }
+            return Double.compare(right.lastRssiDbm, left.lastRssiDbm);
+        });
+        return snapshot;
     }
 
     Collection<Blip> blips() {
@@ -150,6 +166,7 @@ final class BleScanEngine {
     }
 
     private void recordResult(ScanResult result) {
+        long now = SystemClock.uptimeMillis();
         String address = result.getDevice().getAddress();
         if (address == null) {
             return;
@@ -157,26 +174,40 @@ final class BleScanEngine {
         Blip blip = blipsByAddress.computeIfAbsent(address, Blip::new);
         double rawRssi = result.getRssi();
         double previous = blip.lastRssiDbm;
-        boolean hasPrevious = !Double.isNaN(previous);
-        double smoothed = hasPrevious
-                ? RSSI_SMOOTHING_ALPHA * rawRssi + (1 - RSSI_SMOOTHING_ALPHA) * previous
-                : rawRssi;
+        boolean hasPrevious = Double.isFinite(previous);
 
         if (NativeRadar.isAvailable()) {
+            double smoothed = NativeRadar.filteredRssi(previous, rawRssi, RSSI_SMOOTHING_ALPHA);
+            if (!Double.isFinite(smoothed)) {
+                smoothed = rawRssi;
+            }
+            blip.lastRssiDbm = smoothed;
+            blip.recordFilteredRssi(smoothed);
+            double spreadDb = blip.recentRssiSpreadDb();
             blip.trend = NativeRadar.signalTrend(hasPrevious ? previous : smoothed, smoothed, TREND_DEADBAND_DB);
             blip.distanceMetres = NativeRadar.bleDistanceM(smoothed, DEFAULT_RSSI_AT_1M_DBM, DEFAULT_PATH_LOSS_EXPONENT);
+            blip.distanceLowerBoundMetres = NativeRadar.distanceLowerBoundM(
+                    smoothed, spreadDb, DEFAULT_RSSI_AT_1M_DBM, DEFAULT_PATH_LOSS_EXPONENT);
+            blip.distanceUpperBoundMetres = NativeRadar.distanceUpperBoundM(
+                    smoothed, spreadDb, DEFAULT_RSSI_AT_1M_DBM, DEFAULT_PATH_LOSS_EXPONENT);
             blip.proximity = NativeRadar.proximityLabel(smoothed);
+            int confidencePercent = NativeRadar.signalConfidencePercent(blip.sampleCount(), spreadDb);
+            blip.confidencePercent = Math.max(0, confidencePercent);
         } else {
+            blip.lastRssiDbm = rawRssi;
             blip.distanceMetres = Double.NaN;
+            blip.distanceLowerBoundMetres = Double.NaN;
+            blip.distanceUpperBoundMetres = Double.NaN;
             blip.proximity = NativeRadar.PROXIMITY_FAR;
+            blip.confidencePercent = 0;
         }
-        blip.lastRssiDbm = smoothed;
-        blip.lastSeenUptimeMillis = SystemClock.uptimeMillis();
+        blip.lastSeenUptimeMillis = now;
 
         String name = safeDeviceName(result);
         if (name != null) {
             blip.name = name;
         }
+        pruneStale(now);
     }
 
     private String safeDeviceName(ScanResult result) {
@@ -188,5 +219,10 @@ final class BleScanEngine {
         } catch (SecurityException denied) {
             return null;
         }
+    }
+
+    private void pruneStale(long nowUptimeMillis) {
+        blipsByAddress.entrySet().removeIf(entry ->
+                nowUptimeMillis - entry.getValue().lastSeenUptimeMillis > STALE_RETENTION_WINDOW_MILLIS);
     }
 }

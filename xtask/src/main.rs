@@ -722,7 +722,11 @@ const REQUIRED_DEX_CLASSES: &[&str] = &[
 const REQUIRED_JNI_EXPORTS: &[&str] = &[
     "Java_com_hse_bleradar_NativeRadar_abiVersion",
     "Java_com_hse_bleradar_NativeRadar_bleDistanceM",
+    "Java_com_hse_bleradar_NativeRadar_distanceLowerBoundM",
+    "Java_com_hse_bleradar_NativeRadar_distanceUpperBoundM",
+    "Java_com_hse_bleradar_NativeRadar_filteredRssi",
     "Java_com_hse_bleradar_NativeRadar_proximityLabel",
+    "Java_com_hse_bleradar_NativeRadar_signalConfidencePercent",
     "Java_com_hse_bleradar_NativeRadar_signalTrend",
 ];
 
@@ -897,14 +901,23 @@ public final class JniSmoke {{
         require(
                 NativeRadar.abiVersion() == {expected_abi_version},
                 "abiVersion mismatch: " + NativeRadar.abiVersion());
+        double filtered = NativeRadar.filteredRssi(Double.NaN, -59.0, 0.35);
+        require(Math.abs(filtered - (-59.0)) < 1e-9, "unexpected filtered RSSI bootstrap: " + filtered);
         double distance = NativeRadar.bleDistanceM(-59.0, -59.0, 2.0);
         require(Math.abs(distance - 1.0) < 1e-9, "unexpected distance: " + distance);
+        double lower = NativeRadar.distanceLowerBoundM(-59.0, 6.0, -59.0, 2.0);
+        double upper = NativeRadar.distanceUpperBoundM(-59.0, 6.0, -59.0, 2.0);
+        require(lower < distance, "unexpected lower bound: " + lower);
+        require(upper > distance, "unexpected upper bound: " + upper);
         require(
                 NativeRadar.proximityLabel(-60.0) == NativeRadar.PROXIMITY_NEAR,
                 "unexpected proximity");
         require(
                 NativeRadar.signalTrend(-80.0, -60.0, 3.0) == NativeRadar.TREND_STRONGER,
                 "unexpected trend");
+        require(
+                NativeRadar.signalConfidencePercent(8, 1.5) >= 70,
+                "unexpected confidence score");
         require(
                 Double.isNaN(NativeRadar.bleDistanceM(-70.0, -59.0, 0.0)),
                 "invalid input did not yield NaN sentinel");

@@ -293,11 +293,16 @@ public final class MainActivity extends android.app.Activity {
             String name = blip.name != null && !blip.name.isEmpty()
                     ? blip.name
                     : getString(R.string.device_unnamed);
-            String distance = Double.isNaN(blip.distanceMetres)
-                    ? getString(R.string.format_distance_unknown)
-                    : getString(R.string.format_distance_meters, Math.round(blip.distanceMetres) + "");
+            String distance = describeRange(blip);
             String identityLine = name + "  ·  " + blip.address;
-            String metricsLine = distance + "   " + Math.round(blip.lastRssiDbm) + " dBm";
+            String metricsLine = distance
+                    + "   "
+                    + confidenceLabel(blip)
+                    + "   "
+                    + trendLabel(blip.trend)
+                    + " "
+                    + Math.round(blip.lastRssiDbm)
+                    + " dBm";
 
             SpannableStringBuilder text = new SpannableStringBuilder(identityLine);
             text.setSpan(new StyleSpan(Typeface.BOLD), 0, identityLine.length(), 0);
@@ -312,6 +317,36 @@ public final class MainActivity extends android.app.Activity {
 
             row.setText(text);
             return row;
+        }
+
+        private String describeRange(Blip blip) {
+            boolean hasLower = Double.isFinite(blip.distanceLowerBoundMetres);
+            boolean hasUpper = Double.isFinite(blip.distanceUpperBoundMetres);
+            if (hasLower && hasUpper) {
+                return Math.round(blip.distanceLowerBoundMetres)
+                        + "–"
+                        + Math.round(blip.distanceUpperBoundMetres)
+                        + "m";
+            }
+            if (Double.isNaN(blip.distanceMetres)) {
+                return getString(R.string.format_distance_unknown);
+            }
+            return getString(R.string.format_distance_meters, Math.round(blip.distanceMetres) + "");
+        }
+
+        private String confidenceLabel(Blip blip) {
+            return blip.confidencePercent > 0 ? blip.confidencePercent + "% conf" : "low conf";
+        }
+
+        private String trendLabel(int trend) {
+            switch (trend) {
+                case NativeRadar.TREND_STRONGER:
+                    return "↗";
+                case NativeRadar.TREND_WEAKER:
+                    return "↘";
+                default:
+                    return "→";
+            }
         }
     }
 }

@@ -3,8 +3,9 @@
 use bleradar_core::{
     AddressKind, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, GeoError,
     IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice, SignalTrend, TrackError,
-    bearing_deg, ble_distance_m, canonical_mac, haversine_m, is_locally_administered, signal_trend,
-    wifi_channel_to_frequency, wifi_frequency_to_channel,
+    bearing_deg, ble_distance_m, ble_distance_range_m, canonical_mac, filtered_rssi, haversine_m,
+    is_locally_administered, signal_confidence_percent, signal_trend, wifi_channel_to_frequency,
+    wifi_frequency_to_channel,
 };
 
 /// Builds a `DeviceObservation` from its varying fields; `tx_power_dbm` is
@@ -113,6 +114,40 @@ fn distance_model_rejects_unrepresentable_results() {
     assert!(ble_distance_m(-f64::MAX, f64::MAX, 2.0).is_none());
     assert!(ble_distance_m(f64::MAX, -f64::MAX, 2.0).is_none());
     assert!(ble_distance_m(-70.0, -59.0, f64::MIN_POSITIVE).is_none());
+}
+
+#[test]
+fn filtered_rssi_bootstraps_and_then_applies_ema() {
+    assert_eq!(filtered_rssi(f64::NAN, -80.0, 0.5), Some(-80.0));
+    assert_eq!(filtered_rssi(-80.0, -60.0, 0.5), Some(-70.0));
+}
+
+#[test]
+fn distance_range_expands_around_the_estimate() {
+    let (near, far) = ble_distance_range_m(-59.0, 6.0, -59.0, 2.0).unwrap();
+    assert!(near < 1.0);
+    assert!(far > 1.0);
+    assert!(near < far);
+}
+
+#[test]
+fn distance_range_rejects_invalid_spread() {
+    assert!(ble_distance_range_m(-59.0, -1.0, -59.0, 2.0).is_none());
+    assert!(ble_distance_range_m(-59.0, f64::NAN, -59.0, 2.0).is_none());
+}
+
+#[test]
+fn signal_confidence_rewards_stability_and_sample_support() {
+    let low = signal_confidence_percent(1, 10.0).unwrap();
+    let high = signal_confidence_percent(12, 1.5).unwrap();
+    assert!(high > low);
+    assert_eq!(high, 100);
+}
+
+#[test]
+fn signal_confidence_rejects_invalid_spread() {
+    assert!(signal_confidence_percent(1, -1.0).is_none());
+    assert!(signal_confidence_percent(1, f64::INFINITY).is_none());
 }
 
 #[test]

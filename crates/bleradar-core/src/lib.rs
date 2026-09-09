@@ -81,7 +81,8 @@ pub use pipeline::{
     PipelineError, PipelineStage, TemporalGeoGraph, TemporalSpan,
 };
 pub use signal::{
-    FilterError, ProximityBand, RssiEma, SignalTrend, ble_distance_m, proximity_label, signal_trend,
+    FilterError, ProximityBand, RssiEma, SignalTrend, ble_distance_m, ble_distance_range_m,
+    filtered_rssi, proximity_label, signal_confidence_percent, signal_trend,
 };
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, MapPoint, SelectedDevice,

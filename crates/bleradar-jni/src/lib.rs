@@ -34,7 +34,10 @@
 //! or silently misinterpret return values (sentinel/ordinal drift), so keep
 //! them in lockstep.
 
-use bleradar_core::{ProximityBand, SignalTrend, ble_distance_m, proximity_label, signal_trend};
+use bleradar_core::{
+    ProximityBand, SignalTrend, ble_distance_m, ble_distance_range_m, filtered_rssi,
+    proximity_label, signal_confidence_percent, signal_trend,
+};
 
 /// Opaque, never-dereferenced pointer type standing in for the JNI `JNIEnv*`
 /// and `jclass`/`jobject` parameters every native method receives.
@@ -53,6 +56,14 @@ type JniOpaquePtr = *mut core::ffi::c_void;
 #[must_use]
 pub fn ble_distance_m_or_nan(rssi_dbm: f64, rssi_at_1m_dbm: f64, path_loss_exponent: f64) -> f64 {
     ble_distance_m(rssi_dbm, rssi_at_1m_dbm, path_loss_exponent).unwrap_or(f64::NAN)
+}
+
+/// Pure, unit-testable core of [`Java_com_hse_bleradar_NativeRadar_filteredRssi`].
+///
+/// Returns [`f64::NAN`] when the current sample or alpha is invalid.
+#[must_use]
+pub fn filtered_rssi_or_nan(previous_filtered_dbm: f64, current_rssi_dbm: f64, alpha: f64) -> f64 {
+    filtered_rssi(previous_filtered_dbm, current_rssi_dbm, alpha).unwrap_or(f64::NAN)
 }
 
 /// Pure, unit-testable core of
@@ -85,6 +96,58 @@ pub fn signal_trend_ordinal(previous_dbm: f64, current_dbm: f64, deadband_db: f6
         SignalTrend::Weaker => 1,
         SignalTrend::Stable => 2,
     }
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_distanceLowerBoundM`].
+#[must_use]
+pub fn distance_lower_bound_m_or_nan(
+    rssi_dbm: f64,
+    rssi_spread_db: f64,
+    rssi_at_1m_dbm: f64,
+    path_loss_exponent: f64,
+) -> f64 {
+    ble_distance_range_m(rssi_dbm, rssi_spread_db, rssi_at_1m_dbm, path_loss_exponent)
+        .map_or(f64::NAN, |(lower, _)| lower)
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_distanceUpperBoundM`].
+#[must_use]
+pub fn distance_upper_bound_m_or_nan(
+    rssi_dbm: f64,
+    rssi_spread_db: f64,
+    rssi_at_1m_dbm: f64,
+    path_loss_exponent: f64,
+) -> f64 {
+    ble_distance_range_m(rssi_dbm, rssi_spread_db, rssi_at_1m_dbm, path_loss_exponent)
+        .map_or(f64::NAN, |(_, upper)| upper)
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_signalConfidencePercent`].
+///
+/// Returns `-1` when the inputs are invalid.
+#[must_use]
+pub fn signal_confidence_percent_or_negative(sample_count: i32, rssi_spread_db: f64) -> i32 {
+    if sample_count < 0 {
+        return -1;
+    }
+    signal_confidence_percent(sample_count as usize, rssi_spread_db)
+        .map_or(-1, i32::from)
+}
+
+/// `NativeRadar.filteredRssi(double, double, double): double` — see
+/// [`filtered_rssi_or_nan`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_filteredRssi(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    previous_filtered_dbm: f64,
+    current_rssi_dbm: f64,
+    alpha: f64,
+) -> f64 {
+    filtered_rssi_or_nan(previous_filtered_dbm, current_rssi_dbm, alpha)
 }
 
 /// `NativeRadar.bleDistanceM(double, double, double): double` — see
@@ -135,6 +198,46 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_signalTrend(
     signal_trend_ordinal(previous_dbm, current_dbm, deadband_db)
 }
 
+/// `NativeRadar.distanceLowerBoundM(double, double, double, double): double`
+/// — see [`distance_lower_bound_m_or_nan`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_distanceLowerBoundM(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    rssi_dbm: f64,
+    rssi_spread_db: f64,
+    rssi_at_1m_dbm: f64,
+    path_loss_exponent: f64,
+) -> f64 {
+    distance_lower_bound_m_or_nan(rssi_dbm, rssi_spread_db, rssi_at_1m_dbm, path_loss_exponent)
+}
+
+/// `NativeRadar.distanceUpperBoundM(double, double, double, double): double`
+/// — see [`distance_upper_bound_m_or_nan`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_distanceUpperBoundM(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    rssi_dbm: f64,
+    rssi_spread_db: f64,
+    rssi_at_1m_dbm: f64,
+    path_loss_exponent: f64,
+) -> f64 {
+    distance_upper_bound_m_or_nan(rssi_dbm, rssi_spread_db, rssi_at_1m_dbm, path_loss_exponent)
+}
+
+/// `NativeRadar.signalConfidencePercent(int, double): int` — see
+/// [`signal_confidence_percent_or_negative`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_signalConfidencePercent(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    sample_count: i32,
+    rssi_spread_db: f64,
+) -> i32 {
+    signal_confidence_percent_or_negative(sample_count, rssi_spread_db)
+}
+
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side
 /// calls once at startup to confirm the loaded `.so` matches the ABI this
 /// file documents, independent of the app's own version number.
@@ -143,5 +246,5 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    1
+    2
 }
