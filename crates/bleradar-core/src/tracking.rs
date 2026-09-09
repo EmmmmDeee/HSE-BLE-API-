@@ -509,12 +509,7 @@ impl DeviceTrack {
 
 /// Weight for one positioned observation: nearer-fix (smaller accuracy) and
 /// stronger-relative-signal observations contribute more to the centroid.
-fn observation_weight(
-    accuracy_m: f64,
-    rssi_dbm: f64,
-    max_rssi_dbm: f64,
-    age_ms: f64,
-) -> f64 {
+fn observation_weight(accuracy_m: f64, rssi_dbm: f64, max_rssi_dbm: f64, age_ms: f64) -> f64 {
     let accuracy_weight = 1.0 / accuracy_m.max(1.0).powi(2);
     let signal_weight = 10_f64
         .powf((rssi_dbm - max_rssi_dbm) / 20.0)

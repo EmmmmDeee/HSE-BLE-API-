@@ -391,7 +391,12 @@ fn spatial_estimate_uncertainty_contains_every_fix_error_radius() {
     ];
     for (timestamp, position) in positions.into_iter().enumerate() {
         track
-            .push(observation(timestamp as u64, Some(position), Some(3.0), -60.0))
+            .push(observation(
+                timestamp as u64,
+                Some(position),
+                Some(3.0),
+                -60.0,
+            ))
             .unwrap();
     }
 
