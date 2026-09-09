@@ -741,6 +741,7 @@ const REQUIRED_JNI_EXPORTS: &[&str] = &[
     "Java_com_hse_bleradar_NativeRadar_trackingConfidencePercent",
     "Java_com_hse_bleradar_NativeRadar_trackingDistanceLowerBoundM",
     "Java_com_hse_bleradar_NativeRadar_trackingDistanceM",
+    "Java_com_hse_bleradar_NativeRadar_trackingDistanceProximity",
     "Java_com_hse_bleradar_NativeRadar_trackingDistanceUpperBoundM",
     "Java_com_hse_bleradar_NativeRadar_trackingFilteredRssi",
     "Java_com_hse_bleradar_NativeRadar_trackingFreshness",
@@ -967,6 +968,11 @@ public final class JniSmoke {{
                         -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
                         == NativeRadar.PROXIMITY_MID,
                 "unexpected tracked proximity");
+        require(
+                NativeRadar.trackingDistanceProximity(
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
+                        == NativeRadar.PROXIMITY_MID,
+                "unexpected distance-derived tracked proximity");
         require(
                 NativeRadar.trackingConfidencePercent(
                         -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)

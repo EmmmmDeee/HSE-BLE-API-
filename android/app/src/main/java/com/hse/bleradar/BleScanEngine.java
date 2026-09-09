@@ -227,7 +227,7 @@ final class BleScanEngine {
                     calibrationProfile,
                     trackingProfile,
                     0L);
-            blip.proximity = NativeRadar.trackingProximity(
+            blip.proximity = NativeRadar.trackingDistanceProximity(
                     previous,
                     rawRssi,
                     spreadDb,

@@ -218,6 +218,22 @@ public final class NativeRadar {
             int trackingProfile,
             long ageMs);
 
+    /**
+     * Additive distance-derived proximity classification. Unlike
+     * {@link #trackingProximity(double, double, double, int, int, int, long)},
+     * this uses the calibrated distance estimate while the legacy RSSI-based
+     * method remains available for compatibility.
+     * Invalid or unrepresentable distance falls back to {@link #PROXIMITY_FAR}.
+     */
+    public static native int trackingDistanceProximity(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double rssiSpreadDb,
+            int sampleCount,
+            int calibrationProfile,
+            int trackingProfile,
+            long ageMs);
+
     /** Canonical Rust-owned tracking snapshot field: deterministic 0-100 confidence, or {@code -1}. */
     public static native int trackingConfidencePercent(
             double previousFilteredDbm,

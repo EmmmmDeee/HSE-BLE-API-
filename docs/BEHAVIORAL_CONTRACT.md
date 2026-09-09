@@ -31,6 +31,12 @@ census, reachability counts, and registry semantics. Timestamp defects remain
 recorded trace observations pending executable target rejection/boundary tests.
 These tests deliberately do not load the Android `.so` in normal CI.
 
+The legacy source analogue `proximity_label` remains RSSI-based for
+backward compatibility. The canonical tracking snapshot now also exposes an
+optional calibrated-distance proximity classification, and the Android
+adapter renders that additive field through `trackingDistanceProximity`;
+unrepresentable distances conservatively map to the `Far` UI ordinal.
+
 The compatibility trace executed stateless native functions from a copied
 oracle after changing imported Android library names and removing Android
 symbol-version metadata. It supplied only `__sF`, `__errno`, and

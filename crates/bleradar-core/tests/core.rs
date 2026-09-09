@@ -228,11 +228,28 @@ fn tracking_snapshot_derives_a_coherent_bundle() {
     assert!((snapshot.filtered_rssi_dbm - (-69.0)).abs() < 1e-9);
     assert_eq!(snapshot.trend, SignalTrend::Stronger);
     assert_eq!(snapshot.proximity, ProximityBand::Mid);
+    assert_eq!(snapshot.distance_proximity, Some(ProximityBand::Mid));
     assert!(snapshot.distance_m.unwrap() > 1.0);
     assert!(snapshot.distance_lower_bound_m.unwrap() < snapshot.distance_m.unwrap());
     assert!(snapshot.distance_upper_bound_m.unwrap() > snapshot.distance_m.unwrap());
     assert!(snapshot.confidence_percent.unwrap() > 0);
     assert_eq!(snapshot.freshness, FreshnessClass::Live);
+}
+
+#[test]
+fn tracking_snapshot_keeps_distance_proximity_distinct_from_rssi_proximity() {
+    let snapshot = tracking_snapshot(TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: f64::NAN,
+        current_rssi_dbm: -59.0,
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Standard,
+        age_ms: 0,
+    })
+    .unwrap();
+    assert_eq!(snapshot.proximity, ProximityBand::Near);
+    assert_eq!(snapshot.distance_proximity, Some(ProximityBand::Immediate));
 }
 
 #[test]
@@ -278,6 +295,7 @@ fn tracking_snapshot_keeps_filtered_signal_when_spread_is_invalid() {
         assert!(snapshot.distance_m.is_some());
         assert_eq!(snapshot.distance_lower_bound_m, None);
         assert_eq!(snapshot.distance_upper_bound_m, None);
+        assert_eq!(snapshot.distance_proximity, Some(ProximityBand::Mid));
         assert_eq!(snapshot.confidence_percent, None);
         assert_eq!(snapshot.freshness, FreshnessClass::Live);
     }

@@ -256,6 +256,22 @@ pub fn tracking_proximity_ordinal(input: TrackingSnapshotJniInput) -> i32 {
     })
 }
 
+/// Pure, unit-testable core of `NativeRadar.trackingDistanceProximity(...)`.
+///
+/// This additive API classifies the calibrated distance while
+/// [`tracking_proximity_ordinal`] preserves the legacy RSSI-based field.
+#[must_use]
+pub fn tracking_distance_proximity_ordinal(input: TrackingSnapshotJniInput) -> i32 {
+    tracking_snapshot_from_input(input)
+        .and_then(|snapshot| snapshot.distance_proximity)
+        .map_or(3, |proximity| match proximity {
+            ProximityBand::Immediate => 0,
+            ProximityBand::Near => 1,
+            ProximityBand::Mid => 2,
+            ProximityBand::Far => 3,
+        })
+}
+
 /// Pure, unit-testable core of `NativeRadar.trackingConfidencePercent(...)`.
 #[must_use]
 pub fn tracking_confidence_percent_or_negative(input: TrackingSnapshotJniInput) -> i32 {
@@ -547,6 +563,31 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingProximity(
     age_ms: i64,
 ) -> i32 {
     tracking_proximity_ordinal(TrackingSnapshotJniInput {
+        previous_filtered_dbm,
+        current_rssi_dbm,
+        rssi_spread_db,
+        sample_count,
+        calibration_profile_ordinal,
+        tracking_profile_ordinal,
+        age_ms,
+    })
+}
+
+/// `NativeRadar.trackingDistanceProximity(...): int` — see
+/// [`tracking_distance_proximity_ordinal`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingDistanceProximity(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    previous_filtered_dbm: f64,
+    current_rssi_dbm: f64,
+    rssi_spread_db: f64,
+    sample_count: i32,
+    calibration_profile_ordinal: i32,
+    tracking_profile_ordinal: i32,
+    age_ms: i64,
+) -> i32 {
+    tracking_distance_proximity_ordinal(TrackingSnapshotJniInput {
         previous_filtered_dbm,
         current_rssi_dbm,
         rssi_spread_db,

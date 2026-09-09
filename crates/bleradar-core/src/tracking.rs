@@ -3,7 +3,8 @@
 use crate::{
     CalibrationProfile, LatLon, ProximityBand, RssiEma, SignalTrend, ble_distance_m,
     ble_distance_range_m, calibration_profile as resolve_calibration_profile, filtered_rssi,
-    haversine_m, proximity_label, signal_confidence_percent, signal_trend,
+    haversine_m, proximity_label, proximity_label_from_distance_m, signal_confidence_percent,
+    signal_trend,
 };
 
 /// Assumed horizontal accuracy, in metres, for an observation carrying no GPS fix.
@@ -194,6 +195,11 @@ pub struct TrackingSnapshot {
     pub trend: SignalTrend,
     /// Coarse proximity band.
     pub proximity: ProximityBand,
+    /// Distance-derived proximity band when the calibrated distance is representable.
+    ///
+    /// This is kept separate from [`Self::proximity`] because the latter preserves
+    /// the legacy RSSI-based API semantics.
+    pub distance_proximity: Option<ProximityBand>,
     /// Central distance estimate in metres when representable.
     pub distance_m: Option<f64>,
     /// Conservative lower distance bound in metres when representable.
@@ -260,6 +266,7 @@ pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapsho
         calibration.rssi_at_1m_dbm,
         calibration.path_loss_exponent,
     );
+    let distance_proximity = distance_m.and_then(proximity_label_from_distance_m);
     let (distance_lower_bound_m, distance_upper_bound_m) = match ble_distance_range_m(
         filtered_rssi_dbm,
         input.rssi_spread_db,
@@ -279,6 +286,7 @@ pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapsho
         filtered_rssi_dbm,
         trend,
         proximity,
+        distance_proximity,
         distance_m,
         distance_lower_bound_m,
         distance_upper_bound_m,
