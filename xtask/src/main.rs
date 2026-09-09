@@ -692,6 +692,10 @@ const ANDROID_APP_DIR: &str = "android/app/src/main";
 /// `NativeRadar.ensureLoaded()`'s `System.loadLibrary("bleradar_jni")`.
 const NATIVE_LIB_FILE_NAME: &str = "libbleradar_jni.so";
 
+/// Rust standard-library target `cargo xtask build-apk` cross-compiles the JNI
+/// bridge for.
+const ANDROID_RUST_TARGET: &str = "aarch64-linux-android";
+
 /// Final signed APK's committed name at the repository root.
 const APK_OUTPUT_NAME: &str = "HSE-BLE-Radar-arm64-v1.0.0.apk";
 
@@ -765,6 +769,44 @@ fn ndk_host_tag() -> &'static str {
     } else {
         "linux-x86_64"
     }
+}
+
+/// Parses `rustup target list --installed` stdout into exact target triples.
+fn installed_rust_targets(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// Ensures the pinned toolchain has the Rust standard library for `target`,
+/// auto-installing it with `rustup target add` when missing so `build-apk`
+/// works in a fresh sandbox instead of failing late with `can't find crate for
+/// std`.
+fn ensure_rustup_target_installed(root: &Path, target: &str) -> Result<(), String> {
+    let output = Command::new("rustup")
+        .current_dir(root)
+        .args(["target", "list", "--installed"])
+        .output()
+        .map_err(|e| format!("failed to spawn rustup target list --installed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "\"rustup\" \"target\" \"list\" \"--installed\" exited with {}",
+            output.status
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if installed_rust_targets(&stdout).contains(&target) {
+        return Ok(());
+    }
+
+    println!("== rustup target add {target} ==");
+    run_status({
+        let mut c = Command::new("rustup");
+        c.current_dir(root).args(["target", "add", target]);
+        c
+    })
 }
 
 /// Locates an installed Android SDK: `ANDROID_HOME`/`ANDROID_SDK_ROOT` if
@@ -962,6 +1004,7 @@ fn cmd_build_apk() -> Result<(), String> {
         &staging_dir,
     ])?;
 
+    ensure_rustup_target_installed(&root, ANDROID_RUST_TARGET)?;
     println!("== cross-compiling bleradar-jni for aarch64-linux-android (release) ==");
     let ndk_bin = ndk_root
         .join("toolchains/llvm/prebuilt")
@@ -983,7 +1026,7 @@ fn cmd_build_apk() -> Result<(), String> {
                 "--release",
                 "--locked",
                 "--target",
-                "aarch64-linux-android",
+                ANDROID_RUST_TARGET,
                 "-p",
                 "bleradar-jni",
             ])
@@ -1737,6 +1780,23 @@ mod tests {
         // Vec<u64> ordering must prefer 10 over 9 (a plain string compare
         // would wrongly prefer "9" over "10").
         assert!(parse_plain_version("10.0.0") > parse_plain_version("9.0.0"));
+    }
+
+    #[test]
+    fn installed_rust_targets_splits_trimmed_non_empty_lines() {
+        let stdout = "x86_64-unknown-linux-gnu\n aarch64-linux-android \n\n";
+        assert_eq!(
+            installed_rust_targets(stdout),
+            vec!["x86_64-unknown-linux-gnu", "aarch64-linux-android"]
+        );
+    }
+
+    #[test]
+    fn installed_rust_targets_preserves_exact_target_names() {
+        let stdout = "aarch64-linux-android\naarch64-linux-android-sim\n";
+        let targets = installed_rust_targets(stdout);
+        assert!(targets.contains(&"aarch64-linux-android"));
+        assert!(!targets.contains(&"aarch64-linux-androi"));
     }
 
     #[test]
