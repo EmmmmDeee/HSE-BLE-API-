@@ -946,7 +946,11 @@ fn require_expected_members(
     let missing: Vec<&str> = expected
         .iter()
         .copied()
-        .filter(|expected_member| !actual.iter().any(|actual_member| actual_member == expected_member))
+        .filter(|expected_member| {
+            !actual
+                .iter()
+                .any(|actual_member| actual_member == expected_member)
+        })
         .collect();
     if missing.is_empty() {
         Ok(())
@@ -1480,11 +1484,13 @@ fn cmd_verify_android_live() -> Result<(), String> {
     require_expected_members(&apk_entries, REQUIRED_APK_ENTRIES, "APK entry set")?;
 
     let dex_path = root.join("target/android-apk/dex/classes.dex");
-    let dex_classes =
-        dex::class_names(&read_bytes(&dex_path)?).map_err(|e| format!("parsing {}: {e}", dex_path.display()))?;
+    let dex_classes = dex::class_names(&read_bytes(&dex_path)?)
+        .map_err(|e| format!("parsing {}: {e}", dex_path.display()))?;
     require_expected_members(&dex_classes, REQUIRED_DEX_CLASSES, "DEX class set")?;
 
-    let native_lib_path = root.join("target/aarch64-linux-android/release").join(NATIVE_LIB_FILE_NAME);
+    let native_lib_path = root
+        .join("target/aarch64-linux-android/release")
+        .join(NATIVE_LIB_FILE_NAME);
     let native_exports = elf::defined_func_and_object_symbols(&read_bytes(&native_lib_path)?)
         .map_err(|e| format!("parsing {}: {e}", native_lib_path.display()))?;
     require_expected_members(&native_exports, REQUIRED_JNI_EXPORTS, "JNI export set")?;
@@ -2096,7 +2102,10 @@ mod tests {
     #[test]
     fn require_expected_members_accepts_complete_sets() {
         let actual = vec!["one".to_string(), "two".to_string(), "three".to_string()];
-        assert_eq!(require_expected_members(&actual, &["one", "three"], "demo"), Ok(()));
+        assert_eq!(
+            require_expected_members(&actual, &["one", "three"], "demo"),
+            Ok(())
+        );
     }
 
     #[test]
