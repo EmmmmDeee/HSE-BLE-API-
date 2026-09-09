@@ -45,6 +45,7 @@ fn main() -> ExitCode {
         "dex-classes" => cmd_dex_classes(&rest),
         "vendor-advisory-db" => cmd_vendor_advisory_db(),
         "build-apk" => cmd_build_apk(),
+        "verify-jni-live" => cmd_verify_jni_live(),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -81,6 +82,7 @@ fn print_usage() {
          \x20 dex-classes <classes.dex>  print sorted class descriptors\n\
          \x20 vendor-advisory-db         materialize the offline cargo-deny advisory db\n\
          \x20 build-apk                  cross-compile + package + sign the Android radar APK\n\
+         \x20 verify-jni-live            run a live Java→JNI→Rust verification against NativeRadar.java\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/test/doc/checks/audit/deny)"
@@ -688,6 +690,10 @@ fn cmd_vendor_advisory_db() -> Result<(), String> {
 /// for why this app has no Gradle project.
 const ANDROID_APP_DIR: &str = "android/app/src/main";
 
+/// Path (relative to the repo root) of the Java façade whose real JVM→JNI→Rust
+/// behavior `verify-jni-live` executes.
+const NATIVE_RADAR_JAVA_PATH: &str = "android/app/src/main/java/com/hse/bleradar/NativeRadar.java";
+
 /// Name of the cross-compiled native library, matching
 /// `NativeRadar.ensureLoaded()`'s `System.loadLibrary("bleradar_jni")`.
 const NATIVE_LIB_FILE_NAME: &str = "libbleradar_jni.so";
@@ -771,6 +777,17 @@ fn ndk_host_tag() -> &'static str {
     }
 }
 
+/// Platform-specific filename Cargo emits for a host `cdylib`.
+fn host_cdylib_file_name(crate_name: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{crate_name}.dll")
+    } else if cfg!(target_os = "macos") {
+        format!("lib{crate_name}.dylib")
+    } else {
+        format!("lib{crate_name}.so")
+    }
+}
+
 /// Parses `rustup target list --installed` stdout into exact target triples.
 fn installed_rust_targets(stdout: &str) -> Vec<&str> {
     stdout
@@ -807,6 +824,88 @@ fn ensure_rustup_target_installed(root: &Path, target: &str) -> Result<(), Strin
         c.current_dir(root).args(["target", "add", target]);
         c
     })
+}
+
+/// Extracts the integer assigned by `public static final int <name> = ...;`
+/// from Java source, matching this repository's `NativeRadar.java` contract
+/// constants without needing a full Java parser.
+fn find_java_static_final_int(source: &str, name: &str) -> Result<i32, String> {
+    let prefix = format!("public static final int {name} = ");
+    let (_, after_prefix) = source
+        .split_once(&prefix)
+        .ok_or_else(|| format!("missing Java constant `{name}`"))?;
+    let (value_text, _) = after_prefix
+        .split_once(';')
+        .ok_or_else(|| format!("unterminated Java constant `{name}`"))?;
+    value_text
+        .trim()
+        .parse::<i32>()
+        .map_err(|e| format!("Java constant `{name}` value {value_text:?}: {e}"))
+}
+
+/// Creates a dedicated scratch directory under the OS temp directory for one
+/// xtask command run, clearing any stale prior contents for the same process.
+fn xtask_temp_dir(label: &str) -> PathBuf {
+    let dir = env::temp_dir().join(format!("xtask-{label}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    dir
+}
+
+/// Returns the Java source for a tiny live verifier that exercises the real
+/// `NativeRadar.java` façade and the host-built `bleradar-jni` library.
+fn jni_smoke_java_source(expected_abi_version: i32) -> String {
+    format!(
+        r#"import com.hse.bleradar.NativeRadar;
+
+public final class JniSmoke {{
+    private static void require(boolean condition, String message) {{
+        if (!condition) {{
+            throw new IllegalStateException(message);
+        }}
+    }}
+
+    private static void verifySuccessPath() {{
+        require(NativeRadar.isAvailable(), "NativeRadar unavailable: " + NativeRadar.loadError());
+        require(
+                NativeRadar.abiVersion() == {expected_abi_version},
+                "abiVersion mismatch: " + NativeRadar.abiVersion());
+        double distance = NativeRadar.bleDistanceM(-59.0, -59.0, 2.0);
+        require(Math.abs(distance - 1.0) < 1e-9, "unexpected distance: " + distance);
+        require(
+                NativeRadar.proximityLabel(-60.0) == NativeRadar.PROXIMITY_NEAR,
+                "unexpected proximity");
+        require(
+                NativeRadar.signalTrend(-80.0, -60.0, 3.0) == NativeRadar.TREND_STRONGER,
+                "unexpected trend");
+        require(
+                Double.isNaN(NativeRadar.bleDistanceM(-70.0, -59.0, 0.0)),
+                "invalid input did not yield NaN sentinel");
+    }}
+
+    private static void verifyFailurePath() {{
+        require(!NativeRadar.isAvailable(), "expected NativeRadar to be unavailable");
+        require(NativeRadar.loadError() != null, "expected loadError when library path is wrong");
+    }}
+
+    public static void main(String[] args) {{
+        String mode = args.length == 0 ? "success" : args[0];
+        switch (mode) {{
+            case "success":
+                verifySuccessPath();
+                verifySuccessPath();
+                System.out.println("success-ok abi=" + NativeRadar.abiVersion());
+                break;
+            case "failure":
+                verifyFailurePath();
+                System.out.println("failure-ok cause=" + NativeRadar.loadError().getClass().getName());
+                break;
+            default:
+                throw new IllegalArgumentException("unknown mode: " + mode);
+        }}
+    }}
+}}
+"#
+    )
 }
 
 /// Locates an installed Android SDK: `ANDROID_HOME`/`ANDROID_SDK_ROOT` if
@@ -1231,6 +1330,80 @@ fn cmd_build_apk() -> Result<(), String> {
         .map_err(|e| format!("stat {}: {e}", output_path.display()))?
         .len();
     println!("== done: {} ({size} bytes) ==", output_path.display());
+    Ok(())
+}
+
+fn cmd_verify_jni_live() -> Result<(), String> {
+    let root = repo_root()?;
+    let java_path = root.join(NATIVE_RADAR_JAVA_PATH);
+    let java_source = read_to_string(&java_path)?;
+    let expected_abi_version = find_java_static_final_int(&java_source, "EXPECTED_ABI_VERSION")?;
+
+    println!("== building host bleradar-jni ==");
+    run_status({
+        let mut c = Command::new("cargo");
+        c.current_dir(&root)
+            .args(["build", "-p", "bleradar-jni", "--locked"]);
+        c
+    })?;
+
+    let host_lib = root.join("target/debug").join(host_cdylib_file_name("bleradar_jni"));
+    if !host_lib.is_file() {
+        return Err(format!(
+            "expected host-built native library missing: {}",
+            host_lib.display()
+        ));
+    }
+
+    let temp_dir = xtask_temp_dir("verify-jni-live");
+    let src_dir = temp_dir.join("src");
+    let package_dir = src_dir.join("com/hse/bleradar");
+    let classes_dir = temp_dir.join("classes");
+    let empty_library_dir = temp_dir.join("empty-library-path");
+    recreate_dirs(&[&package_dir, &classes_dir, &empty_library_dir])?;
+    fs::copy(&java_path, package_dir.join("NativeRadar.java"))
+        .map_err(|e| format!("copying {} into live verifier: {e}", java_path.display()))?;
+    fs::write(src_dir.join("JniSmoke.java"), jni_smoke_java_source(expected_abi_version))
+        .map_err(|e| format!("writing JniSmoke.java: {e}"))?;
+
+    println!("== javac NativeRadar.java + JniSmoke.java ==");
+    run_status({
+        let mut c = Command::new("javac");
+        c.arg("-d")
+            .arg(&classes_dir)
+            .arg(package_dir.join("NativeRadar.java"))
+            .arg(src_dir.join("JniSmoke.java"));
+        c
+    })?;
+
+    println!("== java failure-path falsification ==");
+    run_status({
+        let mut c = Command::new("java");
+        c.arg(format!(
+            "-Djava.library.path={}",
+            empty_library_dir.display()
+        ))
+        .arg("-cp")
+        .arg(&classes_dir)
+        .arg("JniSmoke")
+        .arg("failure");
+        c
+    })?;
+
+    let library_dir = host_lib
+        .parent()
+        .ok_or_else(|| format!("host library has no parent directory: {}", host_lib.display()))?;
+    println!("== java success-path proof ==");
+    run_status({
+        let mut c = Command::new("java");
+        c.arg(format!("-Djava.library.path={}", library_dir.display()))
+            .arg("-cp")
+            .arg(&classes_dir)
+            .arg("JniSmoke")
+            .arg("success");
+        c
+    })?;
+
     Ok(())
 }
 
@@ -1797,6 +1970,39 @@ mod tests {
         let targets = installed_rust_targets(stdout);
         assert!(targets.contains(&"aarch64-linux-android"));
         assert!(!targets.contains(&"aarch64-linux-androi"));
+    }
+
+    #[test]
+    fn find_java_static_final_int_parses_expected_abi_version() {
+        let source = r#"
+            public final class NativeRadar {
+                public static final int EXPECTED_ABI_VERSION = 7;
+            }
+        "#;
+        assert_eq!(
+            find_java_static_final_int(source, "EXPECTED_ABI_VERSION"),
+            Ok(7)
+        );
+    }
+
+    #[test]
+    fn find_java_static_final_int_reports_missing_or_invalid_constants() {
+        assert!(find_java_static_final_int("class NativeRadar {}", "EXPECTED_ABI_VERSION").is_err());
+        assert!(
+            find_java_static_final_int(
+                "public static final int EXPECTED_ABI_VERSION = nope;",
+                "EXPECTED_ABI_VERSION"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn jni_smoke_java_source_embeds_expected_checks() {
+        let source = jni_smoke_java_source(11);
+        assert!(source.contains("NativeRadar.abiVersion() == 11"));
+        assert!(source.contains("Double.isNaN(NativeRadar.bleDistanceM(-70.0, -59.0, 0.0))"));
+        assert!(source.contains("expected NativeRadar to be unavailable"));
     }
 
     #[test]
