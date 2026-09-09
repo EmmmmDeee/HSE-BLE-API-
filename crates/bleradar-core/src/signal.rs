@@ -71,6 +71,23 @@ impl RssiEma {
     }
 }
 
+/// Stateless EMA helper for callers that persist only the previous filtered
+/// value rather than the whole [`RssiEma`] object.
+///
+/// Treats a non-finite `previous_filtered_dbm` as "no prior sample yet" and
+/// returns `current_rssi_dbm` unchanged in that case.
+#[must_use]
+pub fn filtered_rssi(previous_filtered_dbm: f64, current_rssi_dbm: f64, alpha: f64) -> Option<f64> {
+    if !current_rssi_dbm.is_finite() {
+        return None;
+    }
+    let mut ema = RssiEma::new(alpha).ok()?;
+    if previous_filtered_dbm.is_finite() {
+        ema.value = Some(previous_filtered_dbm);
+    }
+    ema.push(current_rssi_dbm).ok()
+}
+
 /// Trend classification for deterministic hot/cold guidance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalTrend {
@@ -107,6 +124,68 @@ pub enum ProximityBand {
     Mid,
     /// Weak/far signal or uncertain environment.
     Far,
+}
+
+/// Rust-owned BLE distance calibration profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationProfile {
+    /// Conservative general-purpose default matching the historic app constants.
+    Baseline,
+    /// More attenuation for cluttered indoor environments.
+    Indoor,
+    /// Lower attenuation for more open spaces.
+    OpenSpace,
+}
+
+impl CalibrationProfile {
+    /// Stable ordinal used by JNI/Android.
+    #[must_use]
+    pub const fn ordinal(self) -> i32 {
+        match self {
+            Self::Baseline => 0,
+            Self::Indoor => 1,
+            Self::OpenSpace => 2,
+        }
+    }
+}
+
+/// BLE distance calibration parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BleCalibration {
+    /// Reference RSSI at 1 metre.
+    pub rssi_at_1m_dbm: f64,
+    /// Path-loss exponent.
+    pub path_loss_exponent: f64,
+}
+
+/// Decodes a stable calibration-profile ordinal.
+#[must_use]
+pub const fn calibration_profile_from_ordinal(ordinal: i32) -> Option<CalibrationProfile> {
+    match ordinal {
+        0 => Some(CalibrationProfile::Baseline),
+        1 => Some(CalibrationProfile::Indoor),
+        2 => Some(CalibrationProfile::OpenSpace),
+        _ => None,
+    }
+}
+
+/// Canonical calibration parameters for a named profile.
+#[must_use]
+pub const fn calibration_profile(profile: CalibrationProfile) -> BleCalibration {
+    match profile {
+        CalibrationProfile::Baseline => BleCalibration {
+            rssi_at_1m_dbm: -59.0,
+            path_loss_exponent: 2.0,
+        },
+        CalibrationProfile::Indoor => BleCalibration {
+            rssi_at_1m_dbm: -62.0,
+            path_loss_exponent: 2.6,
+        },
+        CalibrationProfile::OpenSpace => BleCalibration {
+            rssi_at_1m_dbm: -56.0,
+            path_loss_exponent: 1.8,
+        },
+    }
 }
 
 // Minimum filtered RSSI (dBm) admitted to each coarse proximity band.
@@ -160,4 +239,53 @@ pub fn ble_distance_m(rssi_dbm: f64, rssi_at_1m_dbm: f64, path_loss_exponent: f6
     }
     let distance = 10_f64.powf((rssi_at_1m_dbm - rssi_dbm) / (10.0 * path_loss_exponent));
     (distance.is_finite() && distance > 0.0).then_some(distance)
+}
+
+/// Conservative near/far distance band in metres given a plausible RSSI spread
+/// around the filtered reading.
+///
+/// `rssi_spread_db` is treated as a symmetric ± tolerance around `rssi_dbm`.
+/// A stronger plausible RSSI yields the lower bound; a weaker plausible RSSI
+/// yields the upper bound.
+#[must_use]
+pub fn ble_distance_range_m(
+    rssi_dbm: f64,
+    rssi_spread_db: f64,
+    rssi_at_1m_dbm: f64,
+    path_loss_exponent: f64,
+) -> Option<(f64, f64)> {
+    if !rssi_spread_db.is_finite() || rssi_spread_db < 0.0 {
+        return None;
+    }
+    let spread = rssi_spread_db.abs();
+    let lower = ble_distance_m(rssi_dbm + spread, rssi_at_1m_dbm, path_loss_exponent)?;
+    let upper = ble_distance_m(rssi_dbm - spread, rssi_at_1m_dbm, path_loss_exponent)?;
+    Some((lower.min(upper), lower.max(upper)))
+}
+
+/// Deterministic confidence score for a tracked signal from sample support and
+/// recent RSSI spread.
+///
+/// More samples increase confidence; higher spread reduces it. Returns `None`
+/// for a negative, NaN, or infinite spread input.
+#[must_use]
+pub fn signal_confidence_percent(sample_count: usize, rssi_spread_db: f64) -> Option<u8> {
+    if !rssi_spread_db.is_finite() || rssi_spread_db < 0.0 {
+        return None;
+    }
+    let support_score = sample_count.min(12) as u8 * 5;
+    let stability_score = if rssi_spread_db <= 2.0 {
+        40
+    } else if rssi_spread_db <= 4.0 {
+        32
+    } else if rssi_spread_db <= 6.0 {
+        24
+    } else if rssi_spread_db <= 8.0 {
+        16
+    } else if rssi_spread_db <= 12.0 {
+        8
+    } else {
+        0
+    };
+    Some((support_score + stability_score).min(100))
 }

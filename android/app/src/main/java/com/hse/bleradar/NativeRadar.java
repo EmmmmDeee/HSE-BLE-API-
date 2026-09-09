@@ -3,10 +3,12 @@ package com.hse.bleradar;
 /**
  * Thin JNI façade over {@code crates/bleradar-jni}, which itself only
  * re-exports pure functions already implemented and tested in
- * {@code bleradar-core} ({@code ble_distance_m}, {@code proximity_label},
- * {@code signal_trend}). Keeping every native declaration and ordinal
- * mapping in one file makes the Java/Rust ABI contract easy to audit
- * against {@code crates/bleradar-jni/src/lib.rs}.
+ * {@code bleradar-core} ({@code filtered_rssi}, {@code ble_distance_m},
+ * {@code ble_distance_range_m}, {@code proximity_label},
+ * {@code signal_confidence_percent}, {@code signal_trend},
+ * {@code tracking_snapshot}). Keeping every native declaration and ordinal
+ * mapping in one file makes the Java/Rust ABI contract easy to audit against
+ * {@code crates/bleradar-jni/src/lib.rs}.
  */
 public final class NativeRadar {
 
@@ -26,8 +28,27 @@ public final class NativeRadar {
     /** {@link #signalTrend(double, double, double)} result: change fell within the deadband. */
     public static final int TREND_STABLE = 2;
 
+    /** {@link #trackingFreshness(double, double, double, int, int, int, long)} result: currently live. */
+    public static final int FRESHNESS_LIVE = 0;
+    /** {@link #trackingFreshness(double, double, double, int, int, int, long)} result: recent but no longer live. */
+    public static final int FRESHNESS_RECENT = 1;
+    /** {@link #trackingFreshness(double, double, double, int, int, int, long)} result: stale. */
+    public static final int FRESHNESS_STALE = 2;
+
+    /** {@link #defaultCalibrationProfile()} / calibration-profile selector: conservative baseline default. */
+    public static final int CALIBRATION_BASELINE = 0;
+    /** {@link #defaultCalibrationProfile()} / calibration-profile selector: higher attenuation indoor profile. */
+    public static final int CALIBRATION_INDOOR = 1;
+    /** {@link #defaultCalibrationProfile()} / calibration-profile selector: lower attenuation open-space profile. */
+    public static final int CALIBRATION_OPEN_SPACE = 2;
+
+    /** {@link #defaultTrackingProfile()} / tracking-profile selector: balanced smoothing and freshness. */
+    public static final int TRACKING_STANDARD = 0;
+    /** {@link #defaultTrackingProfile()} / tracking-profile selector: more responsive, less stable. */
+    public static final int TRACKING_RESPONSIVE = 1;
+
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 1;
+    public static final int EXPECTED_ABI_VERSION = 6;
 
     private static volatile boolean loaded;
     private static volatile Throwable loadError;
@@ -48,6 +69,14 @@ public final class NativeRadar {
         }
         try {
             System.loadLibrary("bleradar_jni");
+            int observedAbiVersion = abiVersion();
+            if (observedAbiVersion != EXPECTED_ABI_VERSION) {
+                throw new UnsatisfiedLinkError(
+                        "ABI version mismatch: expected "
+                                + EXPECTED_ABI_VERSION
+                                + " observed "
+                                + observedAbiVersion);
+            }
             loaded = true;
         } catch (UnsatisfiedLinkError | SecurityException error) {
             loadError = error;
@@ -66,6 +95,13 @@ public final class NativeRadar {
     }
 
     /**
+     * Stateless EMA helper returning the next filtered RSSI, or {@link Double#NaN} when
+     * the current sample or alpha is invalid. Pass {@link Double#NaN} as the previous
+     * filtered value to bootstrap from the current sample.
+     */
+    public static native double filteredRssi(double previousFilteredDbm, double currentRssiDbm, double alpha);
+
+    /**
      * Log-distance estimate in metres, or {@link Double#NaN} when
      * {@code bleradar-core}'s {@code ble_distance_m} would return
      * {@code None} (non-finite input, non-positive path-loss exponent, or an
@@ -79,6 +115,127 @@ public final class NativeRadar {
 
     /** One of the {@code TREND_*} constants above. */
     public static native int signalTrend(double previousDbm, double currentDbm, double deadbandDb);
+
+    /**
+     * Conservative near bound, in metres, of the current range estimate, or
+     * {@link Double#NaN} when the inputs are invalid.
+     */
+    public static native double distanceLowerBoundM(
+            double rssiDbm,
+            double rssiSpreadDb,
+            double rssiAt1mDbm,
+            double pathLossExponent);
+
+    /**
+     * Conservative far bound, in metres, of the current range estimate, or
+     * {@link Double#NaN} when the inputs are invalid.
+     */
+    public static native double distanceUpperBoundM(
+            double rssiDbm,
+            double rssiSpreadDb,
+            double rssiAt1mDbm,
+            double pathLossExponent);
+
+    /**
+     * Deterministic 0-100 confidence score from sample support and recent RSSI spread,
+     * or {@code -1} when the inputs are invalid.
+     */
+    public static native int signalConfidencePercent(int sampleCount, double rssiSpreadDb);
+
+    /** Rust-owned reference RSSI at 1 metre for the selected calibration profile, or {@link Double#NaN}. */
+    public static native double calibrationProfileRssiAt1mDbm(int profile);
+
+    /** Rust-owned path-loss exponent for the selected calibration profile, or {@link Double#NaN}. */
+    public static native double calibrationProfilePathLossExponent(int profile);
+
+    /** The Rust-owned default calibration profile. */
+    public static native int defaultCalibrationProfile();
+
+    /** The Rust-owned default tracking profile. */
+    public static native int defaultTrackingProfile();
+
+    /**
+     * Canonical Rust-owned tracking snapshot field: filtered RSSI after ingesting the latest sample,
+     * or {@link Double#NaN} when the snapshot inputs are invalid.
+     */
+    public static native double trackingFilteredRssi(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double rssiSpreadDb,
+            int sampleCount,
+            int calibrationProfile,
+            int trackingProfile,
+            long ageMs);
+
+    /** Canonical Rust-owned tracking snapshot field: central distance estimate, or {@link Double#NaN}. */
+    public static native double trackingDistanceM(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double rssiSpreadDb,
+            int sampleCount,
+            int calibrationProfile,
+            int trackingProfile,
+            long ageMs);
+
+    /** Canonical Rust-owned tracking snapshot field: conservative near range bound, or {@link Double#NaN}. */
+    public static native double trackingDistanceLowerBoundM(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double rssiSpreadDb,
+            int sampleCount,
+            int calibrationProfile,
+            int trackingProfile,
+            long ageMs);
+
+    /** Canonical Rust-owned tracking snapshot field: conservative far range bound, or {@link Double#NaN}. */
+    public static native double trackingDistanceUpperBoundM(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double rssiSpreadDb,
+            int sampleCount,
+            int calibrationProfile,
+            int trackingProfile,
+            long ageMs);
+
+    /** Canonical Rust-owned tracking snapshot field: one of the {@code TREND_*} constants above. */
+    public static native int trackingTrend(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double rssiSpreadDb,
+            int sampleCount,
+            int calibrationProfile,
+            int trackingProfile,
+            long ageMs);
+
+    /** Canonical Rust-owned tracking snapshot field: one of the {@code PROXIMITY_*} constants above. */
+    public static native int trackingProximity(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double rssiSpreadDb,
+            int sampleCount,
+            int calibrationProfile,
+            int trackingProfile,
+            long ageMs);
+
+    /** Canonical Rust-owned tracking snapshot field: deterministic 0-100 confidence, or {@code -1}. */
+    public static native int trackingConfidencePercent(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double rssiSpreadDb,
+            int sampleCount,
+            int calibrationProfile,
+            int trackingProfile,
+            long ageMs);
+
+    /** Canonical Rust-owned tracking snapshot field: one of the {@code FRESHNESS_*} constants above. */
+    public static native int trackingFreshness(
+            double previousFilteredDbm,
+            double currentRssiDbm,
+            double rssiSpreadDb,
+            int sampleCount,
+            int calibrationProfile,
+            int trackingProfile,
+            long ageMs);
 
     /** Build-time sanity check; should equal {@link #EXPECTED_ABI_VERSION}. */
     public static native int abiVersion();

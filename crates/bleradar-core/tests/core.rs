@@ -1,10 +1,13 @@
 //! Behavioral regression tests for the reconstructed BLE Radar domain core.
 
 use bleradar_core::{
-    AddressKind, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, GeoError,
-    IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice, SignalTrend, TrackError,
-    bearing_deg, ble_distance_m, canonical_mac, haversine_m, is_locally_administered, signal_trend,
-    wifi_channel_to_frequency, wifi_frequency_to_channel,
+    AddressKind, CalibrationProfile, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind,
+    FreshnessClass, GeoError, IdentityEvidence, LatLon, ProximityBand, RssiEma, SelectedDevice,
+    SignalTrend, TrackError, TrackingProfile, TrackingSnapshotInput, bearing_deg, ble_distance_m,
+    ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal, canonical_mac,
+    filtered_rssi, haversine_m, is_locally_administered, signal_confidence_percent, signal_trend,
+    tracking_profile, tracking_profile_from_ordinal, tracking_snapshot, wifi_channel_to_frequency,
+    wifi_frequency_to_channel,
 };
 
 /// Builds a `DeviceObservation` from its varying fields; `tx_power_dbm` is
@@ -113,6 +116,124 @@ fn distance_model_rejects_unrepresentable_results() {
     assert!(ble_distance_m(-f64::MAX, f64::MAX, 2.0).is_none());
     assert!(ble_distance_m(f64::MAX, -f64::MAX, 2.0).is_none());
     assert!(ble_distance_m(-70.0, -59.0, f64::MIN_POSITIVE).is_none());
+}
+
+#[test]
+fn filtered_rssi_bootstraps_and_then_applies_ema() {
+    assert_eq!(filtered_rssi(f64::NAN, -80.0, 0.5), Some(-80.0));
+    assert_eq!(filtered_rssi(-80.0, -60.0, 0.5), Some(-70.0));
+}
+
+#[test]
+fn distance_range_expands_around_the_estimate() {
+    let (near, far) = ble_distance_range_m(-59.0, 6.0, -59.0, 2.0).unwrap();
+    assert!(near < 1.0);
+    assert!(far > 1.0);
+    assert!(near < far);
+}
+
+#[test]
+fn distance_range_rejects_invalid_spread() {
+    assert!(ble_distance_range_m(-59.0, -1.0, -59.0, 2.0).is_none());
+    assert!(ble_distance_range_m(-59.0, f64::NAN, -59.0, 2.0).is_none());
+}
+
+#[test]
+fn signal_confidence_rewards_stability_and_sample_support() {
+    let low = signal_confidence_percent(1, 10.0).unwrap();
+    let high = signal_confidence_percent(12, 1.5).unwrap();
+    assert!(high > low);
+    assert_eq!(high, 100);
+}
+
+#[test]
+fn signal_confidence_rejects_invalid_spread() {
+    assert!(signal_confidence_percent(1, -1.0).is_none());
+    assert!(signal_confidence_percent(1, f64::INFINITY).is_none());
+}
+
+#[test]
+fn calibration_profiles_are_stable_and_distinct() {
+    assert_eq!(
+        calibration_profile_from_ordinal(0),
+        Some(CalibrationProfile::Baseline)
+    );
+    assert_eq!(
+        calibration_profile_from_ordinal(1),
+        Some(CalibrationProfile::Indoor)
+    );
+    assert_eq!(
+        calibration_profile_from_ordinal(2),
+        Some(CalibrationProfile::OpenSpace)
+    );
+    assert_eq!(calibration_profile_from_ordinal(99), None);
+
+    let baseline = calibration_profile(CalibrationProfile::Baseline);
+    let indoor = calibration_profile(CalibrationProfile::Indoor);
+    let open = calibration_profile(CalibrationProfile::OpenSpace);
+    assert_eq!(baseline.rssi_at_1m_dbm, -59.0);
+    assert_eq!(baseline.path_loss_exponent, 2.0);
+    assert!(indoor.path_loss_exponent > baseline.path_loss_exponent);
+    assert!(open.path_loss_exponent < baseline.path_loss_exponent);
+}
+
+#[test]
+fn tracking_profiles_are_stable_and_distinct() {
+    assert_eq!(
+        tracking_profile_from_ordinal(0),
+        Some(TrackingProfile::Standard)
+    );
+    assert_eq!(
+        tracking_profile_from_ordinal(1),
+        Some(TrackingProfile::Responsive)
+    );
+    assert_eq!(tracking_profile_from_ordinal(99), None);
+
+    let standard = tracking_profile(TrackingProfile::Standard);
+    let responsive = tracking_profile(TrackingProfile::Responsive);
+    assert_eq!(standard.rssi_alpha, 0.35);
+    assert_eq!(standard.trend_deadband_db, 3.0);
+    assert!(responsive.rssi_alpha > standard.rssi_alpha);
+    assert!(responsive.trend_deadband_db < standard.trend_deadband_db);
+}
+
+#[test]
+fn tracking_snapshot_derives_a_coherent_bundle() {
+    let snapshot = tracking_snapshot(TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: -80.0,
+        current_rssi_dbm: -60.0,
+        rssi_spread_db: 4.0,
+        sample_count: 6,
+        calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Responsive,
+        age_ms: 1_000,
+    })
+    .unwrap();
+    assert!((snapshot.filtered_rssi_dbm - (-69.0)).abs() < 1e-9);
+    assert_eq!(snapshot.trend, SignalTrend::Stronger);
+    assert_eq!(snapshot.proximity, ProximityBand::Mid);
+    assert!(snapshot.distance_m.unwrap() > 1.0);
+    assert!(snapshot.distance_lower_bound_m.unwrap() < snapshot.distance_m.unwrap());
+    assert!(snapshot.distance_upper_bound_m.unwrap() > snapshot.distance_m.unwrap());
+    assert!(snapshot.confidence_percent > 0);
+    assert_eq!(snapshot.freshness, FreshnessClass::Live);
+}
+
+#[test]
+fn tracking_snapshot_bootstraps_and_classifies_stale_observations() {
+    let snapshot = tracking_snapshot(TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: f64::NAN,
+        current_rssi_dbm: -59.0,
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Standard,
+        age_ms: 31_000,
+    })
+    .unwrap();
+    assert_eq!(snapshot.filtered_rssi_dbm, -59.0);
+    assert_eq!(snapshot.trend, SignalTrend::Stable);
+    assert_eq!(snapshot.freshness, FreshnessClass::Stale);
 }
 
 #[test]

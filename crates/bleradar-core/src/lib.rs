@@ -81,11 +81,14 @@ pub use pipeline::{
     PipelineError, PipelineStage, TemporalGeoGraph, TemporalSpan,
 };
 pub use signal::{
-    FilterError, ProximityBand, RssiEma, SignalTrend, ble_distance_m, proximity_label, signal_trend,
+    BleCalibration, CalibrationProfile, FilterError, ProximityBand, RssiEma, SignalTrend,
+    ble_distance_m, ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
+    filtered_rssi, proximity_label, signal_confidence_percent, signal_trend,
 };
 pub use tracking::{
-    Confidence, DeviceObservation, DeviceTrack, EstimateKind, MapPoint, SelectedDevice,
-    SpatialEstimate, TrackError,
+    Confidence, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass, MapPoint,
+    SelectedDevice, SpatialEstimate, TrackError, TrackingPolicy, TrackingProfile, TrackingSnapshot,
+    TrackingSnapshotInput, tracking_profile, tracking_profile_from_ordinal, tracking_snapshot,
 };
 pub use verification::{
     DifferentialCase, DifferentialReport, DifferentialViolation, ExecutionOutcome, FailureCause,

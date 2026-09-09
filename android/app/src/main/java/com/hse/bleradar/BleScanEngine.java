@@ -23,24 +23,19 @@ import java.util.concurrent.ConcurrentHashMap;
  * Owns the live {@link BluetoothLeScanner} session and the canonical
  * address-keyed device map. Every distance/proximity/trend value comes from
  * {@link NativeRadar}, i.e. from {@code bleradar-core}'s tested
- * implementation — this class only does BLE plumbing, RSSI smoothing, and
- * bookkeeping (never reimplements the signal math itself).
+ * implementation — this class only does BLE plumbing and bookkeeping (never
+ * reimplements the signal/tracking math itself).
  */
 final class BleScanEngine {
 
     private static final String TAG = "BleScanEngine";
 
-    /** Reference RSSI at 1 metre. A conservative, commonly used default; real hardware varies. */
-    private static final double DEFAULT_RSSI_AT_1M_DBM = -59.0;
-    /** Free-space-ish default path-loss exponent; environments with walls/obstructions run higher. */
-    private static final double DEFAULT_PATH_LOSS_EXPONENT = 2.0;
-    /** Deadband used for the strengthening/weakening trend classification. */
-    private static final double TREND_DEADBAND_DB = 3.0;
-    /** Local smoothing factor for consecutive RSSI samples of the same device (not bleradar-core's EMA). */
-    private static final double RSSI_SMOOTHING_ALPHA = 0.35;
-
+    /** Long-idle devices are pruned to keep the simple UI focused on live signals. */
+    private static final long STALE_RETENTION_WINDOW_MILLIS = 30_000L;
     private final Context appContext;
     private final Map<String, Blip> blipsByAddress = new ConcurrentHashMap<>();
+    private final int calibrationProfile;
+    private final int trackingProfile;
     private BluetoothLeScanner scanner;
     private volatile boolean scanning;
 
@@ -66,6 +61,12 @@ final class BleScanEngine {
 
     BleScanEngine(Context context) {
         this.appContext = context.getApplicationContext();
+        this.calibrationProfile = NativeRadar.isAvailable()
+                ? NativeRadar.defaultCalibrationProfile()
+                : NativeRadar.CALIBRATION_BASELINE;
+        this.trackingProfile = NativeRadar.isAvailable()
+                ? NativeRadar.defaultTrackingProfile()
+                : NativeRadar.TRACKING_STANDARD;
     }
 
     static boolean hasRequiredPermissions(Context context) {
@@ -142,7 +143,26 @@ final class BleScanEngine {
 
     /** A defensive copy of every device observed within the current session. */
     List<Blip> snapshot() {
-        return new ArrayList<>(blipsByAddress.values());
+        long now = SystemClock.uptimeMillis();
+        refreshFreshness(now);
+        pruneStale(now);
+        List<Blip> snapshot = new ArrayList<>(blipsByAddress.values());
+        snapshot.sort((left, right) -> {
+            int byFreshnessClass = Integer.compare(left.freshness, right.freshness);
+            if (byFreshnessClass != 0) {
+                return byFreshnessClass;
+            }
+            int byFreshness = Long.compare(right.lastSeenUptimeMillis, left.lastSeenUptimeMillis);
+            if (byFreshness != 0) {
+                return byFreshness;
+            }
+            int byConfidence = Integer.compare(right.confidencePercent, left.confidencePercent);
+            if (byConfidence != 0) {
+                return byConfidence;
+            }
+            return Double.compare(right.lastRssiDbm, left.lastRssiDbm);
+        });
+        return snapshot;
     }
 
     Collection<Blip> blips() {
@@ -150,6 +170,7 @@ final class BleScanEngine {
     }
 
     private void recordResult(ScanResult result) {
+        long now = SystemClock.uptimeMillis();
         String address = result.getDevice().getAddress();
         if (address == null) {
             return;
@@ -157,26 +178,96 @@ final class BleScanEngine {
         Blip blip = blipsByAddress.computeIfAbsent(address, Blip::new);
         double rawRssi = result.getRssi();
         double previous = blip.lastRssiDbm;
-        boolean hasPrevious = !Double.isNaN(previous);
-        double smoothed = hasPrevious
-                ? RSSI_SMOOTHING_ALPHA * rawRssi + (1 - RSSI_SMOOTHING_ALPHA) * previous
-                : rawRssi;
 
         if (NativeRadar.isAvailable()) {
-            blip.trend = NativeRadar.signalTrend(hasPrevious ? previous : smoothed, smoothed, TREND_DEADBAND_DB);
-            blip.distanceMetres = NativeRadar.bleDistanceM(smoothed, DEFAULT_RSSI_AT_1M_DBM, DEFAULT_PATH_LOSS_EXPONENT);
-            blip.proximity = NativeRadar.proximityLabel(smoothed);
+            double smoothed = NativeRadar.trackingFilteredRssi(
+                    previous,
+                    rawRssi,
+                    0.0,
+                    Math.max(1, blip.sampleCount()),
+                    calibrationProfile,
+                    trackingProfile,
+                    0L);
+            if (!Double.isFinite(smoothed)) {
+                smoothed = rawRssi;
+            }
+            blip.recordFilteredRssi(smoothed);
+            blip.lastRssiDbm = smoothed;
+            double spreadDb = blip.recentRssiSpreadDb();
+            int sampleCount = blip.sampleCount();
+            blip.trend = NativeRadar.trackingTrend(
+                    previous,
+                    rawRssi,
+                    spreadDb,
+                    sampleCount,
+                    calibrationProfile,
+                    trackingProfile,
+                    0L);
+            blip.distanceMetres = NativeRadar.trackingDistanceM(
+                    previous,
+                    rawRssi,
+                    spreadDb,
+                    sampleCount,
+                    calibrationProfile,
+                    trackingProfile,
+                    0L);
+            blip.distanceLowerBoundMetres = NativeRadar.trackingDistanceLowerBoundM(
+                    previous,
+                    rawRssi,
+                    spreadDb,
+                    sampleCount,
+                    calibrationProfile,
+                    trackingProfile,
+                    0L);
+            blip.distanceUpperBoundMetres = NativeRadar.trackingDistanceUpperBoundM(
+                    previous,
+                    rawRssi,
+                    spreadDb,
+                    sampleCount,
+                    calibrationProfile,
+                    trackingProfile,
+                    0L);
+            blip.proximity = NativeRadar.trackingProximity(
+                    previous,
+                    rawRssi,
+                    spreadDb,
+                    sampleCount,
+                    calibrationProfile,
+                    trackingProfile,
+                    0L);
+            int confidencePercent = NativeRadar.trackingConfidencePercent(
+                    previous,
+                    rawRssi,
+                    spreadDb,
+                    sampleCount,
+                    calibrationProfile,
+                    trackingProfile,
+                    0L);
+            blip.confidencePercent = Math.max(0, confidencePercent);
+            blip.freshness = NativeRadar.trackingFreshness(
+                    previous,
+                    rawRssi,
+                    spreadDb,
+                    sampleCount,
+                    calibrationProfile,
+                    trackingProfile,
+                    0L);
         } else {
+            blip.lastRssiDbm = rawRssi;
             blip.distanceMetres = Double.NaN;
+            blip.distanceLowerBoundMetres = Double.NaN;
+            blip.distanceUpperBoundMetres = Double.NaN;
             blip.proximity = NativeRadar.PROXIMITY_FAR;
+            blip.confidencePercent = 0;
+            blip.freshness = NativeRadar.FRESHNESS_LIVE;
         }
-        blip.lastRssiDbm = smoothed;
-        blip.lastSeenUptimeMillis = SystemClock.uptimeMillis();
+        blip.lastSeenUptimeMillis = now;
 
         String name = safeDeviceName(result);
         if (name != null) {
             blip.name = name;
         }
+        pruneStale(now);
     }
 
     private String safeDeviceName(ScanResult result) {
@@ -188,5 +279,41 @@ final class BleScanEngine {
         } catch (SecurityException denied) {
             return null;
         }
+    }
+
+    private void refreshFreshness(long nowUptimeMillis) {
+        if (!NativeRadar.isAvailable()) {
+            return;
+        }
+        for (Blip blip : blipsByAddress.values()) {
+            long ageMs = Math.max(0L, nowUptimeMillis - blip.lastSeenUptimeMillis);
+            blip.freshness = NativeRadar.trackingFreshness(
+                    blip.lastRssiDbm,
+                    blip.lastRssiDbm,
+                    blip.recentRssiSpreadDb(),
+                    Math.max(1, blip.sampleCount()),
+                    calibrationProfile,
+                    trackingProfile,
+                    ageMs);
+        }
+    }
+
+    private void pruneStale(long nowUptimeMillis) {
+        blipsByAddress.entrySet().removeIf(entry -> {
+            Blip blip = entry.getValue();
+            long ageMs = Math.max(0L, nowUptimeMillis - blip.lastSeenUptimeMillis);
+            if (NativeRadar.isAvailable()) {
+                return blip.freshness == NativeRadar.FRESHNESS_STALE
+                        || NativeRadar.trackingFreshness(
+                        blip.lastRssiDbm,
+                        blip.lastRssiDbm,
+                        blip.recentRssiSpreadDb(),
+                        Math.max(1, blip.sampleCount()),
+                        calibrationProfile,
+                        trackingProfile,
+                        ageMs) == NativeRadar.FRESHNESS_STALE;
+            }
+            return ageMs > STALE_RETENTION_WINDOW_MILLIS;
+        });
     }
 }

@@ -9,14 +9,24 @@ package com.hse.bleradar;
  * giving each device a consistent, recognizable position across redraws.
  */
 final class Blip {
+    private static final int RECENT_SIGNAL_WINDOW = 8;
+
     final String address;
     volatile String name;
     volatile double lastRssiDbm = Double.NaN;
     volatile double distanceMetres = Double.NaN;
+    volatile double distanceLowerBoundMetres = Double.NaN;
+    volatile double distanceUpperBoundMetres = Double.NaN;
     volatile int proximity = NativeRadar.PROXIMITY_FAR;
     volatile int trend = NativeRadar.TREND_STABLE;
+    volatile int freshness = NativeRadar.FRESHNESS_STALE;
+    volatile int confidencePercent;
     volatile long lastSeenUptimeMillis;
     final float angleDegrees;
+    private final double[] recentRssiDbm = new double[RECENT_SIGNAL_WINDOW];
+    private int recentSampleCount;
+    private int recentSampleIndex;
+    private int totalSampleCount;
 
     Blip(String address) {
         this.address = address;
@@ -35,5 +45,34 @@ final class Blip {
     /** Whether this device has been re-observed within the given freshness window. */
     boolean isFresh(long nowUptimeMillis, long freshnessWindowMillis) {
         return nowUptimeMillis - lastSeenUptimeMillis <= freshnessWindowMillis;
+    }
+
+    void recordFilteredRssi(double filteredRssiDbm) {
+        if (!Double.isFinite(filteredRssiDbm)) {
+            return;
+        }
+        recentRssiDbm[recentSampleIndex] = filteredRssiDbm;
+        recentSampleIndex = (recentSampleIndex + 1) % recentRssiDbm.length;
+        if (recentSampleCount < recentRssiDbm.length) {
+            recentSampleCount++;
+        }
+        totalSampleCount++;
+    }
+
+    int sampleCount() {
+        return totalSampleCount;
+    }
+
+    double recentRssiSpreadDb() {
+        if (recentSampleCount < 2) {
+            return 0.0;
+        }
+        double min = Double.POSITIVE_INFINITY;
+        double max = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < recentSampleCount; i++) {
+            min = Math.min(min, recentRssiDbm[i]);
+            max = Math.max(max, recentRssiDbm[i]);
+        }
+        return Math.max(0.0, max - min);
     }
 }

@@ -1,7 +1,9 @@
 //! Device-centric observation and map-tracking state.
 
 use crate::{
-    LatLon, ProximityBand, RssiEma, SignalTrend, haversine_m, proximity_label, signal_trend,
+    CalibrationProfile, LatLon, ProximityBand, RssiEma, SignalTrend, ble_distance_m,
+    ble_distance_range_m, calibration_profile as resolve_calibration_profile, filtered_rssi,
+    haversine_m, proximity_label, signal_confidence_percent, signal_trend,
 };
 
 /// Assumed horizontal accuracy, in metres, for an observation carrying no GPS fix.
@@ -80,6 +82,188 @@ pub struct SpatialEstimate {
     pub supporting_observations: usize,
     /// Confidence in the estimate.
     pub confidence: Confidence,
+}
+
+/// Coarse recency class for UI/device ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FreshnessClass {
+    /// Observed within the tight live window.
+    Live,
+    /// Not live, but still recent enough to keep visible.
+    Recent,
+    /// Old enough to be treated as stale.
+    Stale,
+}
+
+impl FreshnessClass {
+    /// Derives a freshness class from age and configured windows.
+    #[must_use]
+    pub const fn from_age(age_ms: u64, live_window_ms: u64, recent_window_ms: u64) -> Self {
+        let effective_recent_window_ms = if recent_window_ms > live_window_ms {
+            recent_window_ms
+        } else {
+            live_window_ms
+        };
+        if age_ms <= live_window_ms {
+            Self::Live
+        } else if age_ms <= effective_recent_window_ms {
+            Self::Recent
+        } else {
+            Self::Stale
+        }
+    }
+}
+
+/// Rust-owned tracking-behavior profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackingProfile {
+    /// Balanced smoothing and freshness behavior for general use.
+    Standard,
+    /// React faster to new samples at the cost of more motion/noise.
+    Responsive,
+}
+
+impl TrackingProfile {
+    /// Stable ordinal used by JNI/Android.
+    #[must_use]
+    pub const fn ordinal(self) -> i32 {
+        match self {
+            Self::Standard => 0,
+            Self::Responsive => 1,
+        }
+    }
+}
+
+/// Tracking policy values resolved from a [`TrackingProfile`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackingPolicy {
+    /// EMA alpha.
+    pub rssi_alpha: f64,
+    /// Trend deadband.
+    pub trend_deadband_db: f64,
+    /// Tight live freshness window.
+    pub live_window_ms: u64,
+    /// Broader recent freshness window.
+    pub recent_window_ms: u64,
+}
+
+/// Decodes a stable tracking-profile ordinal.
+#[must_use]
+pub const fn tracking_profile_from_ordinal(ordinal: i32) -> Option<TrackingProfile> {
+    match ordinal {
+        0 => Some(TrackingProfile::Standard),
+        1 => Some(TrackingProfile::Responsive),
+        _ => None,
+    }
+}
+
+/// Canonical policy values for a named tracking profile.
+#[must_use]
+pub const fn tracking_profile(profile: TrackingProfile) -> TrackingPolicy {
+    match profile {
+        TrackingProfile::Standard => TrackingPolicy {
+            rssi_alpha: 0.35,
+            trend_deadband_db: 3.0,
+            live_window_ms: 5_000,
+            recent_window_ms: 30_000,
+        },
+        TrackingProfile::Responsive => TrackingPolicy {
+            rssi_alpha: 0.55,
+            trend_deadband_db: 2.0,
+            live_window_ms: 4_000,
+            recent_window_ms: 25_000,
+        },
+    }
+}
+
+/// One canonical, Rust-owned per-device signal snapshot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackingSnapshot {
+    /// Filtered RSSI after ingesting the latest sample.
+    pub filtered_rssi_dbm: f64,
+    /// Current hot/cold guidance.
+    pub trend: SignalTrend,
+    /// Coarse proximity band.
+    pub proximity: ProximityBand,
+    /// Central distance estimate in metres when representable.
+    pub distance_m: Option<f64>,
+    /// Conservative lower distance bound in metres when representable.
+    pub distance_lower_bound_m: Option<f64>,
+    /// Conservative upper distance bound in metres when representable.
+    pub distance_upper_bound_m: Option<f64>,
+    /// Deterministic confidence score.
+    pub confidence_percent: u8,
+    /// Recency class for ranking/pruning.
+    pub freshness: FreshnessClass,
+}
+
+/// Raw inputs required to derive a [`TrackingSnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackingSnapshotInput {
+    /// Previously filtered RSSI, or NaN when bootstrapping.
+    pub previous_filtered_rssi_dbm: f64,
+    /// Latest raw RSSI sample.
+    pub current_rssi_dbm: f64,
+    /// Recent filtered-RSSI spread for uncertainty/confidence.
+    pub rssi_spread_db: f64,
+    /// Number of filtered samples represented by the spread/history.
+    pub sample_count: usize,
+    /// Rust-owned calibration profile.
+    pub calibration_profile: CalibrationProfile,
+    /// Rust-owned tracking behavior profile.
+    pub tracking_profile: TrackingProfile,
+    /// Age of the latest observation relative to "now".
+    pub age_ms: u64,
+}
+
+/// Derives one coherent per-device signal snapshot from raw tracking inputs.
+#[must_use]
+pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapshot> {
+    let calibration = resolve_calibration_profile(input.calibration_profile);
+    let tracking_policy = tracking_profile(input.tracking_profile);
+    let filtered_rssi_dbm = filtered_rssi(
+        input.previous_filtered_rssi_dbm,
+        input.current_rssi_dbm,
+        tracking_policy.rssi_alpha,
+    )?;
+    let trend = if input.previous_filtered_rssi_dbm.is_finite() {
+        signal_trend(
+            input.previous_filtered_rssi_dbm,
+            filtered_rssi_dbm,
+            tracking_policy.trend_deadband_db,
+        )
+    } else {
+        SignalTrend::Stable
+    };
+    let proximity = proximity_label(filtered_rssi_dbm);
+    let distance_m = ble_distance_m(
+        filtered_rssi_dbm,
+        calibration.rssi_at_1m_dbm,
+        calibration.path_loss_exponent,
+    )?;
+    let (distance_lower_bound_m, distance_upper_bound_m) = ble_distance_range_m(
+        filtered_rssi_dbm,
+        input.rssi_spread_db,
+        calibration.rssi_at_1m_dbm,
+        calibration.path_loss_exponent,
+    )
+    .map(|(lower, upper)| (Some(lower), Some(upper)))?;
+    let confidence_percent = signal_confidence_percent(input.sample_count, input.rssi_spread_db)?;
+    let freshness = FreshnessClass::from_age(
+        input.age_ms,
+        tracking_policy.live_window_ms,
+        tracking_policy.recent_window_ms,
+    );
+    Some(TrackingSnapshot {
+        filtered_rssi_dbm,
+        trend,
+        proximity,
+        distance_m: Some(distance_m),
+        distance_lower_bound_m,
+        distance_upper_bound_m,
+        confidence_percent,
+        freshness,
+    })
 }
 
 /// Track validation error.

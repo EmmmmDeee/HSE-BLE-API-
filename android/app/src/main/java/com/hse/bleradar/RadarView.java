@@ -58,6 +58,7 @@ public final class RadarView extends View {
     private final Paint ringPaint = strokePaint(Color.parseColor("#39D98A"));
     private final Paint rimPaint = strokePaint(Color.parseColor("#39D98A"));
     private final Paint centrePaint = solidPaint(Color.parseColor("#39D98A"));
+    private final Paint uncertaintyPaint = strokePaint(Color.parseColor("#B3E7F3ED"));
     private final Paint ringLabelPaint = textPaint(Color.parseColor("#7E9C90"), 11f);
     private final Paint ringLabelBackgroundPaint = solidPaint(Color.parseColor("#CC0F1419"));
     private final Paint blipLabelPaint = textPaint(Color.parseColor("#E7F3ED"), 12f);
@@ -92,6 +93,7 @@ public final class RadarView extends View {
     /** Replaces the rendered device snapshot. Safe to call from the main thread only. */
     public void setBlips(List<Blip> blips) {
         this.blips = blips;
+        setMaxRangeMetres(autoRangeMetres(blips));
         invalidate();
     }
 
@@ -270,10 +272,22 @@ public final class RadarView extends View {
             double distance = Double.isNaN(blip.distanceMetres)
                     ? fallbackDistanceForProximity(blip.proximity)
                     : blip.distanceMetres;
-            float normalised = (float) Math.min(1.0, distance / maxRangeMetres);
             double angleRad = Math.toRadians(blip.angleDegrees - 90.0);
-            float bx = cx + radius * normalised * (float) Math.cos(angleRad);
-            float by = cy + radius * normalised * (float) Math.sin(angleRad);
+            double rangeStart = Double.isFinite(blip.distanceLowerBoundMetres)
+                    ? blip.distanceLowerBoundMetres
+                    : distance;
+            double rangeEnd = Double.isFinite(blip.distanceUpperBoundMetres)
+                    ? blip.distanceUpperBoundMetres
+                    : distance;
+            float startNormalised = normaliseRange(rangeStart);
+            float endNormalised = normaliseRange(rangeEnd);
+            float centerNormalised = normaliseRange(distance);
+            float startX = cx + radius * startNormalised * (float) Math.cos(angleRad);
+            float startY = cy + radius * startNormalised * (float) Math.sin(angleRad);
+            float endX = cx + radius * endNormalised * (float) Math.cos(angleRad);
+            float endY = cy + radius * endNormalised * (float) Math.sin(angleRad);
+            float bx = cx + radius * centerNormalised * (float) Math.cos(angleRad);
+            float by = cy + radius * centerNormalised * (float) Math.sin(angleRad);
 
             long age = now - blip.lastSeenUptimeMillis;
             float freshness = 1f - Math.min(1f, age / (float) BLIP_FRESHNESS_WINDOW_MILLIS);
@@ -282,6 +296,11 @@ public final class RadarView extends View {
             int coreAlpha = Math.round(255 * (0.55f + 0.45f * freshness));
             float blipRadius = Math.max(5f, radius * 0.035f);
 
+            if (endNormalised > startNormalised + 0.01f) {
+                uncertaintyPaint.setStrokeWidth(Math.max(2f, blipRadius * 0.55f));
+                uncertaintyPaint.setColor(withAlpha(blipColor, Math.round(170 * freshness)));
+                canvas.drawLine(startX, startY, endX, endY, uncertaintyPaint);
+            }
             drawGlow(canvas, blip.proximity, bx, by, blipRadius * 3.2f, glowAlpha);
 
             corePaint.setStyle(Paint.Style.FILL);
@@ -294,7 +313,7 @@ public final class RadarView extends View {
             corePaint.setColor(withAlpha(Color.WHITE, Math.round(90 * freshness)));
             canvas.drawCircle(bx, by, blipRadius, corePaint);
 
-            String label = shortLabel(blip) + " · " + formatMetres(distance);
+            String label = shortLabel(blip);
             float labelWidth = blipLabelPaint.measureText(label) + 12f;
             float labelTop = by + blipRadius + 2f;
             canvas.drawRoundRect(
@@ -344,6 +363,32 @@ public final class RadarView extends View {
         }
         String address = blip.address;
         return address.length() > 5 ? address.substring(address.length() - 5) : address;
+    }
+
+    private float normaliseRange(double metres) {
+        return (float) Math.min(1.0, Math.max(0.0, metres / maxRangeMetres));
+    }
+
+    private static double autoRangeMetres(List<Blip> blips) {
+        double strongestBound = 0.0;
+        long now = SystemClock.uptimeMillis();
+        for (Blip blip : blips) {
+            if (!blip.isFresh(now, BLIP_FRESHNESS_WINDOW_MILLIS)) {
+                continue;
+            }
+            double candidate = Double.isFinite(blip.distanceUpperBoundMetres)
+                    ? blip.distanceUpperBoundMetres
+                    : Double.isFinite(blip.distanceMetres)
+                    ? blip.distanceMetres
+                    : fallbackDistanceForProximity(blip.proximity);
+            strongestBound = Math.max(strongestBound, candidate);
+        }
+        if (strongestBound <= 0.0 || !Double.isFinite(strongestBound)) {
+            return 40.0;
+        }
+        double padded = strongestBound * 1.2;
+        double clamped = Math.min(60.0, Math.max(12.0, padded));
+        return Math.ceil(clamped / 5.0) * 5.0;
     }
 
     private static double fallbackDistanceForProximity(int proximity) {
