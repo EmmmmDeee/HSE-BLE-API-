@@ -6,8 +6,9 @@ use bleradar_core::{
     SignalTrend, TrackError, TrackingProfile, TrackingSnapshotInput, bearing_deg, ble_distance_m,
     ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal, canonical_mac,
     filtered_rssi, haversine_m, is_locally_administered, proximity_label,
-    signal_confidence_percent, signal_trend, tracking_profile, tracking_profile_from_ordinal,
-    tracking_snapshot, wifi_channel_to_frequency, wifi_frequency_to_channel,
+    proximity_label_from_distance_m, signal_confidence_percent, signal_trend, tracking_profile,
+    tracking_profile_from_ordinal, tracking_snapshot, wifi_channel_to_frequency,
+    wifi_frequency_to_channel,
 };
 
 /// Builds a `DeviceObservation` from its varying fields; `tx_power_dbm` is
@@ -227,11 +228,28 @@ fn tracking_snapshot_derives_a_coherent_bundle() {
     assert!((snapshot.filtered_rssi_dbm - (-69.0)).abs() < 1e-9);
     assert_eq!(snapshot.trend, SignalTrend::Stronger);
     assert_eq!(snapshot.proximity, ProximityBand::Mid);
+    assert_eq!(snapshot.distance_proximity, Some(ProximityBand::Mid));
     assert!(snapshot.distance_m.unwrap() > 1.0);
     assert!(snapshot.distance_lower_bound_m.unwrap() < snapshot.distance_m.unwrap());
     assert!(snapshot.distance_upper_bound_m.unwrap() > snapshot.distance_m.unwrap());
     assert!(snapshot.confidence_percent.unwrap() > 0);
     assert_eq!(snapshot.freshness, FreshnessClass::Live);
+}
+
+#[test]
+fn tracking_snapshot_keeps_distance_proximity_distinct_from_rssi_proximity() {
+    let snapshot = tracking_snapshot(TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: f64::NAN,
+        current_rssi_dbm: -59.0,
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Standard,
+        age_ms: 0,
+    })
+    .unwrap();
+    assert_eq!(snapshot.proximity, ProximityBand::Near);
+    assert_eq!(snapshot.distance_proximity, Some(ProximityBand::Immediate));
 }
 
 #[test]
@@ -277,6 +295,7 @@ fn tracking_snapshot_keeps_filtered_signal_when_spread_is_invalid() {
         assert!(snapshot.distance_m.is_some());
         assert_eq!(snapshot.distance_lower_bound_m, None);
         assert_eq!(snapshot.distance_upper_bound_m, None);
+        assert_eq!(snapshot.distance_proximity, Some(ProximityBand::Mid));
         assert_eq!(snapshot.confidence_percent, None);
         assert_eq!(snapshot.freshness, FreshnessClass::Live);
     }
@@ -289,6 +308,45 @@ fn proximity_label_rejects_non_finite_rssi() {
     assert_eq!(proximity_label(f64::NAN), None);
     assert_eq!(proximity_label(f64::INFINITY), None);
     assert_eq!(proximity_label(f64::NEG_INFINITY), None);
+}
+
+#[test]
+fn distance_proximity_label_preserves_boundaries_and_invalid_inputs() {
+    assert_eq!(
+        proximity_label_from_distance_m(0.0),
+        Some(ProximityBand::Immediate)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(1.0),
+        Some(ProximityBand::Immediate)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(1.000_001),
+        Some(ProximityBand::Near)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(2.0),
+        Some(ProximityBand::Near)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(2.000_001),
+        Some(ProximityBand::Mid)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(5.0),
+        Some(ProximityBand::Mid)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(5.000_001),
+        Some(ProximityBand::Far)
+    );
+    assert_eq!(
+        proximity_label_from_distance_m(25.0),
+        Some(ProximityBand::Far)
+    );
+    assert_eq!(proximity_label_from_distance_m(-1.0), None);
+    assert_eq!(proximity_label_from_distance_m(f64::NAN), None);
+    assert_eq!(proximity_label_from_distance_m(f64::INFINITY), None);
 }
 
 #[test]
@@ -314,6 +372,30 @@ fn map_points_remain_observed_not_inferred() {
     let points = track.observed_map_points();
     assert_eq!(points.len(), 1);
     assert_eq!(points[0].kind, EstimateKind::Observed);
+}
+
+#[test]
+fn map_point_confidence_preserves_accuracy_tiers() {
+    let position = LatLon::new(-26.8, 152.8).unwrap();
+    let cases = [
+        (3.0, 95),
+        (5.0, 90),
+        (10.0, 80),
+        (20.0, 65),
+        (50.0, 45),
+        (50.1, 25),
+    ];
+    for (accuracy_m, expected_confidence) in cases {
+        let mut track = DeviceTrack::new(0.5).unwrap();
+        track
+            .push(observation(1, Some(position), Some(accuracy_m), -55.0))
+            .unwrap();
+        assert_eq!(
+            track.observed_map_points()[0].confidence.value(),
+            expected_confidence,
+            "unexpected confidence for {accuracy_m}m accuracy"
+        );
+    }
 }
 
 #[test]
@@ -362,6 +444,50 @@ fn spatial_estimate_handles_antimeridian_straddling() {
     let true_midpoint = LatLon::new(0.0, 180.0).unwrap();
     assert!(haversine_m(estimate.center, true_midpoint) < 1_000.0);
     assert!(estimate.uncertainty_m < 10_000.0);
+}
+
+#[test]
+fn spatial_estimate_prefers_recent_position_fixes() {
+    let mut track = DeviceTrack::new(0.5).unwrap();
+    let old = LatLon::new(0.0, 0.0).unwrap();
+    let recent = LatLon::new(0.0, 0.001).unwrap();
+    track
+        .push(observation(0, Some(old), Some(5.0), -60.0))
+        .unwrap();
+    track
+        .push(observation(120_000, Some(recent), Some(5.0), -60.0))
+        .unwrap();
+
+    let estimate = track.spatial_estimate().unwrap();
+    assert!(haversine_m(estimate.center, recent) < 20.0);
+    assert!(haversine_m(estimate.center, old) > 80.0);
+}
+
+#[test]
+fn spatial_estimate_uncertainty_contains_every_fix_error_radius() {
+    let mut track = DeviceTrack::new(0.5).unwrap();
+    let positions = [
+        LatLon::new(0.0, 0.0).unwrap(),
+        LatLon::new(0.0, 0.001).unwrap(),
+        LatLon::new(0.0, 0.01).unwrap(),
+    ];
+    for (timestamp, position) in positions.into_iter().enumerate() {
+        track
+            .push(observation(
+                timestamp as u64,
+                Some(position),
+                Some(3.0),
+                -60.0,
+            ))
+            .unwrap();
+    }
+
+    let estimate = track.spatial_estimate().unwrap();
+    let largest_error_radius = positions
+        .into_iter()
+        .map(|position| haversine_m(estimate.center, position) + 3.0)
+        .fold(0.0, f64::max);
+    assert!(estimate.uncertainty_m >= largest_error_radius);
 }
 
 #[test]

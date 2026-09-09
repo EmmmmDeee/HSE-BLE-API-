@@ -8,8 +8,9 @@ use bleradar_jni::{
     filtered_rssi_or_nan, proximity_label_ordinal, signal_confidence_percent_or_negative,
     signal_trend_ordinal, tracking_confidence_percent_or_negative,
     tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
-    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
-    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
+    tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
+    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
+    tracking_trend_ordinal,
 };
 
 #[test]
@@ -107,8 +108,29 @@ fn tracking_snapshot_exports_a_coherent_bundle() {
     assert!(upper > distance);
     assert_eq!(tracking_trend_ordinal(input), 0);
     assert_eq!(tracking_proximity_ordinal(input), 2);
+    assert_eq!(tracking_distance_proximity_ordinal(input), 2);
     assert!(tracking_confidence_percent_or_negative(input) > 0);
     assert_eq!(tracking_freshness_ordinal(input), 0);
+}
+
+#[test]
+fn distance_proximity_ordinal_uses_calibrated_boundaries() {
+    let input = |distance_m: f64| TrackingSnapshotJniInput {
+        previous_filtered_dbm: f64::NAN,
+        current_rssi_dbm: -59.0 - 20.0 * distance_m.log10(),
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        calibration_profile_ordinal: 0,
+        tracking_profile_ordinal: 0,
+        age_ms: 0,
+    };
+    assert_eq!(tracking_distance_proximity_ordinal(input(0.999)), 0);
+    assert_eq!(tracking_distance_proximity_ordinal(input(1.001)), 1);
+    assert_eq!(tracking_distance_proximity_ordinal(input(1.999)), 1);
+    assert_eq!(tracking_distance_proximity_ordinal(input(2.001)), 2);
+    assert_eq!(tracking_distance_proximity_ordinal(input(4.999)), 2);
+    assert_eq!(tracking_distance_proximity_ordinal(input(5.001)), 3);
+    assert_eq!(tracking_distance_proximity_ordinal(input(24.999)), 3);
 }
 
 #[test]
@@ -129,6 +151,7 @@ fn tracking_snapshot_uses_invalid_sentinels() {
     };
     assert!(tracking_filtered_rssi_or_nan(invalid_profile).is_nan());
     assert!(tracking_distance_m_or_nan(invalid_count).is_nan());
+    assert_eq!(tracking_distance_proximity_ordinal(invalid_count), 3);
     assert_eq!(tracking_confidence_percent_or_negative(invalid_count), -1);
     assert_eq!(tracking_freshness_ordinal(invalid_count), 2);
 }

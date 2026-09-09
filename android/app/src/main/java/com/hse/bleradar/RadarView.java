@@ -49,6 +49,8 @@ public final class RadarView extends View {
     private static final int RING_COUNT = 4;
     private static final int SPOKE_COUNT = 8;
     private static final int PROXIMITY_COLOUR_COUNT = 4;
+    private static final double RANGE_EXPAND_THRESHOLD = 1.15;
+    private static final double RANGE_CONTRACT_THRESHOLD = 0.70;
 
     private double maxRangeMetres = 40.0;
     private List<Blip> blips = new ArrayList<>();
@@ -92,9 +94,19 @@ public final class RadarView extends View {
 
     /** Replaces the rendered device snapshot. Safe to call from the main thread only. */
     public void setBlips(List<Blip> blips) {
-        this.blips = blips;
-        setMaxRangeMetres(autoRangeMetres(blips));
+        this.blips = blips == null ? new ArrayList<>() : new ArrayList<>(blips);
+        updateAutoRange(autoRangeMetres(this.blips));
         invalidate();
+    }
+
+    private void updateAutoRange(double targetRangeMetres) {
+        if (!Double.isFinite(targetRangeMetres) || targetRangeMetres <= 0.0) {
+            return;
+        }
+        if (targetRangeMetres > maxRangeMetres * RANGE_EXPAND_THRESHOLD
+                || targetRangeMetres < maxRangeMetres * RANGE_CONTRACT_THRESHOLD) {
+            maxRangeMetres = targetRangeMetres;
+        }
     }
 
     private static Paint solidPaint(int color) {
@@ -109,6 +121,7 @@ public final class RadarView extends View {
         paint.setColor(color);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeJoin(Paint.Join.ROUND);
         return paint;
     }
 
@@ -292,14 +305,25 @@ public final class RadarView extends View {
             long age = now - blip.lastSeenUptimeMillis;
             float freshness = 1f - Math.min(1f, age / (float) BLIP_FRESHNESS_WINDOW_MILLIS);
             int blipColor = colourForProximity(blip.proximity);
-            int glowAlpha = Math.round(120 * freshness);
+            float confidence = Math.max(0f, Math.min(100f, blip.confidencePercent)) / 100f;
+            int glowAlpha = Math.round((90f + 165f * confidence) * freshness);
             int coreAlpha = Math.round(255 * (0.55f + 0.45f * freshness));
             float blipRadius = Math.max(5f, radius * 0.035f);
 
             if (endNormalised > startNormalised + 0.01f) {
-                uncertaintyPaint.setStrokeWidth(Math.max(2f, blipRadius * 0.55f));
-                uncertaintyPaint.setColor(withAlpha(blipColor, Math.round(170 * freshness)));
+                uncertaintyPaint.setStrokeWidth(Math.max(2f, blipRadius * (0.45f + 0.25f * confidence)));
+                uncertaintyPaint.setColor(withAlpha(blipColor,
+                        Math.round((120f + 100f * confidence) * freshness)));
                 canvas.drawLine(startX, startY, endX, endY, uncertaintyPaint);
+
+                // Endpoint markers make the range legible even when the
+                // center blip is moving or the range is wider than the core.
+                corePaint.setStyle(Paint.Style.STROKE);
+                corePaint.setStrokeWidth(Math.max(1f, blipRadius * 0.16f));
+                corePaint.setColor(withAlpha(blipColor, Math.round(150 * freshness)));
+                float endpointRadius = Math.max(2f, blipRadius * 0.38f);
+                canvas.drawCircle(startX, startY, endpointRadius, corePaint);
+                canvas.drawCircle(endX, endY, endpointRadius, corePaint);
             }
             drawGlow(canvas, blip.proximity, bx, by, blipRadius * 3.2f, glowAlpha);
 
@@ -309,18 +333,27 @@ public final class RadarView extends View {
             // Bright rim highlight on the core, distinguishing a live blip
             // from the flat ring strokes behind it.
             corePaint.setStyle(Paint.Style.STROKE);
-            corePaint.setStrokeWidth(Math.max(1f, blipRadius * 0.25f));
-            corePaint.setColor(withAlpha(Color.WHITE, Math.round(90 * freshness)));
+            corePaint.setStrokeWidth(Math.max(1f, blipRadius * (0.16f + 0.18f * confidence)));
+            corePaint.setColor(withAlpha(Color.WHITE, Math.round((65f + 120f * confidence) * freshness)));
             canvas.drawCircle(bx, by, blipRadius, corePaint);
 
             String label = shortLabel(blip);
             float labelWidth = blipLabelPaint.measureText(label) + 12f;
+            float labelHeight = blipLabelPaint.getTextSize() + 8f;
+            float labelCenterX = clamp(
+                    bx,
+                    cx - radius + labelWidth / 2f + 4f,
+                    cx + radius - labelWidth / 2f - 4f);
             float labelTop = by + blipRadius + 2f;
+            if (labelTop + labelHeight > cy + radius) {
+                labelTop = by - blipRadius - labelHeight - 2f;
+            }
+            labelTop = clamp(labelTop, cy - radius + 2f, cy + radius - labelHeight - 2f);
             canvas.drawRoundRect(
-                    bx - labelWidth / 2f, labelTop,
-                    bx + labelWidth / 2f, labelTop + blipLabelPaint.getTextSize() + 8f,
+                    labelCenterX - labelWidth / 2f, labelTop,
+                    labelCenterX + labelWidth / 2f, labelTop + labelHeight,
                     6f, 6f, blipLabelBackgroundPaint);
-            canvas.drawText(label, bx, labelTop + blipLabelPaint.getTextSize() + 2f, blipLabelPaint);
+            canvas.drawText(label, labelCenterX, labelTop + blipLabelPaint.getTextSize() + 2f, blipLabelPaint);
         }
     }
 
@@ -367,6 +400,13 @@ public final class RadarView extends View {
 
     private float normaliseRange(double metres) {
         return (float) Math.min(1.0, Math.max(0.0, metres / maxRangeMetres));
+    }
+
+    private static float clamp(float value, float lower, float upper) {
+        if (lower > upper) {
+            return (lower + upper) / 2f;
+        }
+        return Math.max(lower, Math.min(upper, value));
     }
 
     private static double autoRangeMetres(List<Blip> blips) {

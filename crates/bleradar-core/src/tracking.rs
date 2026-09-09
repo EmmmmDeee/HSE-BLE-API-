@@ -3,11 +3,21 @@
 use crate::{
     CalibrationProfile, LatLon, ProximityBand, RssiEma, SignalTrend, ble_distance_m,
     ble_distance_range_m, calibration_profile as resolve_calibration_profile, filtered_rssi,
-    haversine_m, proximity_label, signal_confidence_percent, signal_trend,
+    haversine_m, proximity_label, proximity_label_from_distance_m, signal_confidence_percent,
+    signal_trend,
 };
 
 /// Assumed horizontal accuracy, in metres, for an observation carrying no GPS fix.
 const DEFAULT_GPS_ACCURACY_M: f64 = 50.0;
+
+/// Half-life for historical observations in a spatial estimate.
+const SPATIAL_RECENCY_HALF_LIFE_MS: f64 = 30_000.0;
+
+/// Confidence tiers for GPS-backed map positions, ordered from most precise
+/// to least precise. Accuracy above the final threshold uses the fallback tier.
+const ACCURACY_CONFIDENCE_TIERS: &[(f64, u8)] =
+    &[(3.0, 95), (5.0, 90), (10.0, 80), (20.0, 65), (50.0, 45)];
+const LOW_ACCURACY_CONFIDENCE: u8 = 25;
 
 /// Deadband, in dB, below which a filtered-RSSI change is treated as stable.
 const TREND_DEADBAND_DB: f64 = 2.0;
@@ -185,6 +195,11 @@ pub struct TrackingSnapshot {
     pub trend: SignalTrend,
     /// Coarse proximity band.
     pub proximity: ProximityBand,
+    /// Distance-derived proximity band when the calibrated distance is representable.
+    ///
+    /// This is kept separate from [`Self::proximity`] because the latter preserves
+    /// the legacy RSSI-based API semantics.
+    pub distance_proximity: Option<ProximityBand>,
     /// Central distance estimate in metres when representable.
     pub distance_m: Option<f64>,
     /// Conservative lower distance bound in metres when representable.
@@ -251,6 +266,7 @@ pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapsho
         calibration.rssi_at_1m_dbm,
         calibration.path_loss_exponent,
     );
+    let distance_proximity = distance_m.and_then(proximity_label_from_distance_m);
     let (distance_lower_bound_m, distance_upper_bound_m) = match ble_distance_range_m(
         filtered_rssi_dbm,
         input.rssi_spread_db,
@@ -270,6 +286,7 @@ pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapsho
         filtered_rssi_dbm,
         trend,
         proximity,
+        distance_proximity,
         distance_m,
         distance_lower_bound_m,
         distance_upper_bound_m,
@@ -421,7 +438,8 @@ impl DeviceTrack {
             .collect()
     }
 
-    /// Produces a conservative weighted centroid using GPS accuracy and relative signal strength.
+    /// Produces a conservative weighted centroid using recency, GPS accuracy,
+    /// and relative signal strength.
     ///
     /// This estimates the strongest observed region, not the transmitter's exact coordinate.
     #[must_use]
@@ -434,6 +452,7 @@ impl DeviceTrack {
                     obs.observer_position?,
                     obs.gps_accuracy_m.unwrap_or(DEFAULT_GPS_ACCURACY_M),
                     obs.rssi_dbm,
+                    obs.timestamp_ms,
                 ))
             })
             .collect();
@@ -441,9 +460,14 @@ impl DeviceTrack {
             return None;
         }
 
+        let latest_timestamp = positioned
+            .iter()
+            .map(|(_, _, _, timestamp_ms)| *timestamp_ms)
+            .max()
+            .unwrap_or(0);
         let max_rssi = positioned
             .iter()
-            .map(|(_, _, rssi)| *rssi)
+            .map(|(_, _, rssi, _)| *rssi)
             .fold(f64::NEG_INFINITY, f64::max);
         // Longitude wraps at ±180°, so positions are averaged as weighted 3-D
         // unit vectors on the sphere; a linear mean of straddling longitudes
@@ -452,8 +476,9 @@ impl DeviceTrack {
         let mut x_sum = 0.0;
         let mut y_sum = 0.0;
         let mut z_sum = 0.0;
-        for (pos, accuracy, rssi) in &positioned {
-            let weight = observation_weight(*accuracy, *rssi, max_rssi);
+        for (pos, accuracy, rssi, timestamp_ms) in &positioned {
+            let age_ms = latest_timestamp.saturating_sub(*timestamp_ms) as f64;
+            let weight = observation_weight(*accuracy, *rssi, max_rssi, age_ms);
             let lat_rad = pos.lat().to_radians();
             let lon_rad = pos.lon().to_radians();
             weight_sum += weight;
@@ -475,18 +500,21 @@ impl DeviceTrack {
         let center_lat = (z_sum / norm).clamp(-1.0, 1.0).asin().to_degrees();
         let center_lon = y_sum.atan2(x_sum).to_degrees();
         let center = LatLon::new(center_lat, center_lon).ok()?;
-        let weighted_radius = positioned
+        // Keep the estimate's uncertainty conservative: every contributing
+        // observation must fit inside the displayed radius after its own GPS
+        // error is accounted for. An arithmetic mean can incorrectly suggest
+        // precision while leaving an observation outside the map boundary.
+        let uncertainty_radius = positioned
             .iter()
-            .map(|(pos, accuracy, _)| haversine_m(center, *pos) + *accuracy)
-            .sum::<f64>()
-            / positioned.len() as f64;
+            .map(|(pos, accuracy, _, _)| haversine_m(center, *pos) + *accuracy)
+            .fold(0.0, f64::max);
         let count_score = (positioned.len().min(20) * 3) as u8;
-        let accuracy_score = confidence_from_accuracy(weighted_radius).value();
+        let accuracy_score = confidence_from_accuracy(uncertainty_radius).value();
         let confidence = Confidence::new(count_score.saturating_add(accuracy_score / 2));
 
         Some(SpatialEstimate {
             center,
-            uncertainty_m: weighted_radius.max(1.0),
+            uncertainty_m: uncertainty_radius.max(1.0),
             supporting_observations: positioned.len(),
             confidence,
         })
@@ -495,28 +523,24 @@ impl DeviceTrack {
 
 /// Weight for one positioned observation: nearer-fix (smaller accuracy) and
 /// stronger-relative-signal observations contribute more to the centroid.
-fn observation_weight(accuracy_m: f64, rssi_dbm: f64, max_rssi_dbm: f64) -> f64 {
+fn observation_weight(accuracy_m: f64, rssi_dbm: f64, max_rssi_dbm: f64, age_ms: f64) -> f64 {
     let accuracy_weight = 1.0 / accuracy_m.max(1.0).powi(2);
     let signal_weight = 10_f64
         .powf((rssi_dbm - max_rssi_dbm) / 20.0)
         .clamp(0.05, 1.0);
-    accuracy_weight * signal_weight
+    // Retain a small historical floor so a long-lived track does not jump
+    // violently when its newest fix is briefly noisy or poorly located.
+    let recency_weight = 0.5_f64
+        .powf(age_ms.max(0.0) / SPATIAL_RECENCY_HALF_LIFE_MS)
+        .max(0.05);
+    accuracy_weight * signal_weight * recency_weight
 }
 
 fn confidence_from_accuracy(accuracy_m: f64) -> Confidence {
-    let score = if accuracy_m <= 3.0 {
-        95
-    } else if accuracy_m <= 5.0 {
-        90
-    } else if accuracy_m <= 10.0 {
-        80
-    } else if accuracy_m <= 20.0 {
-        65
-    } else if accuracy_m <= 50.0 {
-        45
-    } else {
-        25
-    };
+    let score = ACCURACY_CONFIDENCE_TIERS
+        .iter()
+        .find(|(threshold_m, _)| accuracy_m <= *threshold_m)
+        .map_or(LOW_ACCURACY_CONFIDENCE, |(_, score)| *score);
     Confidence::new(score)
 }
 
