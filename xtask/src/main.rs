@@ -78,7 +78,7 @@ fn print_usage() {
          \x20 parity-report              regenerate docs/PARITY_COVERAGE.md\n\
          \x20 check-dependency-policy    fail if Cargo.lock has non-workspace crates\n\
          \x20 check-oracle-integrity     verify retained oracle SHA-256 hashes\n\
-         \x20 apk-inventory <apk>        print sha256 + dex/lib/manifest entries\n\
+         \x20 apk-inventory <apk>        print sha256 + every zip entry name\n\
          \x20 native-abi <lib.so>        print sorted defined FUNC/OBJECT symbols\n\
          \x20 dex-classes <classes.dex>  print sorted class descriptors\n\
          \x20 vendor-advisory-db         materialize the offline cargo-deny advisory db\n\
@@ -635,10 +635,10 @@ fn cmd_apk_inventory(args: &[String]) -> Result<(), String> {
     let mut names = zip_reader::entry_names(&data).map_err(|e| e.to_string())?;
     names.sort();
     println!("entries={}", names.len());
+    // Full entry set — not just dex/lib/manifest — so live inventory can prove
+    // resources.arsc, adaptive icons, and any future packaged assets are present.
     for name in &names {
-        if name.ends_with(".dex") || name.starts_with("lib/") || name == "AndroidManifest.xml" {
-            println!("{name}");
-        }
+        println!("{name}");
     }
     Ok(())
 }
@@ -702,10 +702,16 @@ const NATIVE_LIB_FILE_NAME: &str = "libbleradar_jni.so";
 
 /// APK entries the current hand-built Android package must contain to remain
 /// installable and reach the JNI bridge.
+///
+/// `resources.arsc` is required in addition to the launch/JNI trio: aapt2
+/// packages the compiled resource table uncompressed (`-0 arsc`) and the
+/// runtime resource lookup path depends on it. Live 2026-09-09 inventory of
+/// `HSE-BLE-Radar-arm64-v1.0.0.apk` confirmed all four are present.
 const REQUIRED_APK_ENTRIES: &[&str] = &[
     "AndroidManifest.xml",
     "classes.dex",
     "lib/arm64-v8a/libbleradar_jni.so",
+    "resources.arsc",
 ];
 
 /// Critical Java classes the built `classes.dex` must define for the app's
