@@ -7,6 +7,8 @@ pub enum FilterError {
     InvalidAlpha,
     /// RSSI sample was NaN or infinite.
     NonFiniteSample,
+    /// The filtered result was NaN or infinite.
+    NonFiniteResult,
 }
 
 impl std::fmt::Display for FilterError {
@@ -14,6 +16,7 @@ impl std::fmt::Display for FilterError {
         f.write_str(match self {
             Self::InvalidAlpha => "EMA alpha must be within (0, 1]",
             Self::NonFiniteSample => "RSSI sample was NaN or infinite",
+            Self::NonFiniteResult => "EMA result was NaN or infinite",
         })
     }
 }
@@ -51,7 +54,8 @@ impl RssiEma {
     /// Adds a sample and returns the filtered value.
     ///
     /// # Errors
-    /// Returns [`FilterError::NonFiniteSample`] if `rssi_dbm` is NaN or infinite.
+    /// Returns [`FilterError::NonFiniteSample`] if `rssi_dbm` is NaN or infinite,
+    /// or [`FilterError::NonFiniteResult`] if the computed value is not finite.
     pub fn push(&mut self, rssi_dbm: f64) -> Result<f64, FilterError> {
         if !rssi_dbm.is_finite() {
             return Err(FilterError::NonFiniteSample);
@@ -60,6 +64,9 @@ impl RssiEma {
             Some(old) => self.alpha.mul_add(rssi_dbm, (1.0 - self.alpha) * old),
             None => rssi_dbm,
         };
+        if !next.is_finite() {
+            return Err(FilterError::NonFiniteResult);
+        }
         self.value = Some(next);
         Ok(next)
     }
