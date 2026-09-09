@@ -365,6 +365,45 @@ fn spatial_estimate_handles_antimeridian_straddling() {
 }
 
 #[test]
+fn spatial_estimate_prefers_recent_position_fixes() {
+    let mut track = DeviceTrack::new(0.5).unwrap();
+    let old = LatLon::new(0.0, 0.0).unwrap();
+    let recent = LatLon::new(0.0, 0.001).unwrap();
+    track
+        .push(observation(0, Some(old), Some(5.0), -60.0))
+        .unwrap();
+    track
+        .push(observation(120_000, Some(recent), Some(5.0), -60.0))
+        .unwrap();
+
+    let estimate = track.spatial_estimate().unwrap();
+    assert!(haversine_m(estimate.center, recent) < 20.0);
+    assert!(haversine_m(estimate.center, old) > 80.0);
+}
+
+#[test]
+fn spatial_estimate_uncertainty_contains_every_fix_error_radius() {
+    let mut track = DeviceTrack::new(0.5).unwrap();
+    let positions = [
+        LatLon::new(0.0, 0.0).unwrap(),
+        LatLon::new(0.0, 0.001).unwrap(),
+        LatLon::new(0.0, 0.01).unwrap(),
+    ];
+    for (timestamp, position) in positions.into_iter().enumerate() {
+        track
+            .push(observation(timestamp as u64, Some(position), Some(3.0), -60.0))
+            .unwrap();
+    }
+
+    let estimate = track.spatial_estimate().unwrap();
+    let largest_error_radius = positions
+        .into_iter()
+        .map(|position| haversine_m(estimate.center, position) + 3.0)
+        .fold(0.0, f64::max);
+    assert!(estimate.uncertainty_m >= largest_error_radius);
+}
+
+#[test]
 fn selection_lock_retains_history() {
     let mut selected = SelectedDevice::new("device-1", 0.5).unwrap();
     selected.start_tracking();
