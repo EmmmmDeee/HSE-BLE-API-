@@ -81,6 +81,33 @@ Rust workspace:
     ABI contracts, froze sampled oracle semantics and known gaps in executable
     tests, and assigned a single Rust-first target owner to every core
     responsibility.
+20. Derived the JNI export contract from `NativeRadar.java` (the single
+    authority) and enforced it in `cargo xtask gates` and CI, with a live
+    JVM → JNI → Rust proof that links every declared native reflectively
+    (decisions #54–#55); rebuilt the Android app's lifecycle so foreground
+    promotion follows the permission grant, sticky restarts resume scanning,
+    and a failed native load is surfaced (COR-017/018/019, #56–#57).
+21. Found and fixed seven core defects with randomised and random-operation
+    falsification campaigns — forged Plus Code digits, an out-of-range
+    coordinate fast path, `Domain`/`Url` normalisation not being fixed points
+    (COR-020…023), a `u16` ranking overflow that silently mis-scored temporal
+    compatibility in release builds, a partial-state `correlate_all`, and
+    duplicated edge citations (COR-024…026) — each locked by a regression test
+    that failed on the unfixed source (#58, #64).
+22. Made `EvidenceStore::transaction` (a journaled, nested, panic-safe undo
+    log) the store's single all-or-nothing mechanism and moved every engine
+    onto it, replacing seven clone-the-store call sites: the per-operation
+    cost is flat with store size (8,000 website observations 21.0 s → 25.8 ms;
+    #66, COR-027), and comparable-pair matching in the correlation engines is
+    indexed instead of scanned (#69).
+23. Kept every campaign as a deterministic, reseedable test — the evidence
+    store (including random transactions), the OSINT search, website,
+    infrastructure, fusion and verification engines, the 21 JNI exports, and
+    a union-find bridge/cluster oracle — each shown catching a deliberate
+    mutation (or a real defect) before being retained, with scratch runs of
+    300,000–5,000,000 operations at zero violations (#61–#65, #67–#68); the
+    library has no `unwrap`/`panic!` outside doc examples and ten guarded
+    `expect`s.
 
 ## Functional parity status
 
@@ -118,6 +145,8 @@ Execution gates, observed green on 2026-08-28 (Linux x86_64, pinned rustc/cargo 
 - `cargo test --workspace --locked`;
 - `cargo xtask parity-report` followed by a drift check against the committed `docs/PARITY_COVERAGE.md`;
 - `cargo audit` / `cargo deny`, fully offline against the vendored RustSec advisory database (`vendor/rustsec-advisory-db/`) — closed 2026-08-31, see `docs/AUTONOMOUS_DECISIONS.md` #28.
+- `cargo xtask check-jni-contract` (every `static native` in `NativeRadar.java` ↔ exactly one `Java_*` export, no orphans) inside `gates`, and `cargo xtask verify-jni-live` (a real JVM linking and invoking every declared native) as a separate CI step on a pinned Temurin 21 JDK — added 2026-09-10, decisions #54–#55;
+- the deterministic campaigns listed in item 23 run inside `cargo test --workspace`, and `examples/engine_load.rs` / `crates/bleradar-jni/examples/scan_result_cost.rs` reproduce the recorded performance baselines (`benchmarks/README.md`).
 
 Still blocked, not reported green:
 - all Android-target execution (see MIG-003).
