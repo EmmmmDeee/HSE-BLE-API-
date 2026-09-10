@@ -362,3 +362,141 @@ fn pipeline_error_variants_implement_display_and_error() {
         let _: &dyn std::error::Error = &error;
     }
 }
+
+// ── Differential oracle for clusters()/bridges() (2026-09-10, decision #61) ──
+//
+// An edge is a bridge iff removing it increases the number of connected
+// components. That definition is trivially computable with union-find, so it
+// is an independent reference for the iterative, multigraph-safe Tarjan
+// search: random graphs with self-loops and parallel edges are exactly the
+// inputs where bridge finders go wrong. 50,000 graphs matched on the day this
+// was added; every `cargo test` re-checks a deterministic 2,000-graph sample.
+
+mod differential {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    pub struct Rng(pub u64);
+
+    impl Rng {
+        pub fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        pub fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn find(parent: &mut [usize], x: usize) -> usize {
+        let mut root = x;
+        while parent[root] != root {
+            root = parent[root];
+        }
+        let mut cursor = x;
+        while parent[cursor] != root {
+            let next = parent[cursor];
+            parent[cursor] = root;
+            cursor = next;
+        }
+        root
+    }
+
+    /// Component label of every node with edge `skip` (if any) removed.
+    pub fn components(n: usize, edges: &[(usize, usize)], skip: Option<usize>) -> Vec<usize> {
+        let mut parent: Vec<usize> = (0..n).collect();
+        for (i, &(a, b)) in edges.iter().enumerate() {
+            if Some(i) == skip {
+                continue;
+            }
+            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            if ra != rb {
+                parent[ra] = rb;
+            }
+        }
+        (0..n).map(|v| find(&mut parent, v)).collect()
+    }
+
+    pub fn component_sets(names: &[String], labels: &[usize]) -> BTreeSet<BTreeSet<String>> {
+        let mut by_label: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+        for (v, label) in labels.iter().enumerate() {
+            by_label.entry(*label).or_default().insert(names[v].clone());
+        }
+        by_label.into_values().collect()
+    }
+
+    pub fn distinct(labels: &[usize]) -> usize {
+        labels.iter().collect::<BTreeSet<_>>().len()
+    }
+}
+
+#[test]
+fn clusters_and_bridges_match_a_brute_force_reference_on_random_multigraphs() {
+    use differential::{Rng, component_sets, components, distinct};
+    use std::collections::BTreeSet;
+
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    for graph_index in 0..2_000 {
+        let n = 1 + rng.below(9);
+        let m = rng.below(14);
+        let mut edges: Vec<(usize, usize)> = Vec::with_capacity(m + 1);
+        for _ in 0..m {
+            let a = rng.below(n);
+            // Some self-loops, and a duplicated edge on every other graph so
+            // parallel edges (never bridges) are always represented.
+            let b = if rng.below(6) == 0 { a } else { rng.below(n) };
+            edges.push((a, b));
+        }
+        if !edges.is_empty() && rng.below(2) == 0 {
+            let duplicate = edges[rng.below(edges.len())];
+            edges.push(duplicate);
+        }
+
+        let names: Vec<String> = (0..n).map(|i| format!("n{i}")).collect();
+        let mut graph = TemporalGeoGraph::new();
+        for name in &names {
+            graph.add_node(name.clone(), None).unwrap();
+        }
+        for (i, &(a, b)) in edges.iter().enumerate() {
+            graph
+                .add_edge(&names[a], &names[b], format!("e{i}"), i as u64, conf(50))
+                .unwrap();
+        }
+
+        let labels = components(n, &edges, None);
+        let expected_clusters = component_sets(&names, &labels);
+        let actual_clusters: BTreeSet<BTreeSet<String>> = graph
+            .clusters()
+            .into_iter()
+            .map(|cluster| cluster.into_iter().collect())
+            .collect();
+        assert_eq!(
+            actual_clusters, expected_clusters,
+            "graph #{graph_index} n={n} edges={edges:?}: clusters differ"
+        );
+
+        let baseline = distinct(&labels);
+        let mut expected_bridges: BTreeSet<(String, String)> = BTreeSet::new();
+        for (i, &(a, b)) in edges.iter().enumerate() {
+            if a == b {
+                continue;
+            }
+            if distinct(&components(n, &edges, Some(i))) > baseline {
+                let (x, y) = (names[a].clone(), names[b].clone());
+                expected_bridges.insert(if x <= y { (x, y) } else { (y, x) });
+            }
+        }
+        let actual_bridges: BTreeSet<(String, String)> = graph
+            .bridges()
+            .into_iter()
+            .map(|(x, y)| if x <= y { (x, y) } else { (y, x) })
+            .collect();
+        assert_eq!(
+            actual_bridges, expected_bridges,
+            "graph #{graph_index} n={n} edges={edges:?}: bridges differ"
+        );
+    }
+}
