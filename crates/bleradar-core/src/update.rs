@@ -35,6 +35,10 @@
 //!   after a bad update fails its post-install health check.
 //! * [`should_check_for_update`] — a re-check throttle so the app polls no more
 //!   often than a minimum interval, robust against a backward clock.
+//! * [`download_readiness`] — pre-download gating on network (metered/Wi-Fi),
+//!   battery, and free storage ([`DownloadPolicy`] / [`DownloadConditions`] →
+//!   [`DownloadReadiness`]) so a download that would fail or cost the user is
+//!   never started.
 //!
 //! Every guard is a permanent invariant locked by `tests/update.rs` and the
 //! randomized `tests/update_campaign.rs`; `examples/update_flow.rs` exercises the
@@ -473,6 +477,133 @@ pub enum RetryDecision {
 #[must_use]
 pub fn should_check_for_update(now: u64, last_check: u64, min_interval: u64) -> bool {
     now.saturating_sub(last_check) >= min_interval
+}
+
+/// The kind of network connection currently available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkType {
+    /// No usable connection.
+    None,
+    /// A metered connection (mobile data / a hotspot): downloading costs the user.
+    Metered,
+    /// An unmetered connection (Wi-Fi / Ethernet).
+    Unmetered,
+}
+
+/// A snapshot of the device conditions relevant to starting a download, sampled
+/// by the caller (the engine performs no I/O and cannot read these itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadConditions {
+    /// The current network.
+    pub network: NetworkType,
+    /// Battery charge, `0..=100`.
+    pub battery_percent: u8,
+    /// Whether the device is charging (a charging device is never "low battery").
+    pub charging: bool,
+    /// Free bytes on the volume the artifact would be written to.
+    pub free_storage_bytes: u64,
+}
+
+/// The caller's policy for when an automatic download may proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadPolicy {
+    /// Whether a download may run on a metered network.
+    pub allow_metered: bool,
+    /// Minimum battery percent required to download unless charging.
+    pub min_battery_percent: u8,
+    /// Free space required *beyond* the artifact size (install staging headroom).
+    pub storage_headroom_bytes: u64,
+}
+
+impl DownloadPolicy {
+    /// A conservative default: Wi-Fi only, at least 20% battery (or charging),
+    /// and one artifact-size of staging headroom beyond the artifact itself.
+    #[must_use]
+    pub const fn conservative() -> Self {
+        Self {
+            allow_metered: false,
+            min_battery_percent: 20,
+            storage_headroom_bytes: 0,
+        }
+    }
+}
+
+/// Whether a download may start, and if not, the first unmet precondition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadReadiness {
+    /// All preconditions are met; the download may begin.
+    Ready,
+    /// No usable network connection.
+    NoNetwork,
+    /// A network is present but it is metered and the policy forbids that.
+    MeteredBlocked,
+    /// Battery is below the policy minimum and the device is not charging.
+    LowBattery,
+    /// Not enough free storage for the artifact plus the required headroom.
+    InsufficientStorage {
+        /// Bytes required (artifact + headroom).
+        needed: u64,
+        /// Bytes currently free.
+        free: u64,
+    },
+}
+
+impl DownloadReadiness {
+    /// Whether the download may proceed.
+    #[must_use]
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+/// Decides whether an automatic download of an `artifact_size`-byte artifact may
+/// start under the given conditions and policy, returning the first unmet
+/// precondition in a fixed precedence: **no network** → **metered blocked** →
+/// **low battery** → **insufficient storage** → ready. This lets a caller avoid
+/// the most common real-world auto-update failures (a metered-data download, a
+/// download that drains a low battery, or one that runs the volume out of space
+/// mid-write) before committing to [`UpdateSession::begin_download`].
+///
+/// # Examples
+/// ```
+/// use bleradar_core::update::{
+///     download_readiness, DownloadConditions, DownloadPolicy, DownloadReadiness, NetworkType,
+/// };
+/// let policy = DownloadPolicy::conservative(); // Wi-Fi only, >=20% or charging
+/// let on_wifi = DownloadConditions {
+///     network: NetworkType::Unmetered,
+///     battery_percent: 55,
+///     charging: false,
+///     free_storage_bytes: 100_000_000,
+/// };
+/// assert_eq!(download_readiness(&on_wifi, &policy, 40_000_000), DownloadReadiness::Ready);
+///
+/// let on_mobile = DownloadConditions { network: NetworkType::Metered, ..on_wifi };
+/// assert_eq!(download_readiness(&on_mobile, &policy, 40_000_000), DownloadReadiness::MeteredBlocked);
+/// ```
+#[must_use]
+pub fn download_readiness(
+    conditions: &DownloadConditions,
+    policy: &DownloadPolicy,
+    artifact_size: u64,
+) -> DownloadReadiness {
+    if conditions.network == NetworkType::None {
+        return DownloadReadiness::NoNetwork;
+    }
+    if conditions.network == NetworkType::Metered && !policy.allow_metered {
+        return DownloadReadiness::MeteredBlocked;
+    }
+    if !conditions.charging && conditions.battery_percent < policy.min_battery_percent {
+        return DownloadReadiness::LowBattery;
+    }
+    let needed = artifact_size.saturating_add(policy.storage_headroom_bytes);
+    if conditions.free_storage_bytes < needed {
+        return DownloadReadiness::InsufficientStorage {
+            needed,
+            free: conditions.free_storage_bytes,
+        };
+    }
+    DownloadReadiness::Ready
 }
 
 /// Streaming integrity verifier for a downloading artifact.

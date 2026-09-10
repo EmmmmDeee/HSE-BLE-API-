@@ -44,6 +44,8 @@ actual OS install only once the engine has reached [`UpdateStage::Verified`].
 * [`UpdateSession::rollback`] — revert to the previous known-good version after a
   bad update.
 * [`should_check_for_update`] — a re-check throttle (minimum poll interval).
+* [`download_readiness`] — pre-download gating on network / battery / free storage
+  ([`DownloadPolicy`] + [`DownloadConditions`] → [`DownloadReadiness`]).
 
 ## Lifecycle and safety invariants
 
@@ -108,14 +110,23 @@ and not hammer the server:
 * **Re-check throttle.** [`should_check_for_update`] answers whether enough time
   has elapsed since the last check to poll again, robust against a clock that
   went backwards.
+* **Pre-download gating.** [`download_readiness`] checks a sampled
+  [`DownloadConditions`] snapshot against a [`DownloadPolicy`] before a download
+  is started, returning the first unmet precondition in a fixed precedence — no
+  network → metered blocked → low battery (unless charging) → insufficient
+  storage (artifact + headroom) → ready. This keeps the engine from starting a
+  download that would fail or cost the user (mobile data, a drained battery, or a
+  volume that runs out of space mid-write).
 
 Both `attempts` and the rollback target survive `serialize`/`deserialize`, so a
 retry budget and the previous known-good version persist across a restart.
 
 ## Verifying it
 
-* `cargo test -p bleradar-core --test update` — 32 unit/invariant tests over every
-  rule, transition, error path, and the retry/backoff, rollback, and throttle logic.
+* `cargo test -p bleradar-core --test update` — 37 unit/invariant tests over every
+  rule, transition, error path, the retry/backoff, rollback, and throttle logic,
+  and the pre-download gating (every branch, boundaries, precedence, plus a
+  20,000-case randomized cross-check against an independent reference).
 * `cargo test -p bleradar-core --test update_campaign` — a deterministic 200,000-op
   differential campaign against an independent reference state machine (zero
   divergence) that exercises offer/download/verify/install **plus retry and
@@ -124,13 +135,15 @@ retry budget and the previous known-good version persist across a restart.
   unreachable without a genuine size+SHA-256 match.
 * `cargo run -p bleradar-core --example update_flow` — the whole lifecycle over a
   real 64 KiB artifact and a real SHA-256, including a simulated crash mid-install
-  (persist → restart → recover → finish), an idempotent re-install, retry with
-  exponential backoff, a rollback, and the tamper / downgrade / incompatible-OS rails.
+  (persist → restart → recover → finish), an idempotent re-install, pre-download
+  gating (metered → Wi-Fi), retry with exponential backoff, a rollback, and the
+  tamper / downgrade / incompatible-OS rails.
 
 Falsified (each restored): allowing a downgrade, bypassing the SHA-256 check,
 recovering `Installing` to `Installed` (unsafe), a linear (non-exponential)
-backoff, an off-by-one retry give-up, and a rollback that fails to consume the
-previous version — each breaks the tests or campaign.
+backoff, an off-by-one retry give-up, a rollback that fails to consume the
+previous version, an off-by-one battery or storage gate, and a reordered
+download-gating precedence — each breaks the tests or campaign.
 
 [`Version`]: https://docs.rs/bleradar-core
 [`ReleaseManifest`]: https://docs.rs/bleradar-core
@@ -150,3 +163,7 @@ previous version — each breaks the tests or campaign.
 [`UpdateSession::rollback`]: https://docs.rs/bleradar-core
 [`UpdateError::NothingToRollBack`]: https://docs.rs/bleradar-core
 [`should_check_for_update`]: https://docs.rs/bleradar-core
+[`download_readiness`]: https://docs.rs/bleradar-core
+[`DownloadConditions`]: https://docs.rs/bleradar-core
+[`DownloadPolicy`]: https://docs.rs/bleradar-core
+[`DownloadReadiness`]: https://docs.rs/bleradar-core

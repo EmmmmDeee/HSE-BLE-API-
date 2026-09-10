@@ -9,8 +9,9 @@
 //! and installing on too-old an OS is declined.
 
 use bleradar_core::update::{
-    ArtifactVerifier, ReleaseManifest, RetryDecision, RetryPolicy, UpdateDecision, UpdateSession,
-    UpdateStage, Version, check_update,
+    ArtifactVerifier, DownloadConditions, DownloadPolicy, NetworkType, ReleaseManifest,
+    RetryDecision, RetryPolicy, UpdateDecision, UpdateSession, UpdateStage, Version, check_update,
+    download_readiness,
 };
 use bleradar_core::{Sha256, hex_encode};
 
@@ -132,6 +133,29 @@ fn main() {
     println!(
         "  incompatible-OS decision: {:?}",
         check_update(&Version::new(42, "1.2.3"), 30, &needs_new_os)
+    );
+
+    // 6b. Pre-download gating: don't spend the user's mobile data or a low
+    //     battery on a big download; wait for Wi-Fi.
+    println!("\n[download gating]");
+    let dl_policy = DownloadPolicy::conservative();
+    let on_mobile = DownloadConditions {
+        network: NetworkType::Metered,
+        battery_percent: 30,
+        charging: false,
+        free_storage_bytes: 500 * 1024 * 1024,
+    };
+    println!(
+        "  on mobile data: {:?} — holding",
+        download_readiness(&on_mobile, &dl_policy, manifest.size_bytes)
+    );
+    let on_wifi = DownloadConditions {
+        network: NetworkType::Unmetered,
+        ..on_mobile
+    };
+    println!(
+        "  on Wi-Fi: {:?} — proceed",
+        download_readiness(&on_wifi, &dl_policy, manifest.size_bytes)
     );
 
     // 7. Transient-failure resilience: two download faults, retried with backoff,

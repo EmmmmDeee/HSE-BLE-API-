@@ -35,7 +35,9 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
   makes installing an unverified or tampered artifact unrepresentable. It also
   carries the resilience a robust updater needs: bounded exponential-backoff
   retry of transient download faults, rollback to the previous known-good version
-  after a bad release, and a re-check throttle. Verified by a 200,000-op
+  after a bad release, a re-check throttle, and pre-download gating on network
+  (metered/Wi-Fi), battery, and free storage so a download that would fail or
+  cost the user is never started. Verified by a 200,000-op
   differential campaign (offer/download/verify/install/retry/rollback) and a
   50,000-trial integrity oracle; the network fetch and OS installer are the
   documented platform boundary. See `docs/AUTO_UPDATE.md`.

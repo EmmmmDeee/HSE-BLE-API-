@@ -6,9 +6,10 @@
 //! surface over randomized sequences with independent oracles.
 
 use bleradar_core::update::{
-    ArtifactVerifier, ReleaseManifest, RetryDecision, RetryPolicy, UpdateDecision, UpdateError,
-    UpdateSession, UpdateStage, Version, check_update, should_check_for_update, update_decision,
-    verify_artifact,
+    ArtifactVerifier, DownloadConditions, DownloadPolicy, DownloadReadiness, NetworkType,
+    ReleaseManifest, RetryDecision, RetryPolicy, UpdateDecision, UpdateError, UpdateSession,
+    UpdateStage, Version, check_update, download_readiness, should_check_for_update,
+    update_decision, verify_artifact,
 };
 use bleradar_core::{Sha256, hex_encode};
 
@@ -766,4 +767,294 @@ fn serde_round_trips_attempts_and_previous() {
     let round = UpdateSession::deserialize(&installed.serialize()).unwrap();
     assert_eq!(round, installed);
     assert_eq!(round.previous(), Some(&Version::new(41, "1.2.2")));
+}
+
+// ---- pre-download condition gating ----
+
+/// A baseline "everything is fine" snapshot other cases mutate one field of.
+fn good_conditions() -> DownloadConditions {
+    DownloadConditions {
+        network: NetworkType::Unmetered,
+        battery_percent: 80,
+        charging: false,
+        free_storage_bytes: 1_000_000_000,
+    }
+}
+
+#[test]
+fn download_readiness_covers_every_branch() {
+    let policy = DownloadPolicy::conservative(); // Wi-Fi only, >=20%, no headroom
+    let size = 40_000_000;
+
+    assert_eq!(
+        download_readiness(&good_conditions(), &policy, size),
+        DownloadReadiness::Ready
+    );
+    assert!(download_readiness(&good_conditions(), &policy, size).is_ready());
+
+    // No network.
+    let no_net = DownloadConditions {
+        network: NetworkType::None,
+        ..good_conditions()
+    };
+    assert_eq!(
+        download_readiness(&no_net, &policy, size),
+        DownloadReadiness::NoNetwork
+    );
+
+    // Metered blocked by the conservative policy, allowed by a permissive one.
+    let metered = DownloadConditions {
+        network: NetworkType::Metered,
+        ..good_conditions()
+    };
+    assert_eq!(
+        download_readiness(&metered, &policy, size),
+        DownloadReadiness::MeteredBlocked
+    );
+    let permissive = DownloadPolicy {
+        allow_metered: true,
+        ..policy
+    };
+    assert_eq!(
+        download_readiness(&metered, &permissive, size),
+        DownloadReadiness::Ready
+    );
+
+    // Low battery, unless charging.
+    let low = DownloadConditions {
+        battery_percent: 10,
+        charging: false,
+        ..good_conditions()
+    };
+    assert_eq!(
+        download_readiness(&low, &policy, size),
+        DownloadReadiness::LowBattery
+    );
+    let low_but_charging = DownloadConditions {
+        charging: true,
+        ..low
+    };
+    assert_eq!(
+        download_readiness(&low_but_charging, &policy, size),
+        DownloadReadiness::Ready
+    );
+
+    // Insufficient storage (artifact + headroom).
+    let tight = DownloadConditions {
+        free_storage_bytes: 30_000_000,
+        ..good_conditions()
+    };
+    assert_eq!(
+        download_readiness(&tight, &policy, size),
+        DownloadReadiness::InsufficientStorage {
+            needed: 40_000_000,
+            free: 30_000_000,
+        }
+    );
+    // Headroom is added on top of the artifact size.
+    let with_headroom = DownloadPolicy {
+        storage_headroom_bytes: 50_000_000,
+        ..policy
+    };
+    let ample = DownloadConditions {
+        free_storage_bytes: 80_000_000,
+        ..good_conditions()
+    };
+    assert_eq!(
+        download_readiness(&ample, &with_headroom, size),
+        DownloadReadiness::InsufficientStorage {
+            needed: 90_000_000,
+            free: 80_000_000,
+        }
+    );
+}
+
+#[test]
+fn download_readiness_boundaries_are_inclusive_where_documented() {
+    let policy = DownloadPolicy {
+        allow_metered: false,
+        min_battery_percent: 20,
+        storage_headroom_bytes: 0,
+    };
+    // battery exactly at the minimum is allowed.
+    let at_min = DownloadConditions {
+        battery_percent: 20,
+        ..good_conditions()
+    };
+    assert!(download_readiness(&at_min, &policy, 10).is_ready());
+    let below = DownloadConditions {
+        battery_percent: 19,
+        ..good_conditions()
+    };
+    assert_eq!(
+        download_readiness(&below, &policy, 10),
+        DownloadReadiness::LowBattery
+    );
+    // free storage exactly equal to needed is allowed.
+    let exact = DownloadConditions {
+        free_storage_bytes: 10,
+        ..good_conditions()
+    };
+    assert!(download_readiness(&exact, &policy, 10).is_ready());
+    let one_short = DownloadConditions {
+        free_storage_bytes: 9,
+        ..good_conditions()
+    };
+    assert_eq!(
+        download_readiness(&one_short, &policy, 10),
+        DownloadReadiness::InsufficientStorage {
+            needed: 10,
+            free: 9
+        }
+    );
+    // storage need cannot overflow.
+    let huge = DownloadPolicy {
+        storage_headroom_bytes: u64::MAX,
+        ..policy
+    };
+    assert_eq!(
+        download_readiness(&good_conditions(), &huge, u64::MAX),
+        DownloadReadiness::InsufficientStorage {
+            needed: u64::MAX,
+            free: 1_000_000_000,
+        }
+    );
+}
+
+#[test]
+fn download_readiness_precedence_no_network_beats_all() {
+    // A snapshot that fails every check must report the highest-precedence one.
+    let policy = DownloadPolicy {
+        allow_metered: false,
+        min_battery_percent: 90,
+        storage_headroom_bytes: u64::MAX,
+    };
+    let all_bad = DownloadConditions {
+        network: NetworkType::None,
+        battery_percent: 0,
+        charging: false,
+        free_storage_bytes: 0,
+    };
+    assert_eq!(
+        download_readiness(&all_bad, &policy, 1),
+        DownloadReadiness::NoNetwork
+    );
+    // With a metered network present, metered-blocked outranks battery/storage.
+    let metered_bad = DownloadConditions {
+        network: NetworkType::Metered,
+        ..all_bad
+    };
+    assert_eq!(
+        download_readiness(&metered_bad, &policy, 1),
+        DownloadReadiness::MeteredBlocked
+    );
+    // Unmetered but flat battery and no storage -> battery outranks storage.
+    let batt_bad = DownloadConditions {
+        network: NetworkType::Unmetered,
+        ..all_bad
+    };
+    assert_eq!(
+        download_readiness(&batt_bad, &policy, 1),
+        DownloadReadiness::LowBattery
+    );
+}
+
+#[test]
+fn download_readiness_gates_a_real_session_download() {
+    // The engine offers the update, but the caller declines to download until
+    // conditions are met, then proceeds — no illegal state, no failed download.
+    let bytes = b"gated-artifact-payload";
+    let policy = DownloadPolicy::conservative();
+    let mut s = UpdateSession::new(Version::new(1, "1"));
+    s.offer(manifest(2, "2", bytes, 21, false), 30).unwrap();
+
+    let on_mobile = DownloadConditions {
+        network: NetworkType::Metered,
+        battery_percent: 90,
+        charging: true,
+        free_storage_bytes: 1_000_000,
+    };
+    assert!(!download_readiness(&on_mobile, &policy, bytes.len() as u64).is_ready());
+    assert_eq!(s.stage(), UpdateStage::Available); // did not start downloading
+
+    let on_wifi = DownloadConditions {
+        network: NetworkType::Unmetered,
+        ..on_mobile
+    };
+    assert!(download_readiness(&on_wifi, &policy, bytes.len() as u64).is_ready());
+    s.begin_download().unwrap();
+    s.record_progress(bytes.len() as u64).unwrap();
+    s.finish_download().unwrap();
+    s.verify(bytes).unwrap();
+    s.begin_install().unwrap();
+    s.finish_install().unwrap();
+    assert_eq!(s.installed(), &Version::new(2, "2"));
+}
+
+#[test]
+fn download_readiness_randomized_matches_an_independent_reference() {
+    // A small deterministic sweep cross-checking the branch precedence against an
+    // independently-written reference.
+    let mut seed = 0x51ED_9E55_u64 | 1;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut ready = 0u32;
+    let mut no_net = 0u32;
+    let mut metered = 0u32;
+    let mut low_batt = 0u32;
+    let mut no_space = 0u32;
+    for _ in 0..20_000 {
+        let network = match next() % 3 {
+            0 => NetworkType::None,
+            1 => NetworkType::Metered,
+            _ => NetworkType::Unmetered,
+        };
+        let conditions = DownloadConditions {
+            network,
+            battery_percent: (next() % 101) as u8,
+            charging: next() % 2 == 0,
+            free_storage_bytes: next() % 200,
+        };
+        let policy = DownloadPolicy {
+            allow_metered: next() % 2 == 0,
+            min_battery_percent: (next() % 101) as u8,
+            storage_headroom_bytes: next() % 50,
+        };
+        let size = next() % 150;
+
+        // Independent reference of the documented precedence.
+        let needed = size.saturating_add(policy.storage_headroom_bytes);
+        let expected = if conditions.network == NetworkType::None {
+            DownloadReadiness::NoNetwork
+        } else if conditions.network == NetworkType::Metered && !policy.allow_metered {
+            DownloadReadiness::MeteredBlocked
+        } else if !conditions.charging && conditions.battery_percent < policy.min_battery_percent {
+            DownloadReadiness::LowBattery
+        } else if conditions.free_storage_bytes < needed {
+            DownloadReadiness::InsufficientStorage {
+                needed,
+                free: conditions.free_storage_bytes,
+            }
+        } else {
+            DownloadReadiness::Ready
+        };
+        let got = download_readiness(&conditions, &policy, size);
+        assert_eq!(
+            got, expected,
+            "conditions={conditions:?} policy={policy:?} size={size}"
+        );
+        match got {
+            DownloadReadiness::Ready => ready += 1,
+            DownloadReadiness::NoNetwork => no_net += 1,
+            DownloadReadiness::MeteredBlocked => metered += 1,
+            DownloadReadiness::LowBattery => low_batt += 1,
+            DownloadReadiness::InsufficientStorage { .. } => no_space += 1,
+        }
+    }
+    // Every outcome must actually occur in the sweep.
+    assert!(ready > 0 && no_net > 0 && metered > 0 && low_batt > 0 && no_space > 0);
 }
