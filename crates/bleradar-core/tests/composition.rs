@@ -19,6 +19,11 @@
 //! moving the store between engines yields a byte-identical composed store to
 //! cloning it at each hand-off, so `into_evidence` changes only the cost, not
 //! the result.
+//!
+//! A third test pins a composition robustness property: when a later engine is
+//! handed a store in which an earlier engine already wrote an observation id,
+//! its colliding `observe` is refused transactionally, leaving the shared
+//! store byte-identical (original record intact, no dangling entity) and valid.
 
 use bleradar_core::{
     CalibratedEvidenceFusion, EvidenceAssessment, EvidenceQuality, EvidenceRole, EvidenceStore,
@@ -248,4 +253,60 @@ fn moving_the_store_between_engines_matches_cloning_it() {
             "move-threaded and clone-threaded composed stores differ at filler={filler}"
         );
     }
+}
+
+#[test]
+fn a_cross_engine_observation_id_collision_is_refused_without_corrupting_the_shared_store() {
+    // When engines compose over one store, a later engine may be handed an
+    // observation whose id an earlier engine already wrote. The later engine
+    // must refuse the conflicting record transactionally: the shared store is
+    // left exactly as it was — the original observation intact, no dangling
+    // entity for the refused observation — and still valid.
+    let store = osint_stage(EvidenceStore::new()).into_evidence();
+    assert!(store.observation(OSINT_FINDING).is_some());
+    let before = format!("{store:?}");
+
+    let mut infra = TemporalMetamorphicInfrastructureCorrelationEngine::new(store);
+    let colliding = InfrastructureObservation::new(
+        OSINT_FINDING, // id already owned by the OSINT finding observation
+        "node-collision",
+        InfrastructureKind::Certificate,
+        "infrastructure-value",
+        Source::new(
+            "infra-collision-source",
+            SourceType::Website,
+            RetrievalMethod::Direct,
+        )
+        .unwrap(),
+        500,
+    )
+    .unwrap();
+    let error = infra
+        .observe(colliding)
+        .expect_err("a conflicting cross-engine observation id must be refused");
+    assert!(
+        matches!(
+            error,
+            bleradar_core::InfrastructureError::ObservationConflict { .. }
+        ),
+        "expected ObservationConflict, got {error:?}"
+    );
+
+    let store = infra.into_evidence();
+    assert_eq!(
+        format!("{store:?}"),
+        before,
+        "a refused cross-engine observation must leave the shared store unchanged"
+    );
+    assert!(
+        store.observation(OSINT_FINDING).is_some(),
+        "original observation was dropped"
+    );
+    assert!(
+        store.entity("node-collision").is_none(),
+        "the refused observation left a dangling node entity"
+    );
+    store
+        .validate()
+        .expect("the shared store must remain valid after a refused observation");
 }
