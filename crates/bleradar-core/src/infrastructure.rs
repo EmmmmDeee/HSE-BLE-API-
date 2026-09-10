@@ -1431,6 +1431,15 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         &mut self.evidence
     }
 
+    /// Consumes the engine and returns its canonical evidence store, so a caller composing the infrastructure engine
+    /// with the OSINT, website, and fusion engines can move the store into the
+    /// next stage without cloning it
+    /// (see [`Self::evidence`] to borrow it in place).
+    #[must_use]
+    pub fn into_evidence(self) -> EvidenceStore {
+        self.evidence
+    }
+
     /// Configured limits.
     #[must_use]
     pub const fn limits(&self) -> InfrastructureLimits {

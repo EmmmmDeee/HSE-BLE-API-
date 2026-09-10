@@ -126,6 +126,36 @@ fn osint(pivots: usize) -> Duration {
     per_operation(started.elapsed(), OSINT_EXECUTIONS.min(pivots))
 }
 
+/// A store holding `count` records, wrapped in a website engine, ready to hand
+/// off to the next stage of a composed investigation.
+fn loaded_engine(count: usize) -> WebsiteLineageEcosystemAnalysisEngine {
+    let mut store = EvidenceStore::new();
+    for index in 0..count {
+        store
+            .add_source(source(index))
+            .expect("distinct sources are accepted");
+    }
+    WebsiteLineageEcosystemAnalysisEngine::new(store)
+}
+
+/// Cost of handing the canonical store to the next engine: cloning it out
+/// (the only mechanism before `into_evidence`) versus moving it out.
+fn handoff(count: usize) -> (Duration, Duration) {
+    let borrow = loaded_engine(count);
+    let started = Instant::now();
+    let cloned = borrow.evidence().clone();
+    let clone_cost = started.elapsed();
+    std::hint::black_box(cloned);
+
+    let owned = loaded_engine(count);
+    let started = Instant::now();
+    let moved = owned.into_evidence();
+    let move_cost = started.elapsed();
+    std::hint::black_box(moved);
+
+    (clone_cost, move_cost)
+}
+
 fn main() {
     println!("engine load cost (release build recommended)");
     println!(
@@ -149,5 +179,15 @@ fn main() {
             infra_correlate,
             osint_execute
         );
+    }
+
+    println!("\nengine hand-off cost (composing engines over one store)");
+    println!(
+        "{:<8} {:>18} {:>18}",
+        "records", "evidence().clone()", "into_evidence()"
+    );
+    for count in SIZES {
+        let (clone_cost, move_cost) = handoff(count);
+        println!("{count:<8} {clone_cost:>18?} {move_cost:>18?}");
     }
 }

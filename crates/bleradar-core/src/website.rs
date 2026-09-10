@@ -1651,6 +1651,15 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         &mut self.evidence
     }
 
+    /// Consumes the engine and returns its canonical evidence store, so a caller composing the website engine with
+    /// the OSINT, infrastructure, and fusion engines can move the store into the
+    /// next stage without cloning it
+    /// (see [`Self::evidence`] to borrow it in place).
+    #[must_use]
+    pub fn into_evidence(self) -> EvidenceStore {
+        self.evidence
+    }
+
     /// Configured resource limits.
     #[must_use]
     pub const fn limits(&self) -> WebsiteLimits {

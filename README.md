@@ -82,7 +82,11 @@ writes go through `EvidenceStore::transaction`, the store's single
 all-or-nothing mechanism (an undo journal that is nested and panic-safe), which
 every engine uses instead of copying the store; a refused engine operation
 therefore leaves the store exactly as it was, at a cost that does not grow
-with the store.
+with the store. A caller composing engines over one investigation moves the
+canonical store from one engine into the next with `into_evidence()` (zero
+copy) rather than cloning it; `crates/bleradar-core/tests/composition.rs`
+threads one store through the OSINT, infrastructure, website and fusion
+engines and validates the composed result.
 
 `VerificationEngine` keeps required semantics separate from implementation and
 supports metamorphic relations for invariance, idempotence, commutativity,

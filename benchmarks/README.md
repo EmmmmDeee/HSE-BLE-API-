@@ -68,3 +68,17 @@ at 8,000 records) took 730 ms / 500 ms with the original left × right
 `values_match` scan and takes 470 ms / 245 ms since decision #69 replaced the
 scan with value indexes (`matching_pairs`); what remains is ranking, not
 persistence or matching.
+
+The same example also measures the cost of handing the canonical store from
+one engine to the next when composing an investigation (`docs/AUTONOMOUS_DECISIONS.md`
+#71):
+
+| records | `evidence().clone()` | `into_evidence()` |
+|---|---|---|
+| 1,000 | 97 µs | ~0.4 µs |
+| 2,000 | 203 µs | ~0.5 µs |
+| 4,000 | 490 µs | ~0.4 µs |
+| 8,000 | 997 µs | ~0.4 µs |
+
+`into_evidence` is a move, so the hand-off is flat and free where cloning grew
+with the store.
