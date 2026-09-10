@@ -286,6 +286,7 @@ BLERADAR_EVIDENCE_CAMPAIGN_SEQUENCES=20000 cargo test -p bleradar-core --release
 BLERADAR_OSINT_CAMPAIGN_SEQUENCES=50000 cargo test -p bleradar-core --release --test osint_campaign   # scale the OSINT engine campaign
 BLERADAR_WEBSITE_CAMPAIGN_SEQUENCES=20000 cargo test -p bleradar-core --release --test website_campaign   # scale the website lineage engine campaign
 BLERADAR_INFRASTRUCTURE_CAMPAIGN_SEQUENCES=20000 cargo test -p bleradar-core --release --test infrastructure_campaign   # scale the infrastructure correlation campaign
+BLERADAR_JNI_CAMPAIGN_ITERATIONS=2000000 cargo test -p bleradar-jni --release --test jni_campaign   # scale the JNI export differential campaign
 ```
 
 ## Distribution packaging
