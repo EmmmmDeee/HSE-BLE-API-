@@ -22,23 +22,35 @@ Android **Bionic** runtime, and its outputs read back through the UniFFI ABI.
 
 ## What is verified
 
-The WiFi channel↔frequency contracts, over a comprehensive input sweep:
+The WiFi channel↔frequency contracts (bit-exact, over a comprehensive input
+sweep) and the pure geodesy contracts (physical-tolerance, over a 308-pair
+sweep):
 
 | Contract | Oracle signature (from `UNIFFI_META_*`) | Result |
 | --- | --- | --- |
-| `wifi_channel_to_frequency` | `(i32) -> Option<i32>` | source reproduces every executed-oracle output over its `u16` domain |
-| `wifi_frequency_to_channel` | `(Option<i32>) -> Option<i32>` | source reproduces every executed-oracle output over its `u16` domain, incl. the 6 GHz band |
+| `wifi_channel_to_frequency` | `(i32) -> Option<i32>` | source reproduces every executed-oracle output over its `u16` domain (bit-exact → `DifferentiallyVerified`) |
+| `wifi_frequency_to_channel` | `(Option<i32>) -> Option<i32>` | source reproduces every executed-oracle output over its `u16` domain, incl. the 6 GHz band (bit-exact → `DifferentiallyVerified`) |
+| `haversine_m` | `(f64,f64,f64,f64) -> f64` | source matches the executed oracle to <1e-6 m over 308 pairs (transcendental libm rounding; `SourceAnalog` coverage) |
+| `bearing_deg` | `(f64,f64,f64,f64) -> f64` | source matches the executed oracle to <1e-8 deg (circular) over 308 pairs (transcendental libm rounding; `SourceAnalog` coverage) |
 
 The one intentional divergence is domain width: the oracle accepts signed `i32`
 (and an `Option` frequency), the reconstruction a narrower `u16`. Outside the
 `u16` domain the executed oracle returns `None`, which the differential asserts
 explicitly. Both contracts are consequently `ParityStatus::DifferentiallyVerified`.
 
-Floating-point geodesy contracts (`haversine_m`, `bearing_deg`) were also
-executed and agree with the reconstruction to within 1–2 ULP, but Bionic `libm`
-and the host `libm` are not bit-identical for transcendentals, so those remain
-`SourceAnalog` (a bit-exact baked assertion would be non-portable). Extending
-them would require an ULP-tolerant criterion.
+The pure geodesy contracts `haversine_m` and `bearing_deg` are also
+executed-oracle differentials, over 308 coordinate pairs (edge cases + a
+fixed-seed sweep), but with a **physical tolerance** rather than bit-exactness:
+Bionic `libm` and the host `libm` are not bit-identical for transcendentals
+(`sin`/`cos`/`asin`/`atan2`), so the reconstruction matches the executed oracle
+to under a micrometre (haversine) and under a nanodegree (bearing, circular) —
+observed maxima ≈ 11 nm and ≈ 1e-13°, the latter amplified only at
+ill-conditioned near-antipodal pairs. That is broad differential COVERAGE (it
+would catch a changed Earth-radius constant or a reworked formula, which move by
+metres/degrees), not a bit-exact promotion, so both stay `SourceAnalog`. The
+tolerance is far tighter than any real change yet absorbs last-bit `libm`
+divergence, and is robust across host `libm` versions (a degree/metre bound, not
+a bit bound).
 
 ## Two tiers
 
@@ -93,10 +105,12 @@ The command:
 2. extracts `linker64` + `lib{c,m,dl,c++}.so` from the system image with
    `debugfs` into a temporary Bionic sysroot (no root, no loopback mount) —
    or uses `BIONIC_SYSROOT` if you exported a prepared one;
-3. compiles `xtask/src/oracle_harness.c` for `aarch64` with the NDK, linking the
-   oracle;
-4. runs it under `qemu-aarch64 -L <sysroot>`;
-5. compares the output to `wifi_executed_vectors.tsv` and fails on any drift.
+3. compiles each committed harness (`xtask/src/oracle_harness.c` for WiFi,
+   `xtask/src/oracle_harness_geo.c` for geodesy) for `aarch64` with the NDK,
+   linking the oracle;
+4. runs each under `qemu-aarch64 -L <sysroot>`;
+5. compares the output to the committed vectors (`wifi_executed_vectors.tsv`,
+   `geodesy_executed_vectors.tsv`) and fails on any drift.
 
 To regenerate the committed vectors after an intentional sweep change, run the
 harness the same way and replace the data rows in the `.tsv` (keep the header).

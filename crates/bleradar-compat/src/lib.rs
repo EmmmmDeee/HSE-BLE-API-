@@ -106,12 +106,12 @@ pub const CONTRACTS: &[ContractStatus] = &[
     ContractStatus {
         name: "bearing_deg",
         status: ParityStatus::SourceAnalog,
-        evidence: "source analogue and sampled oracle outputs; exhaustive differential parity is pending",
+        evidence: "executed-oracle differential under qemu-aarch64 over 308 coordinate pairs (docs/ORACLE_DIFFERENTIAL.md): the source matches the executed oracle to <1e-8 deg (circular), transcendental libm rounding only — not bit-exact, so retained as SourceAnalog (oracle_geodesy_differential.rs)",
     },
     ContractStatus {
         name: "haversine_m",
         status: ParityStatus::SourceAnalog,
-        evidence: "oracle probe confirms the source now uses the same Earth-radius constant (6,371,008.8 m; BF-002 fixed); one sampled point, not exhaustive over the continuous domain",
+        evidence: "executed-oracle differential under qemu-aarch64 over 308 coordinate pairs (docs/ORACLE_DIFFERENTIAL.md): the source uses the oracle's Earth radius (6,371,008.8 m; BF-002) and matches the executed oracle to <1e-6 m, transcendental libm rounding only — not bit-exact, so retained as SourceAnalog (oracle_geodesy_differential.rs)",
     },
     ContractStatus {
         name: "wifi_channel_to_frequency",

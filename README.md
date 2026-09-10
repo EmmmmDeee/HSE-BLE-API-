@@ -57,9 +57,13 @@ begun: the immutable native core is executed under `qemu-aarch64` against a real
 Bionic runtime, and the WiFi channel↔frequency contracts are
 `DifferentiallyVerified` — the safe-Rust reconstruction reproduces every
 executed-oracle output over its input domain (`docs/ORACLE_DIFFERENTIAL.md`,
-`cargo xtask oracle-differential`). The remaining pure contracts are still only
-`SourceAnalog` (floating-point geodesy agrees to within 1–2 ULP but is not
-bit-identical across `libm` implementations).
+`cargo xtask oracle-differential`). The pure geodesy contracts (`haversine_m`,
+`bearing_deg`) also have a broad executed-oracle differential — the
+reconstruction matches the executed oracle to under a micrometre / nanodegree
+over 308 coordinate pairs — but stay `SourceAnalog` because Bionic and host
+`libm` are not bit-identical for transcendentals (coverage, not a bit-exact
+promotion). The other pure contracts (`ble_distance`, `proximity_label`) remain
+`SourceAnalog` documented divergences.
 
 See `docs/VERIFIED_RUNTIME_TOPOLOGY.md`,
 `docs/BEHAVIORAL_CONTRACT.md`, and `docs/RUST_TARGET_ARCHITECTURE.md` before

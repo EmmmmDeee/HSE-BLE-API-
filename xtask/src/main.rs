@@ -39,8 +39,13 @@ const ORACLE_SO_SHA256: &str = "d14022cd113332312fb1719aafa107155a4c046c056cb9b2
 /// Committed executed-oracle ground truth `oracle-differential` regenerates and
 /// drift-checks (relative to the repo root).
 const EXECUTED_VECTORS_PATH: &str = "crates/bleradar-compat/tests/oracle/wifi_executed_vectors.tsv";
-/// The differential harness source, compiled for aarch64 and run under qemu.
+/// Committed executed-oracle geodesy ground truth (relative to the repo root).
+const GEODESY_VECTORS_PATH: &str =
+    "crates/bleradar-compat/tests/oracle/geodesy_executed_vectors.tsv";
+/// The WiFi differential harness source, compiled for aarch64 and run under qemu.
 const ORACLE_HARNESS_C: &str = include_str!("oracle_harness.c");
+/// The geodesy differential harness source, compiled for aarch64 and run under qemu.
+const ORACLE_HARNESS_GEO_C: &str = include_str!("oracle_harness_geo.c");
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -2008,14 +2013,15 @@ fn cmd_verify_android_live() -> Result<(), String> {
 }
 
 /// Executes the immutable v0.3.0 native oracle under `qemu-aarch64` against a
-/// real Android Bionic runtime and checks that its WiFi channel<->frequency
-/// outputs still match the committed executed-oracle ground truth
-/// (`EXECUTED_VECTORS_PATH`). See `docs/ORACLE_DIFFERENTIAL.md`.
+/// real Android Bionic runtime and checks that its pure-contract outputs (WiFi
+/// channel<->frequency and geodesy) still match the committed executed-oracle
+/// ground truth. See `docs/ORACLE_DIFFERENTIAL.md`.
 ///
 /// This is a live command (like `verify-android-live`): it needs an NDK,
 /// `qemu-aarch64`, and a Bionic runtime, so it is not part of `gates`. The
-/// committed vectors it drift-checks are what the ordinary CI test
-/// `oracle_differential.rs` replays against the safe-Rust reconstruction.
+/// committed vectors it drift-checks are what the ordinary CI tests
+/// `oracle_differential.rs` and `oracle_geodesy_differential.rs` replay against
+/// the safe-Rust reconstruction.
 fn cmd_oracle_differential() -> Result<(), String> {
     let root = repo_root()?;
     let sdk = discover_sdk_root()?;
@@ -2036,36 +2042,68 @@ fn cmd_oracle_differential() -> Result<(), String> {
     fs::copy(&oracle_so, lib64.join("libbleradar_core.so"))
         .map_err(|e| format!("copying oracle into the Bionic sysroot: {e}"))?;
 
-    println!("== compile aarch64 differential harness (NDK) ==");
-    let harness_c = workdir.join("oracle_harness.c");
-    fs::write(&harness_c, ORACLE_HARNESS_C)
+    let ctx = OracleDifferentialContext {
+        root: &root,
+        clang: &clang,
+        qemu: &qemu,
+        sysroot: &sysroot,
+        lib64: &lib64,
+        workdir: &workdir,
+    };
+    drift_check_harness(&ctx, "wifi", ORACLE_HARNESS_C, EXECUTED_VECTORS_PATH)?;
+    drift_check_harness(&ctx, "geodesy", ORACLE_HARNESS_GEO_C, GEODESY_VECTORS_PATH)?;
+    Ok(())
+}
+
+/// Shared inputs for one or more executed-oracle harness drift checks.
+struct OracleDifferentialContext<'a> {
+    root: &'a Path,
+    clang: &'a Path,
+    qemu: &'a Path,
+    sysroot: &'a Path,
+    lib64: &'a Path,
+    workdir: &'a Path,
+}
+
+/// Compiles one committed harness for aarch64, runs it under qemu against the
+/// oracle, and fails if its output differs from the committed vectors at
+/// `vectors_rel_path`.
+fn drift_check_harness(
+    ctx: &OracleDifferentialContext<'_>,
+    label: &str,
+    harness_src: &str,
+    vectors_rel_path: &str,
+) -> Result<(), String> {
+    println!("== [{label}] compile aarch64 differential harness (NDK) ==");
+    let harness_c = ctx.workdir.join(format!("oracle_harness_{label}.c"));
+    fs::write(&harness_c, harness_src)
         .map_err(|e| format!("writing {}: {e}", harness_c.display()))?;
-    let harness_bin = workdir.join("oracle_harness");
+    let harness_bin = ctx.workdir.join(format!("oracle_harness_{label}"));
     run_status({
-        let mut c = Command::new(&clang);
+        let mut c = Command::new(ctx.clang);
         c.arg(&harness_c)
             .arg("-o")
             .arg(&harness_bin)
             .arg("-L")
-            .arg(&lib64)
+            .arg(ctx.lib64)
             .arg("-lbleradar_core")
             .arg("-Wl,--allow-shlib-undefined");
         c
     })?;
 
-    println!("== execute the oracle under qemu-aarch64 ==");
+    println!("== [{label}] execute the oracle under qemu-aarch64 ==");
     let produced = run_capture({
-        let mut c = Command::new(&qemu);
+        let mut c = Command::new(ctx.qemu);
         c.arg("-L")
-            .arg(&sysroot)
+            .arg(ctx.sysroot)
             .arg("-E")
             .arg("LD_LIBRARY_PATH=/system/lib64")
             .arg(&harness_bin);
         c
     })?;
 
-    println!("== drift-check against {EXECUTED_VECTORS_PATH} ==");
-    let committed = read_to_string(&root.join(EXECUTED_VECTORS_PATH))?;
+    println!("== [{label}] drift-check against {vectors_rel_path} ==");
+    let committed = read_to_string(&ctx.root.join(vectors_rel_path))?;
     let committed_rows: Vec<&str> = committed
         .lines()
         .map(str::trim_end)
@@ -2091,7 +2129,7 @@ fn cmd_oracle_differential() -> Result<(), String> {
             }
         }
         return Err(format!(
-            "executed-oracle output drifted from {EXECUTED_VECTORS_PATH} \
+            "[{label}] executed-oracle output drifted from {vectors_rel_path} \
              ({} committed vs {} executed rows); {detail}. If the sweep changed \
              intentionally, regenerate the committed vectors from this output.",
             committed_rows.len(),
@@ -2100,7 +2138,7 @@ fn cmd_oracle_differential() -> Result<(), String> {
     }
 
     println!(
-        "oracle-differential: {} executed-oracle rows match the committed vectors",
+        "oracle-differential [{label}]: {} executed-oracle rows match the committed vectors",
         produced_rows.len()
     );
     Ok(())
