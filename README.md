@@ -29,7 +29,7 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
   Code/Maidenhead), and the canonical tag vocabulary. See
   `docs/HSE_IMPORT.md`.
 - `crates/bleradar-compat` — complete native ABI runtime/reachability census plus a separate source-replacement parity registry.
-- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
+- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, executed-oracle differential verification under `qemu-aarch64` (`oracle-differential`, see `docs/ORACLE_DIFFERENTIAL.md`), and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
 - `android/app/src/main` — the hand-built Android radar app that consumes `bleradar-core` through `crates/bleradar-jni`; its design record is `docs/ANDROID_APP.md`.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
 - `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, and verification records.
@@ -52,8 +52,14 @@ The runtime registry classifies all 124 contracts: 41 observed executing, 78
 statically reached from non-generated DEX call sites, and 5 of unknown
 reachability. The five unknowns are read-only `RadarStore` methods that require
 trustworthy Android/Bionic state. All shipped ABI implementations are
-Rust-native, but none of the similarly named workspace replacements is yet
-differentially verified across its complete observable contract.
+Rust-native. Differential verification against the oracle *binary* has now
+begun: the immutable native core is executed under `qemu-aarch64` against a real
+Bionic runtime, and the WiFi channel↔frequency contracts are
+`DifferentiallyVerified` — the safe-Rust reconstruction reproduces every
+executed-oracle output over its input domain (`docs/ORACLE_DIFFERENTIAL.md`,
+`cargo xtask oracle-differential`). The remaining pure contracts are still only
+`SourceAnalog` (floating-point geodesy agrees to within 1–2 ULP but is not
+bit-identical across `libm` implementations).
 
 See `docs/VERIFIED_RUNTIME_TOPOLOGY.md`,
 `docs/BEHAVIORAL_CONTRACT.md`, and `docs/RUST_TARGET_ARCHITECTURE.md` before

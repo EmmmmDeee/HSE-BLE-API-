@@ -115,13 +115,13 @@ pub const CONTRACTS: &[ContractStatus] = &[
     },
     ContractStatus {
         name: "wifi_channel_to_frequency",
-        status: ParityStatus::SourceAnalog,
-        evidence: "exact oracle ranges are captured; the source matches only over its narrower u16 input contract",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "the immutable oracle .so was executed under qemu-aarch64 (docs/ORACLE_DIFFERENTIAL.md); the source reproduces every executed-oracle output over its u16 domain and the oracle's wider i32 domain collapses to None outside it (oracle_differential.rs)",
     },
     ContractStatus {
         name: "wifi_frequency_to_channel",
-        status: ParityStatus::SourceAnalog,
-        evidence: "matches the oracle over its complete u16 domain (BF-004 fixed); the oracle's true domain is signed i32, wider than the source's u16 input contract",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "executed-oracle differential under qemu-aarch64 over 2.4/5/6 GHz edges and flooring (docs/ORACLE_DIFFERENTIAL.md); the source matches every executed-oracle output over its u16 domain and the oracle's Option<i32> domain collapses to None outside it (oracle_differential.rs)",
     },
     ContractStatus {
         name: "ble_distance",

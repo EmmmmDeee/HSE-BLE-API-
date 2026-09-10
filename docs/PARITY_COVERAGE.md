@@ -23,8 +23,8 @@ Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility/runtime regi
 
 ## Source-replacement parity frontier
 
-- Differentially verified: **0**
-- Source analogue only: **6**
+- Differentially verified: **2**
+- Source analogue only: **4**
 - Oracle only: **5**
 - Blocked: **7**
 

@@ -20,6 +20,7 @@ mod zip_reader;
 
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -27,6 +28,19 @@ use std::process::{Command, ExitCode};
 /// database `cargo audit` reads directly (no materialization needed: unlike
 /// `cargo deny`, `cargo audit` tolerates a plain, non-git directory).
 const AUDIT_DB_PATH: &str = "vendor/rustsec-advisory-db/advisory-db-3157b0e258782691";
+
+/// The committed migration archive that retains the immutable native oracles.
+const MIGRATION_ZIP_NAME: &str = "BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip";
+/// Zip entry of the immutable v0.3.0 native oracle inside [`MIGRATION_ZIP_NAME`].
+const ORACLE_SO_ZIP_ENTRY: &str = "oracle/libbleradar_core.so";
+/// SHA-256 of that oracle `.so`, pinned so `oracle-differential` refuses to run
+/// against anything but the recorded immutable binary.
+const ORACLE_SO_SHA256: &str = "d14022cd113332312fb1719aafa107155a4c046c056cb9b2bcd3c94eb980b12d";
+/// Committed executed-oracle ground truth `oracle-differential` regenerates and
+/// drift-checks (relative to the repo root).
+const EXECUTED_VECTORS_PATH: &str = "crates/bleradar-compat/tests/oracle/wifi_executed_vectors.tsv";
+/// The differential harness source, compiled for aarch64 and run under qemu.
+const ORACLE_HARNESS_C: &str = include_str!("oracle_harness.c");
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -48,6 +62,7 @@ fn main() -> ExitCode {
         "check-jni-contract" => cmd_check_jni_contract(&rest),
         "verify-jni-live" => cmd_verify_jni_live(),
         "verify-android-live" => cmd_verify_android_live(),
+        "oracle-differential" => cmd_oracle_differential(),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -87,6 +102,7 @@ fn print_usage() {
          \x20 check-jni-contract [lib]   fail unless NativeRadar.java's static natives and the library's Java_* exports match 1:1\n\
          \x20 verify-jni-live            run a live Java→JNI→Rust verification against NativeRadar.java\n\
          \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
+         \x20 oracle-differential        execute the immutable oracle under qemu-aarch64 and check the committed executed-oracle vectors (see docs/ORACLE_DIFFERENTIAL.md)\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/jni-contract/test/doc/checks/audit/deny)"
@@ -1989,6 +2005,299 @@ fn cmd_verify_android_live() -> Result<(), String> {
 
     println!("== verify-android-live complete ==");
     Ok(())
+}
+
+/// Executes the immutable v0.3.0 native oracle under `qemu-aarch64` against a
+/// real Android Bionic runtime and checks that its WiFi channel<->frequency
+/// outputs still match the committed executed-oracle ground truth
+/// (`EXECUTED_VECTORS_PATH`). See `docs/ORACLE_DIFFERENTIAL.md`.
+///
+/// This is a live command (like `verify-android-live`): it needs an NDK,
+/// `qemu-aarch64`, and a Bionic runtime, so it is not part of `gates`. The
+/// committed vectors it drift-checks are what the ordinary CI test
+/// `oracle_differential.rs` replays against the safe-Rust reconstruction.
+fn cmd_oracle_differential() -> Result<(), String> {
+    let root = repo_root()?;
+    let sdk = discover_sdk_root()?;
+    let ndk = discover_ndk_root(&sdk)?;
+    let clang = ndk_aarch64_clang(&ndk)?;
+    let qemu = locate_qemu_aarch64()?;
+    let sysroot = prepare_bionic_sysroot(&sdk)?;
+
+    let workdir = xtask_temp_dir("oracle-differential");
+    recreate_dirs(&[&workdir])?;
+
+    println!("== extract immutable oracle .so from migration archive ==");
+    let oracle_so = extract_and_pin_oracle_so(&root, &workdir)?;
+    println!("   oracle .so sha256 = {ORACLE_SO_SHA256} (verified)");
+
+    // Place the oracle where the Bionic linker will resolve it at run time.
+    let lib64 = sysroot.join("system/lib64");
+    fs::copy(&oracle_so, lib64.join("libbleradar_core.so"))
+        .map_err(|e| format!("copying oracle into the Bionic sysroot: {e}"))?;
+
+    println!("== compile aarch64 differential harness (NDK) ==");
+    let harness_c = workdir.join("oracle_harness.c");
+    fs::write(&harness_c, ORACLE_HARNESS_C)
+        .map_err(|e| format!("writing {}: {e}", harness_c.display()))?;
+    let harness_bin = workdir.join("oracle_harness");
+    run_status({
+        let mut c = Command::new(&clang);
+        c.arg(&harness_c)
+            .arg("-o")
+            .arg(&harness_bin)
+            .arg("-L")
+            .arg(&lib64)
+            .arg("-lbleradar_core")
+            .arg("-Wl,--allow-shlib-undefined");
+        c
+    })?;
+
+    println!("== execute the oracle under qemu-aarch64 ==");
+    let produced = run_capture({
+        let mut c = Command::new(&qemu);
+        c.arg("-L")
+            .arg(&sysroot)
+            .arg("-E")
+            .arg("LD_LIBRARY_PATH=/system/lib64")
+            .arg(&harness_bin);
+        c
+    })?;
+
+    println!("== drift-check against {EXECUTED_VECTORS_PATH} ==");
+    let committed = read_to_string(&root.join(EXECUTED_VECTORS_PATH))?;
+    let committed_rows: Vec<&str> = committed
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let produced_rows: Vec<&str> = produced
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if produced_rows != committed_rows {
+        let mut detail = String::from("(row counts match but contents differ)");
+        for index in 0..committed_rows.len().max(produced_rows.len()) {
+            let committed_row = committed_rows.get(index).copied().unwrap_or("<missing>");
+            let produced_row = produced_rows.get(index).copied().unwrap_or("<missing>");
+            if committed_row != produced_row {
+                detail = format!(
+                    "first drift at data row {}: committed {committed_row:?} vs executed {produced_row:?}",
+                    index + 1
+                );
+                break;
+            }
+        }
+        return Err(format!(
+            "executed-oracle output drifted from {EXECUTED_VECTORS_PATH} \
+             ({} committed vs {} executed rows); {detail}. If the sweep changed \
+             intentionally, regenerate the committed vectors from this output.",
+            committed_rows.len(),
+            produced_rows.len()
+        ));
+    }
+
+    println!(
+        "oracle-differential: {} executed-oracle rows match the committed vectors",
+        produced_rows.len()
+    );
+    Ok(())
+}
+
+/// Finds `qemu-aarch64-static` (preferred) or `qemu-aarch64`, honoring an
+/// explicit `QEMU_AARCH64` override.
+fn locate_qemu_aarch64() -> Result<PathBuf, String> {
+    if let Ok(value) = env::var("QEMU_AARCH64") {
+        let path = PathBuf::from(value);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!("QEMU_AARCH64={} is not a file", path.display()));
+    }
+    which_in_path("qemu-aarch64-static")
+        .or_else(|| which_in_path("qemu-aarch64"))
+        .ok_or_else(|| {
+            "qemu-aarch64 not found: install qemu-user-static, or set QEMU_AARCH64 (see docs/ORACLE_DIFFERENTIAL.md)"
+                .to_string()
+        })
+}
+
+/// The NDK's aarch64 API-24 Clang driver for the current host.
+fn ndk_aarch64_clang(ndk_root: &Path) -> Result<PathBuf, String> {
+    let clang = ndk_root
+        .join("toolchains/llvm/prebuilt")
+        .join(ndk_host_tag())
+        .join("bin")
+        .join("aarch64-linux-android24-clang");
+    if clang.is_file() {
+        Ok(clang)
+    } else {
+        Err(format!(
+            "NDK aarch64 clang not found at {}",
+            clang.display()
+        ))
+    }
+}
+
+/// Extracts `oracle/libbleradar_core.so` from the committed migration archive
+/// into `workdir` (via `jar`, part of the JDK the live tier already needs) and
+/// refuses to proceed unless it matches the pinned immutable-oracle SHA-256.
+fn extract_and_pin_oracle_so(root: &Path, workdir: &Path) -> Result<PathBuf, String> {
+    let zip = root.join(MIGRATION_ZIP_NAME);
+    if !zip.is_file() {
+        return Err(format!("missing migration archive: {}", zip.display()));
+    }
+    let jar = locate_jar()?;
+    run_status({
+        let mut c = Command::new(&jar);
+        c.current_dir(workdir)
+            .arg("xf")
+            .arg(&zip)
+            .arg(ORACLE_SO_ZIP_ENTRY);
+        c
+    })?;
+    let extracted = workdir.join(ORACLE_SO_ZIP_ENTRY);
+    if !extracted.is_file() {
+        return Err(format!(
+            "jar did not extract {ORACLE_SO_ZIP_ENTRY} from {}",
+            zip.display()
+        ));
+    }
+    let actual = sha256::to_hex(&sha256::sha256(&read_bytes(&extracted)?));
+    if actual != ORACLE_SO_SHA256 {
+        return Err(format!(
+            "extracted oracle .so sha256 {actual} != pinned {ORACLE_SO_SHA256}; the immutable oracle must never change"
+        ));
+    }
+    Ok(extracted)
+}
+
+/// Locates `jar` via `JAVA_HOME` or `PATH`.
+fn locate_jar() -> Result<PathBuf, String> {
+    if let Ok(home) = env::var("JAVA_HOME") {
+        let jar = PathBuf::from(home).join("bin").join("jar");
+        if jar.is_file() {
+            return Ok(jar);
+        }
+    }
+    which_in_path("jar")
+        .ok_or_else(|| "jar not found (a JDK is required to unpack the oracle)".to_string())
+}
+
+/// Prepares an aarch64 Bionic sysroot (`system/bin/linker64` +
+/// `system/lib64/lib{c,m,dl,c++}.so`). Uses `BIONIC_SYSROOT` when it points at a
+/// prepared tree, otherwise extracts one from an installed arm64 system image
+/// with `debugfs` (no root or loopback mount needed).
+fn prepare_bionic_sysroot(sdk_root: &Path) -> Result<PathBuf, String> {
+    if let Ok(value) = env::var("BIONIC_SYSROOT") {
+        let root = PathBuf::from(value);
+        if root.join("system/bin/linker64").is_file() && root.join("system/lib64/libc.so").is_file()
+        {
+            return Ok(root);
+        }
+        return Err(format!(
+            "BIONIC_SYSROOT={} lacks system/bin/linker64 and system/lib64/libc.so",
+            root.display()
+        ));
+    }
+
+    let image = discover_arm64_system_image(sdk_root)?;
+    let debugfs = which_in_path("debugfs").ok_or_else(|| {
+        "debugfs not found (install e2fsprogs) and BIONIC_SYSROOT unset; see docs/ORACLE_DIFFERENTIAL.md"
+            .to_string()
+    })?;
+
+    let sysroot = xtask_temp_dir("oracle-bionic-sysroot");
+    let bin = sysroot.join("system/bin");
+    let lib64 = sysroot.join("system/lib64");
+    recreate_dirs(&[&bin, &lib64])?;
+
+    debugfs_dump(&debugfs, &image, "/bin/linker64", &bin.join("linker64"))?;
+    let mut linker = fs::metadata(bin.join("linker64"))
+        .map_err(|e| format!("stat linker64: {e}"))?
+        .permissions();
+    linker.set_mode(0o755);
+    fs::set_permissions(bin.join("linker64"), linker)
+        .map_err(|e| format!("chmod linker64: {e}"))?;
+
+    for lib in ["libc.so", "libm.so", "libdl.so", "libc++.so"] {
+        debugfs_dump(&debugfs, &image, &format!("/lib64/{lib}"), &lib64.join(lib))?;
+    }
+    Ok(sysroot)
+}
+
+/// Finds an installed `system-images/<api>/<tag>/arm64-v8a/system.img`.
+fn discover_arm64_system_image(sdk_root: &Path) -> Result<PathBuf, String> {
+    let base = sdk_root.join("system-images");
+    let apis = fs::read_dir(&base).map_err(|e| {
+        format!(
+            "no arm64 system image under {} ({e}); install one with \
+             sdkmanager \"system-images;android-24;default;arm64-v8a\" or set BIONIC_SYSROOT",
+            base.display()
+        )
+    })?;
+    for api in apis.flatten() {
+        let Ok(tags) = fs::read_dir(api.path()) else {
+            continue;
+        };
+        for tag in tags.flatten() {
+            let image = tag.path().join("arm64-v8a").join("system.img");
+            if image.is_file() {
+                return Ok(image);
+            }
+        }
+    }
+    Err(format!(
+        "no arm64-v8a/system.img under {}; install one with \
+         sdkmanager \"system-images;android-24;default;arm64-v8a\" or set BIONIC_SYSROOT",
+        base.display()
+    ))
+}
+
+/// Extracts one file from an ext4 image with `debugfs` (no mount, no root).
+fn debugfs_dump(debugfs: &Path, image: &Path, source: &str, dest: &Path) -> Result<(), String> {
+    run_status({
+        let mut c = Command::new(debugfs);
+        c.arg("-R")
+            .arg(format!("dump {source} {}", dest.display()))
+            .arg(image);
+        c
+    })?;
+    let extracted = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    if extracted == 0 {
+        return Err(format!(
+            "debugfs could not extract {source} from {}",
+            image.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the first `PATH` entry containing an executable named `name`.
+fn which_in_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Spawns `cmd`, requiring success, and returns its captured stdout.
+fn run_capture(mut cmd: Command) -> Result<String, String> {
+    let program = format!("{cmd:?}");
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to spawn {program}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{program} exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|e| format!("{program} produced non-UTF-8 output: {e}"))
 }
 
 fn run_status(mut cmd: Command) -> Result<(), String> {
