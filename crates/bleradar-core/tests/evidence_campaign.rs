@@ -6,7 +6,11 @@
 //! transient `ClaimWithoutEvidence` incompleteness (a claim may precede its
 //! evidence; `trace_claim` must agree); a rejected operation leaves `len()`
 //! unchanged; `trace_claim` and `observations_by_source` agree with a manual
-//! recount. Scale with `BLERADAR_EVIDENCE_CAMPAIGN_SEQUENCES` and reseed with
+//! recount; a `transaction` (nested up to two levels, holding one to four
+//! random operations, aborted by error or by panic half of the time) leaves
+//! the store's complete state exactly as it was when it does not commit and
+//! loses nothing when it does. Scale with
+//! `BLERADAR_EVIDENCE_CAMPAIGN_SEQUENCES` and reseed with
 //! `BLERADAR_EVIDENCE_CAMPAIGN_SEED`; a failure prints the seed.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -98,7 +102,100 @@ fn step(
     rng: &mut Rng,
     store: &mut EvidenceStore,
 ) -> Result<(String, Result<(), ProvenanceError>), String> {
-    let op = rng.below(18);
+    step_at(rng, store, 0)
+}
+
+/// A random transaction holding one to four operations (some of them nested
+/// transactions), committed or aborted at random; `Err` from the closure and
+/// a panic inside it must both restore the store's complete state.
+fn transaction_step(
+    rng: &mut Rng,
+    store: &mut EvidenceStore,
+    depth: u8,
+) -> Result<(String, Result<(), ProvenanceError>), String> {
+    let before = format!("{store:?}");
+    let len_before = store.len();
+    let planned = 1 + rng.below(4);
+    let abort = rng.chance(0.5);
+    let poison = abort && rng.chance(0.2);
+    let mut inconsistency: Option<String> = None;
+    let mut len_inside = len_before;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        store.transaction(|store| {
+            for _ in 0..planned {
+                let result = if depth < 2 && rng.chance(0.3) {
+                    transaction_step(rng, store, depth + 1)
+                } else {
+                    step_at(rng, store, depth + 1)
+                };
+                if let Err(violation) = result {
+                    inconsistency = Some(violation);
+                    break;
+                }
+            }
+            len_inside = store.len();
+            if poison {
+                panic!("adapter failure inside a transaction");
+            }
+            if abort {
+                Err(ProvenanceError::DuplicateId {
+                    collection: "transaction",
+                    id: "abort".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        })
+    }));
+    if let Some(violation) = inconsistency {
+        return Err(violation);
+    }
+    match attempt {
+        Err(_) if poison => {
+            if format!("{store:?}") != before {
+                return Err(format!(
+                    "transaction (depth {depth}) panicked but the store changed"
+                ));
+            }
+            Ok((
+                format!("transaction depth {depth} panicked"),
+                Err(ProvenanceError::DuplicateId {
+                    collection: "transaction",
+                    id: "panic".to_owned(),
+                }),
+            ))
+        }
+        Err(_) => Err(format!("transaction (depth {depth}) panicked unexpectedly")),
+        Ok(Err(error)) => {
+            if format!("{store:?}") != before || store.len() != len_before {
+                return Err(format!(
+                    "transaction (depth {depth}) aborted but the store changed"
+                ));
+            }
+            Ok((format!("transaction depth {depth} aborted"), Err(error)))
+        }
+        Ok(Ok(())) => {
+            if store.len() != len_inside || len_inside < len_before {
+                return Err(format!(
+                    "transaction (depth {depth}) committed but lost changes: {} inside, {} after",
+                    len_inside,
+                    store.len()
+                ));
+            }
+            Ok((format!("transaction depth {depth} committed"), Ok(())))
+        }
+    }
+}
+
+fn step_at(
+    rng: &mut Rng,
+    store: &mut EvidenceStore,
+    depth: u8,
+) -> Result<(String, Result<(), ProvenanceError>), String> {
+    let op = rng.below(19);
+    if op == 18 {
+        return transaction_step(rng, store, depth);
+    }
     let t = ts(rng);
     let outcome: (String, Result<(), ProvenanceError>) = match op {
         0 => {
