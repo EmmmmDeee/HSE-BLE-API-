@@ -25,6 +25,8 @@ pub mod coords;
 pub mod entity;
 /// Huntsman Search Engine (HSE) canonical entity tag vocabulary.
 pub mod tags;
+/// Robust, deterministic automatic-update engine (version/integrity/lifecycle).
+pub mod update;
 
 pub use advancement::{
     AdvancementDecision, AdvancementError, AdvancementExecution, AdvancementFactors,
@@ -92,6 +94,10 @@ pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass, MapPoint,
     SelectedDevice, SpatialEstimate, TrackError, TrackingPolicy, TrackingProfile, TrackingSnapshot,
     TrackingSnapshotInput, tracking_profile, tracking_profile_from_ordinal, tracking_snapshot,
+};
+pub use update::{
+    ArtifactVerifier, ReleaseManifest, UpdateDecision, UpdateError, UpdateSession, UpdateStage,
+    Version, check_update, update_decision, verify_artifact,
 };
 pub use verification::{
     DifferentialCase, DifferentialReport, DifferentialViolation, ExecutionOutcome, FailureCause,
