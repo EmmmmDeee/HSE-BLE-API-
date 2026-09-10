@@ -58,8 +58,11 @@ cargo xtask build-apk
 cargo xtask verify-android-live   # JNI dual-path + build-apk + entry/DEX/JNI gates
 ```
 
-Live results on this host (Android SDK at `/usr/local/lib/android/sdk`,
-build-tools 37.0.0, NDK 27.3.13750724, platform android-36):
+Live results, first on the 2026-09-09 host (Android SDK at
+`/usr/local/lib/android/sdk`) and re-executed 2026-09-10 on a fresh host
+(SDK installed to `/opt/android-sdk` from `commandlinetools-linux-11076708`,
+build-tools 37.0.0, NDK 27.3.13750724, platform android-36, OpenJDK 21.0.10;
+`verify-android-live` exit 0 in 23 s cold, 5 s warm):
 
 | Check | Outcome |
 |---|---|
@@ -84,6 +87,18 @@ because the APK Signature Block embeds a wall-clock signing time that
 `apksigner` does not fully pin even under `SOURCE_DATE_EPOCH`. Treat
 per-entry content hashes (or `cargo xtask verify-android-live`) as the
 authoritative completeness proof, not a single whole-file digest.
+
+**Cross-host reproducibility (live 2026-09-10):** rebuilding the then-committed
+APK on a different host reproduced `libbleradar_jni.so`
+(SHA-256 `20e49084…d3aeb5`), the manifest, `resources.arsc`, and both icon
+resources byte-for-byte; `classes.dex` differed only by JDK-version metadata
+(JDK 21 `javac` emits `MethodParameters` attributes; identical class/method
+inventory and instruction stream under `dexdump -d`). The DEX is reproducible
+per JDK major version, so the JDK is pinned to 21 in CI and recorded in
+`docs/ANDROID_APP.md`. The committed APK was then regenerated from the
+COR-017/018/019 sources (decision #57): `classes.dex` 37,704 bytes,
+`resources.arsc` 3,084 bytes, native library unchanged, whole file 360,898
+bytes, signed with a fresh ephemeral debug identity as every rebuild is.
 
 This layer proves the **reconstructed** APK builds and packages correctly. It
 does **not** claim differential parity with

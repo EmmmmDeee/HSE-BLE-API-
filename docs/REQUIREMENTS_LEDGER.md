@@ -300,6 +300,21 @@ test counts are intentionally not frozen in this ledger.
 
 ---
 
+## REQ-ANDROID — Reconstructed Android app (`android/app/src/main`)
+
+`android/app/src/main/java/com/hse/bleradar/*.java`, `AndroidManifest.xml`, `res/values/*.xml`; design record `docs/ANDROID_APP.md`.
+
+| ID | Requirement | Inputs → Outputs | Side effects / Failure behavior | Location | Tests | Status |
+|---|---|---|---|---|---|---|
+| REQ-ANDROID-001 | Every distance, bound, proximity, trend, confidence, and freshness value the app shows comes from `bleradar-core` through the JNI façade; Java never reimplements the math and the façade↔export contract is exact | `ScanResult` → `NativeRadar.tracking*` → `Blip` fields | Without the native library the engine records raw RSSI only (`NaN` distances, `PROXIMITY_FAR`) and REQ-ANDROID-003 makes that visible | `BleScanEngine.java`, `NativeRadar.java`, `crates/bleradar-jni` | contract: REQ-XTASK-009/010 (21 ↔ 21, `linked-natives=21`); DEX inspection of the committed APK shows `BleScanEngine` calling only `NativeRadar` natives for these fields | VERIFIED for the façade/export contract and the packaged call graph; on-device values unobserved (MIG-003) |
+| REQ-ANDROID-002 | The service is promoted to a `connectedDevice` foreground service only after the Bluetooth runtime permissions are granted (API 34+ prerequisite); a `START_STICKY` restart after process death resumes scanning; a user Stop is never resurrected; a restart that finds permissions revoked stops itself instead of throwing | activity Start/Stop, sticky restart → service started/foreground state, scanner state, notification | Start failure (adapter off) leaves the foreground and stops the started state; revoked permissions → `stopSelf`, `START_NOT_STICKY` | `RadarScanService.onStartCommand`/`promoteToForeground`/`stopScanning`, `MainActivity.onStart`/`onToggleClicked`/`refreshUiLoop` | compile-verified by `cargo xtask build-apk` (`javac` against `android-36`, `d8`); `dexdump` of the committed APK shows `onStartCommand`/`promoteToForeground`, `stopForeground(int)` and `startForegroundService` call sites; `verify-android-live` green | IMPLEMENTED_UNVERIFIED — missing: first launch on an API 34+ device, a process-kill restart while scanning, and a permission revocation, none observable without a device/emulator (MIG-003) |
+| REQ-ANDROID-003 | A failed native-library load is shown to the user on every status line (load-error class name) rather than silently degrading | `NativeRadar.loadError()` → status text | — | `MainActivity.setStatus`, `res/values/strings.xml::status_native_unavailable` | compile-verified; `status_native_unavailable` present in the committed APK's `resources.arsc`; `setStatus` present in its DEX | IMPLEMENTED_UNVERIFIED — missing: observation on a non-`arm64-v8a` device or with a deliberately unloadable library (MIG-003) |
+| REQ-ANDROID-004 | The committed `HSE-BLE-Radar-arm64-v1.0.0.apk` corresponds to the current sources: a fresh `build-apk` reproduces the native library byte-for-byte and the DEX code (class/method inventory and instruction stream) exactly, with only JDK-version metadata free to differ | sources → APK entries | A stale committed APK shows up as a code/inventory diff under `dexdump -d` | `cargo xtask build-apk`, `verify-android-live` | 2026-09-10: `.so` SHA-256 `20e49084…d3aeb5` identical across hosts/sessions; DEX identical except JDK 21 `MethodParameters` metadata; APK then regenerated from the COR-017/018/019 sources | VERIFIED (2026-09-10 rebuild) |
+
+**Runtime verification evidence:** `ANDROID_HOME=/opt/android-sdk cargo xtask verify-android-live` → exit 0 (2026-09-10, twice: before and after the COR-017/018/019 change; 23 s cold, 5 s warm). No on-device execution.
+
+---
+
 ## REQ-PROC — Process, CI, and documentation-as-requirement
 
 | ID | Requirement | Inputs → Outputs | Side effects / Failure behavior | Location | Tests | Status |
@@ -335,6 +350,7 @@ test counts are intentionally not frozen in this ledger.
 | 13 | REQ-CORE-007 full finite-input result invariant | `BROKEN` — extreme but finite inputs could overflow to `Some(inf)` or underflow to `Some(0.0)` | `VERIFIED` | `ble_distance_m` now returns `None` unless its computed result is positive and finite; direct reproducers and a finite-boundary Cartesian sweep lock the invariant |
 | 14 | JNI export contract had three hand-maintained copies (`NativeRadar.java` natives, `bleradar-jni` exports, xtask's `REQUIRED_JNI_EXPORTS` list) and no CI enforcement | `IMPLEMENTED_UNVERIFIED` — drift between the Java façade and the Rust exports surfaced only on device as an `UnsatisfiedLinkError` at a method's first call, or in `verify-android-live`, which needs an SDK the CI runner lacks; the duplicate list could itself go stale silently | `VERIFIED` (REQ-XTASK-009/010) | `REQUIRED_JNI_EXPORTS` deleted; the expected set is derived from `NativeRadar.java`; `cargo xtask check-jni-contract` added to `gates`; `verify-jni-live` links every declared native reflectively and CI runs it (2026-09-10) |
 | 15 | `docs/ANDROID_APP.md` cited by six sources since PR #13 but never committed on any branch; the Android app decisions of PRs #13–#15 absent from the decision log (REQ-PROC-004) | `MISSING` | `VERIFIED` (document exists; decision #56 records the retroactive design record) | `docs/ANDROID_APP.md` written from tree evidence (oracle manifest permission diff, ABI, build pipeline, palette, lifecycle) including two newly recorded open gaps: the degraded no-native mode is never shown to the user, and the sticky service does not resume scanning after a restart (ISSUE_LEDGER COR-017/COR-018). CI evidence for REQ-PROC-006/007 is appended to this row when the first remote run is observed |
+| 16 | COR-017 (silent no-native degradation), COR-018 (no scan resume after a sticky restart), COR-019 (foreground promotion before any runtime permission grant, which the API 34+ `connectedDevice` type rejects) | `BROKEN` on the affected pathways (`MainActivity.onStart` promoted the service on every start; `onStartCommand` only re-posted the idle notification; status lines ignored `NativeRadar.loadError()`) | `IMPLEMENTED_UNVERIFIED` (REQ-ANDROID-002/003) — compile-verified and packaged, device behaviour unobserved | the activity binds only; the Start action issues `startForegroundService` after the permission check; `onStartCommand` starts/resumes the scan and promotes with the scanning notification, or stops itself when the scan cannot start or the permissions were revoked; `setStatus` surfaces the load error; APK regenerated (decision #57) |
 
 Items 1-10 were validated with the listed focused checks and a full
 `cargo xtask gates` run after each original change. Items 11-13 were validated
@@ -398,6 +414,12 @@ stale documentation and is removed here after live re-check
   `cargo xtask verify-android-live`) validate the reconstructed JNI/APK path
   only — they do not differentially verify the original oracle APK's 124 ABI
   contracts on device, so REQ-COMPAT-004 remains `PARTIAL`.
+- **Reconstructed Android app**: REQ-ANDROID-002/003 are compile-verified and
+  packaged but `IMPLEMENTED_UNVERIFIED` until first-launch, process-kill
+  restart, permission-revocation, and no-native-library behaviour are observed
+  on a device or emulator (MIG-003). REQ-PROC-006/007 stay
+  `IMPLEMENTED_UNVERIFIED` until the first remote run of the reworked
+  `gates.yml` is observed green.
 
 ## Termination statement
 

@@ -73,21 +73,22 @@ Reasons, in priority order:
   targets the same hardware class.
 - One cross-compile target (`aarch64-linux-android`, API 26 clang from the
   NDK) keeps `build-apk` deterministic and the package small. The committed
-  `HSE-BLE-Radar-arm64-v1.0.0.apk` holds 365,308 bytes uncompressed in six
-  entries; its `libbleradar_jni.so` is 318,536 bytes under the root
-  `Cargo.toml` release profile (`opt-level = "z"`, LTO, one codegen unit,
-  `panic = "abort"`, stripped), against the oracle's 10,808,624-byte
-  `libbleradar_core.so`.
+  `HSE-BLE-Radar-arm64-v1.0.0.apk` (360,898 bytes) holds 366,232 bytes
+  uncompressed in six entries — `classes.dex` 37,704, `resources.arsc` 3,084,
+  the manifest and two icon resources, and a 318,536-byte `libbleradar_jni.so`
+  built under the root `Cargo.toml` release profile (`opt-level = "z"`, LTO,
+  one codegen unit, `panic = "abort"`, stripped) — against the oracle's
+  10,808,624-byte `libbleradar_core.so`.
 - `android:extractNativeLibs="false"` plus the uncompressed, page-aligned
   library entry lets the loader map `libbleradar_jni.so` straight from the
   APK, so there is no extraction step at install time.
 - On a device without `arm64-v8a`, `System.loadLibrary` fails inside
   `NativeRadar.ensureLoaded()`; the error is retained in `loadError()` and
   `isAvailable()` returns `false`. `BleScanEngine` then records raw RSSI with
-  `NaN` distances and `PROXIMITY_FAR`. **Known gap:** `MainActivity` never
-  reads `isAvailable()`/`loadError()`, so this degraded mode is not shown to
-  the user. It is recorded, not hidden; closing it needs a compile-verified
-  activity change (Android SDK on the build host, see "Verification").
+  `NaN` distances and `PROXIMITY_FAR`, and every status line the activity
+  renders goes through `MainActivity.setStatus`, which appends
+  `status_native_unavailable` (naming the load error's class) so the degraded
+  mode is never presented as a normal scan (COR-017).
 
 ## Permissions: the subset of the oracle's manifest this app uses
 
@@ -138,18 +139,37 @@ authority.
 
 ## Lifecycle and restart behaviour
 
-- `MainActivity.onCreate` calls `NativeRadar.ensureLoaded()`, starts the
-  service with `startForegroundService`, and binds to it; rotation is handled
-  through `configChanges` so the activity is not recreated.
-- `RadarScanService.onStartCommand` promotes itself to the foreground with
-  the idle notification and returns `START_STICKY`. **Known gap:** after the
-  process is killed and the sticky service is restarted, scanning does not
-  resume by itself; the user must press Start again. The oracle's always-on
-  notification suggests it resumed scanning. Closing this requires a
-  compile-verified service change plus on-device restart evidence.
+- `MainActivity.onCreate` calls `NativeRadar.ensureLoaded()`; `onStart` only
+  **binds** to `RadarScanService` (`BIND_AUTO_CREATE`), which creates the
+  service without promoting it, so nothing is shown in the notification shade
+  while the app is idle. Rotation is handled through `configChanges` so the
+  activity is not recreated.
+- A scan request is the only thing that promotes the service. The Start
+  action first checks `hasRequiredPermissions` and the adapter, then issues
+  `startForegroundService` and `startScanning()`. `onStartCommand` therefore
+  runs only after the Bluetooth runtime permissions were granted, which is
+  what the `connectedDevice` foreground type requires on API 34+ before
+  `startForeground` (COR-019); it starts the scan and promotes the service
+  with the "BLE Radar is scanning" notification. If the scan cannot start
+  (adapter off), it leaves the foreground again and stops itself so no
+  misleading notification lingers.
+- `START_STICKY` now means recovery: if the process is killed while scanning,
+  the system restarts the service with a `null` intent, `onStartCommand` runs
+  again, and scanning resumes with its notification (COR-018). A user Stop
+  calls `stopForeground(STOP_FOREGROUND_REMOVE)` and `stopSelf()`, so a
+  deliberate stop is never resurrected. A restart that finds the permissions
+  revoked stops itself with `START_NOT_STICKY` instead of throwing.
+- `refreshUiLoop` reflects the real engine state every 400 ms: if the scan
+  ended without a toggle (scan failure, or a restart that could not resume),
+  the button and status return to idle.
 - Stale devices are pruned by the Rust `FreshnessClass` derived from the
   tracking profile's windows (`Standard`: live ≤ 5 s, recent ≤ 30 s), so the
   UI never applies its own timeout policy while the native library is loaded.
+- Evidence classification: the contract above is compile-verified (`javac`
+  against `android-36`, `d8`, DEX inspection) and packaged in the committed
+  APK; first-launch, process-kill, and permission-revocation behaviour on a
+  device remain unobserved (MIG-003), so REQ-ANDROID-002/003 stay
+  `IMPLEMENTED_UNVERIFIED` in `docs/REQUIREMENTS_LEDGER.md` until then.
 
 ## Verification
 
@@ -166,3 +186,16 @@ authority.
 that last changed the Android sources or the JNI crate; the export contract
 of its `lib/arm64-v8a/libbleradar_jni.so` was re-verified against
 `NativeRadar.java` on 2026-09-10 (21 natives ↔ 21 exports).
+
+Reproducibility, observed 2026-09-10 by rebuilding the then-committed APK on
+a different host (build-tools 37.0.0, NDK 27.3.13750724, platform
+android-36, OpenJDK 21.0.10): `AndroidManifest.xml`, `resources.arsc`, both
+icon resources, and `libbleradar_jni.so` were byte-identical to the committed
+entries, so the Rust cross-compile is bit-reproducible across hosts and
+sessions. `classes.dex` differed by 164 bytes with an identical class/method
+inventory and identical instruction stream: JDK 21's `javac` emits
+`MethodParameters` attributes for mandated inner-class constructor
+parameters, which the previous host's JDK did not. The DEX is therefore
+reproducible per JDK major version, which is why CI and this record pin
+JDK 21; a rebuild on another JDK is a metadata difference, not source drift,
+and `dexdump -d` on both files is the way to tell the two apart.
