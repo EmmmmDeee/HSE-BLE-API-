@@ -2,9 +2,9 @@
 
 use crate::{
     CalibrationProfile, LatLon, ProximityBand, RssiEma, SignalTrend, ble_distance_m,
-    ble_distance_range_m, calibration_profile as resolve_calibration_profile, filtered_rssi,
-    haversine_m, proximity_label, proximity_label_from_distance_m, signal_confidence_percent,
-    signal_trend,
+    ble_distance_range_m, calibration_profile as resolve_calibration_profile,
+    effective_rssi_at_1m_dbm, filtered_rssi, haversine_m, proximity_label,
+    proximity_label_from_distance_m, signal_confidence_percent, signal_trend,
 };
 
 /// Assumed horizontal accuracy, in metres, for an observation carrying no GPS fix.
@@ -232,6 +232,10 @@ pub struct TrackingSnapshotInput {
     pub tracking_profile: TrackingProfile,
     /// Age of the latest observation relative to "now".
     pub age_ms: u64,
+    /// Optional device-advertised/calibrated TX power in dBm, used in place
+    /// of the profile's `rssi_at_1m_dbm` when present and plausible. See
+    /// [`effective_rssi_at_1m_dbm`].
+    pub tx_power_dbm: Option<f64>,
 }
 
 /// Derives one coherent per-device signal snapshot from raw tracking inputs.
@@ -240,9 +244,13 @@ pub struct TrackingSnapshotInput {
 /// sample plus a valid alpha from the tracking profile). Distance bounds and
 /// confidence depend on spread/support and fail independently so an invalid
 /// `rssi_spread_db` cannot erase an otherwise usable filtered-signal reading.
+/// When `input.tx_power_dbm` carries a plausible device-advertised value, it
+/// overrides the calibration profile's generic `rssi_at_1m_dbm` for every
+/// distance-derived field (see [`effective_rssi_at_1m_dbm`]).
 #[must_use]
 pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapshot> {
     let calibration = resolve_calibration_profile(input.calibration_profile);
+    let rssi_at_1m_dbm = effective_rssi_at_1m_dbm(input.tx_power_dbm, calibration.rssi_at_1m_dbm);
     let tracking_policy = tracking_profile(input.tracking_profile);
     let filtered_rssi_dbm = filtered_rssi(
         input.previous_filtered_rssi_dbm,
@@ -263,14 +271,14 @@ pub fn tracking_snapshot(input: TrackingSnapshotInput) -> Option<TrackingSnapsho
     let proximity = proximity_label(filtered_rssi_dbm)?;
     let distance_m = ble_distance_m(
         filtered_rssi_dbm,
-        calibration.rssi_at_1m_dbm,
+        rssi_at_1m_dbm,
         calibration.path_loss_exponent,
     );
     let distance_proximity = distance_m.and_then(proximity_label_from_distance_m);
     let (distance_lower_bound_m, distance_upper_bound_m) = match ble_distance_range_m(
         filtered_rssi_dbm,
         input.rssi_spread_db,
-        calibration.rssi_at_1m_dbm,
+        rssi_at_1m_dbm,
         calibration.path_loss_exponent,
     ) {
         Some((lower, upper)) => (Some(lower), Some(upper)),

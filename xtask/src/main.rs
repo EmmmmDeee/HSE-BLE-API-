@@ -953,34 +953,41 @@ public final class JniSmoke {{
                 Double.isNaN(NativeRadar.calibrationProfileRssiAt1mDbm(99)),
                 "invalid calibration profile did not yield NaN sentinel");
         double tracked = NativeRadar.trackingFilteredRssi(
-                -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L);
+                -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L,
+                Double.NaN);
         require(Math.abs(tracked - (-69.0)) < 1e-9, "unexpected tracked RSSI: " + tracked);
         double trackedDistance = NativeRadar.trackingDistanceM(
-                -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L);
+                -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L,
+                Double.NaN);
         require(trackedDistance > 1.0, "unexpected tracked distance: " + trackedDistance);
         require(
                 NativeRadar.trackingTrend(
-                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L,
+                        Double.NaN)
                         == NativeRadar.TREND_STRONGER,
                 "unexpected tracked trend");
         require(
                 NativeRadar.trackingProximity(
-                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L,
+                        Double.NaN)
                         == NativeRadar.PROXIMITY_MID,
                 "unexpected tracked proximity");
         require(
                 NativeRadar.trackingDistanceProximity(
-                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L,
+                        Double.NaN)
                         == NativeRadar.PROXIMITY_MID,
                 "unexpected distance-derived tracked proximity");
         require(
                 NativeRadar.trackingConfidencePercent(
-                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L,
+                        Double.NaN)
                         >= 50,
                 "unexpected tracked confidence");
         require(
                 NativeRadar.trackingFreshness(
-                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L)
+                        -80.0, -60.0, 4.0, 6, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_RESPONSIVE, 250L,
+                        Double.NaN)
                         == NativeRadar.FRESHNESS_LIVE,
                 "unexpected tracked freshness");
         require(
@@ -988,8 +995,25 @@ public final class JniSmoke {{
                 "invalid input did not yield NaN sentinel");
         require(
                 Double.isNaN(NativeRadar.trackingDistanceM(
-                        Double.NaN, -70.0, 0.0, -1, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 0L)),
+                        Double.NaN, -70.0, 0.0, -1, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 0L,
+                        Double.NaN)),
                 "invalid tracking input did not yield NaN sentinel");
+        double distanceWithoutTxPower = NativeRadar.trackingDistanceM(
+                Double.NaN, -70.0, 0.0, 1, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 0L,
+                Double.NaN);
+        double distanceWithTxPower = NativeRadar.trackingDistanceM(
+                Double.NaN, -70.0, 0.0, 1, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 0L,
+                -70.0);
+        require(
+                Math.abs(distanceWithTxPower - 1.0) < 1e-9 && distanceWithTxPower < distanceWithoutTxPower,
+                "device-advertised txPowerDbm did not override profile calibration: "
+                        + distanceWithTxPower + " vs " + distanceWithoutTxPower);
+        require(
+                NativeRadar.trackingDistanceM(
+                        Double.NaN, -70.0, 0.0, 1, NativeRadar.CALIBRATION_BASELINE, NativeRadar.TRACKING_STANDARD, 0L,
+                        127.0)
+                        == distanceWithoutTxPower,
+                "implausible txPowerDbm (TX_POWER_NOT_PRESENT sentinel) was not ignored");
     }}
 
     private static void verifyFailurePath() {{

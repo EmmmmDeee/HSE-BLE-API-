@@ -178,6 +178,8 @@ final class BleScanEngine {
         Blip blip = blipsByAddress.computeIfAbsent(address, Blip::new);
         double rawRssi = result.getRssi();
         double previous = blip.lastRssiDbm;
+        double txPowerDbm = readTxPowerDbm(result);
+        blip.txPowerDbm = txPowerDbm;
 
         if (NativeRadar.isAvailable()) {
             double smoothed = NativeRadar.trackingFilteredRssi(
@@ -187,7 +189,8 @@ final class BleScanEngine {
                     Math.max(1, blip.sampleCount()),
                     calibrationProfile,
                     trackingProfile,
-                    0L);
+                    0L,
+                    txPowerDbm);
             if (!Double.isFinite(smoothed)) {
                 smoothed = rawRssi;
             }
@@ -202,7 +205,8 @@ final class BleScanEngine {
                     sampleCount,
                     calibrationProfile,
                     trackingProfile,
-                    0L);
+                    0L,
+                    txPowerDbm);
             blip.distanceMetres = NativeRadar.trackingDistanceM(
                     previous,
                     rawRssi,
@@ -210,7 +214,8 @@ final class BleScanEngine {
                     sampleCount,
                     calibrationProfile,
                     trackingProfile,
-                    0L);
+                    0L,
+                    txPowerDbm);
             blip.distanceLowerBoundMetres = NativeRadar.trackingDistanceLowerBoundM(
                     previous,
                     rawRssi,
@@ -218,7 +223,8 @@ final class BleScanEngine {
                     sampleCount,
                     calibrationProfile,
                     trackingProfile,
-                    0L);
+                    0L,
+                    txPowerDbm);
             blip.distanceUpperBoundMetres = NativeRadar.trackingDistanceUpperBoundM(
                     previous,
                     rawRssi,
@@ -226,7 +232,8 @@ final class BleScanEngine {
                     sampleCount,
                     calibrationProfile,
                     trackingProfile,
-                    0L);
+                    0L,
+                    txPowerDbm);
             blip.proximity = NativeRadar.trackingDistanceProximity(
                     previous,
                     rawRssi,
@@ -234,7 +241,8 @@ final class BleScanEngine {
                     sampleCount,
                     calibrationProfile,
                     trackingProfile,
-                    0L);
+                    0L,
+                    txPowerDbm);
             int confidencePercent = NativeRadar.trackingConfidencePercent(
                     previous,
                     rawRssi,
@@ -242,7 +250,8 @@ final class BleScanEngine {
                     sampleCount,
                     calibrationProfile,
                     trackingProfile,
-                    0L);
+                    0L,
+                    txPowerDbm);
             blip.confidencePercent = Math.max(0, confidencePercent);
             blip.freshness = NativeRadar.trackingFreshness(
                     previous,
@@ -251,7 +260,8 @@ final class BleScanEngine {
                     sampleCount,
                     calibrationProfile,
                     trackingProfile,
-                    0L);
+                    0L,
+                    txPowerDbm);
         } else {
             blip.lastRssiDbm = rawRssi;
             blip.distanceMetres = Double.NaN;
@@ -268,6 +278,18 @@ final class BleScanEngine {
             blip.name = name;
         }
         pruneStale(now);
+    }
+
+    /**
+     * The device's advertised/calibrated TX power in dBm, or {@link Double#NaN}
+     * when the platform did not report one (including the
+     * {@code ScanResult.TX_POWER_NOT_PRESENT} sentinel). {@link NativeRadar}
+     * independently validates plausibility before using this as a per-device
+     * calibration override, so no range filtering happens here.
+     */
+    private static double readTxPowerDbm(ScanResult result) {
+        int txPower = result.getTxPower();
+        return txPower == ScanResult.TX_POWER_NOT_PRESENT ? Double.NaN : txPower;
     }
 
     private String safeDeviceName(ScanResult result) {
@@ -294,7 +316,8 @@ final class BleScanEngine {
                     Math.max(1, blip.sampleCount()),
                     calibrationProfile,
                     trackingProfile,
-                    ageMs);
+                    ageMs,
+                    blip.txPowerDbm);
         }
     }
 
@@ -311,7 +334,8 @@ final class BleScanEngine {
                         Math.max(1, blip.sampleCount()),
                         calibrationProfile,
                         trackingProfile,
-                        ageMs) == NativeRadar.FRESHNESS_STALE;
+                        ageMs,
+                        blip.txPowerDbm) == NativeRadar.FRESHNESS_STALE;
             }
             return ageMs > STALE_RETENTION_WINDOW_MILLIS;
         });

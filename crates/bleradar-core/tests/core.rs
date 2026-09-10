@@ -223,6 +223,7 @@ fn tracking_snapshot_derives_a_coherent_bundle() {
         calibration_profile: CalibrationProfile::Baseline,
         tracking_profile: TrackingProfile::Responsive,
         age_ms: 1_000,
+        tx_power_dbm: None,
     })
     .unwrap();
     assert!((snapshot.filtered_rssi_dbm - (-69.0)).abs() < 1e-9);
@@ -246,6 +247,7 @@ fn tracking_snapshot_keeps_distance_proximity_distinct_from_rssi_proximity() {
         calibration_profile: CalibrationProfile::Baseline,
         tracking_profile: TrackingProfile::Standard,
         age_ms: 0,
+        tx_power_dbm: None,
     })
     .unwrap();
     assert_eq!(snapshot.proximity, ProximityBand::Near);
@@ -262,6 +264,7 @@ fn tracking_snapshot_bootstraps_and_classifies_stale_observations() {
         calibration_profile: CalibrationProfile::Baseline,
         tracking_profile: TrackingProfile::Standard,
         age_ms: 31_000,
+        tx_power_dbm: None,
     })
     .unwrap();
     assert_eq!(snapshot.filtered_rssi_dbm, -59.0);
@@ -282,6 +285,7 @@ fn tracking_snapshot_keeps_filtered_signal_when_spread_is_invalid() {
         calibration_profile: CalibrationProfile::Baseline,
         tracking_profile: TrackingProfile::Standard,
         age_ms: 1_000,
+        tx_power_dbm: None,
     };
     assert!(tracking_snapshot(base).is_some());
 
@@ -299,6 +303,88 @@ fn tracking_snapshot_keeps_filtered_signal_when_spread_is_invalid() {
         assert_eq!(snapshot.confidence_percent, None);
         assert_eq!(snapshot.freshness, FreshnessClass::Live);
     }
+}
+
+#[test]
+fn tracking_snapshot_prefers_plausible_device_tx_power_over_profile_calibration() {
+    // Baseline profile calibration is -59.0 dBm at 1 m / exponent 2.0. A
+    // device that advertises a materially different, plausible TX power
+    // (-70.0 dBm) must shift the calibrated distance away from the profile-only
+    // estimate, proving the per-device override actually reaches `ble_distance_m`.
+    let without_tx_power = tracking_snapshot(TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: f64::NAN,
+        current_rssi_dbm: -70.0,
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Standard,
+        age_ms: 0,
+        tx_power_dbm: None,
+    })
+    .unwrap();
+    let with_tx_power = tracking_snapshot(TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: f64::NAN,
+        current_rssi_dbm: -70.0,
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Standard,
+        age_ms: 0,
+        tx_power_dbm: Some(-70.0),
+    })
+    .unwrap();
+    // Matching the reference RSSI at exactly the device's own calibrated
+    // 1 m power collapses the estimate to 1 m, unlike the generic profile.
+    assert!((with_tx_power.distance_m.unwrap() - 1.0).abs() < 1e-9);
+    assert!(with_tx_power.distance_m.unwrap() < without_tx_power.distance_m.unwrap());
+}
+
+#[test]
+fn tracking_snapshot_ignores_implausible_or_absent_device_tx_power() {
+    let profile_only = tracking_snapshot(TrackingSnapshotInput {
+        previous_filtered_rssi_dbm: f64::NAN,
+        current_rssi_dbm: -70.0,
+        rssi_spread_db: 0.0,
+        sample_count: 1,
+        calibration_profile: CalibrationProfile::Baseline,
+        tracking_profile: TrackingProfile::Standard,
+        age_ms: 0,
+        tx_power_dbm: None,
+    })
+    .unwrap();
+    for implausible in [f64::NAN, f64::INFINITY, 127.0, -101.0, 21.0] {
+        let snapshot = tracking_snapshot(TrackingSnapshotInput {
+            previous_filtered_rssi_dbm: f64::NAN,
+            current_rssi_dbm: -70.0,
+            rssi_spread_db: 0.0,
+            sample_count: 1,
+            calibration_profile: CalibrationProfile::Baseline,
+            tracking_profile: TrackingProfile::Standard,
+            age_ms: 0,
+            tx_power_dbm: Some(implausible),
+        })
+        .unwrap();
+        assert_eq!(
+            snapshot.distance_m, profile_only.distance_m,
+            "implausible tx_power_dbm {implausible:?} should fall back to profile calibration"
+        );
+    }
+}
+
+#[test]
+fn effective_rssi_at_1m_dbm_prefers_plausible_tx_power() {
+    use bleradar_core::effective_rssi_at_1m_dbm;
+    assert_eq!(effective_rssi_at_1m_dbm(Some(-63.0), -59.0), -63.0);
+    assert_eq!(effective_rssi_at_1m_dbm(None, -59.0), -59.0);
+    assert_eq!(effective_rssi_at_1m_dbm(Some(f64::NAN), -59.0), -59.0);
+    assert_eq!(effective_rssi_at_1m_dbm(Some(f64::INFINITY), -59.0), -59.0);
+    // Android's `ScanResult.TX_POWER_NOT_PRESENT` sentinel is out of range.
+    assert_eq!(effective_rssi_at_1m_dbm(Some(127.0), -59.0), -59.0);
+    // Boundary values are inclusive.
+    assert_eq!(effective_rssi_at_1m_dbm(Some(-100.0), -59.0), -100.0);
+    assert_eq!(effective_rssi_at_1m_dbm(Some(20.0), -59.0), 20.0);
+    assert_eq!(effective_rssi_at_1m_dbm(Some(-100.1), -59.0), -59.0);
+    assert_eq!(effective_rssi_at_1m_dbm(Some(20.1), -59.0), -59.0);
 }
 
 #[test]
