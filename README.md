@@ -280,6 +280,8 @@ cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/expor
 cargo xtask audit                  # cargo audit, offline, vendored advisory db
 cargo xtask deny                   # cargo deny check, offline, vendored advisory db
 cargo xtask gates                  # every gate, one command
+cargo run --release -p bleradar-jni --example scan_result_cost   # host hot-path baseline, see benchmarks/README.md
+BLERADAR_CAMPAIGN_ITERATIONS=5000000 cargo test -p bleradar-core --release --test falsification_campaign   # scale the randomised campaign
 ```
 
 ## Distribution packaging

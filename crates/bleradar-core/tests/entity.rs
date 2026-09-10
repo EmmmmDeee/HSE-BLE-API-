@@ -2593,3 +2593,129 @@ fn c_effective_is_bounded_monotonic_and_at_least_confidence_across_grid() {
         }
     }
 }
+
+// ── Randomised falsification campaign (2026-09-10) regressions ────────────
+//
+// Each case below was produced by a deterministic 5,000,000-iteration
+// random/mutation campaign over the real crate (36.25 million checks); every
+// one failed on the code as committed before the fix it locks.
+
+#[test]
+fn parse_plus_code_rejects_non_ascii_homoglyph_digits() {
+    // The genuine full code parses …
+    let genuine = coords::parse("4RRH46RW+RH7").expect("genuine Plus Code parses");
+    assert_eq!(genuine.format, CoordFormat::PlusCode);
+    // … but a non-ASCII character whose low byte happens to equal an alphabet
+    // letter must not be silently decoded as that letter.
+    for forged in [
+        "4RRH46RW+RH\u{1F637}",
+        "8FVC9G8F+\u{1036}X",
+        "4RRH46RW+\u{1052}H",
+        "4RRh46RW+\u{1052}H",
+    ] {
+        assert_eq!(
+            coords::parse(forged),
+            None,
+            "{forged:?} must not decode as a Plus Code"
+        );
+    }
+}
+
+#[test]
+fn normalise_coordinates_does_not_canonicalise_out_of_range_pairs() {
+    // Out-of-range decimal pairs are rejected by `coords::parse`; the decimal
+    // fast path must apply the same validity gate instead of minting a
+    // canonical-looking value for an impossible coordinate.
+    for raw in ["100,2000", "-90,-1680", "0100, 2000", "1e308,0"] {
+        assert_eq!(coords::parse(raw), None, "{raw:?} is not a coordinate");
+        assert_eq!(
+            normalise(&HseEntityKind::Coordinates, raw),
+            raw.trim(),
+            "{raw:?} must be left unchanged"
+        );
+    }
+    // In-range pairs keep their canonical 6-dp form and share the UID of the
+    // same point written in another notation.
+    assert_eq!(
+        normalise(&HseEntityKind::Coordinates, "90, 180"),
+        "90.000000,180.000000"
+    );
+    assert_eq!(
+        uid_for(&HseEntityKind::Coordinates, "-27.4766, 153.0166"),
+        uid_for(&HseEntityKind::Coordinates, "geo:-27.4766,153.0166")
+    );
+}
+
+#[test]
+fn normalise_domain_is_a_fixed_point_when_whitespace_separates_www_labels() {
+    for (raw, expected) in [
+        ("www. www.Example.com.", "example.com"),
+        ("wWw.\rwww.Examp", "examp"),
+        ("www.\u{2028}www.Example.ocm.", "example.ocm"),
+        ("www.www.example.com", "example.com"),
+        // The trailing dot is stripped before peeling, so a bare `www.`
+        // is the literal host `www` (see the existing fixed-point tests).
+        ("www.", "www"),
+    ] {
+        let once = normalise(&HseEntityKind::Domain, raw);
+        assert_eq!(once, expected, "first pass of {raw:?}");
+        assert_eq!(
+            normalise(&HseEntityKind::Domain, &once),
+            once,
+            "second pass of {raw:?} must be a fixed point"
+        );
+    }
+}
+
+#[test]
+fn normalise_url_is_a_fixed_point_with_whitespace_before_a_trailing_slash() {
+    for (raw, expected) in [
+        ("http://example.com\t/", "http://example.com"),
+        ("http://example.co\u{3000}/", "http://example.co"),
+        ("http://example.com\u{85}/", "http://example.com"),
+        (
+            "HTTPS://Example.com/Path/ ?utm_source=x",
+            "https://example.com/Path",
+        ),
+        ("http://example.com/a/ /", "http://example.com/a"),
+    ] {
+        let once = normalise(&HseEntityKind::Url, raw);
+        assert_eq!(once, expected, "first pass of {raw:?}");
+        assert_eq!(
+            normalise(&HseEntityKind::Url, &once),
+            once,
+            "second pass of {raw:?} must be a fixed point"
+        );
+    }
+}
+
+#[test]
+fn normalise_url_is_a_fixed_point_with_whitespace_inside_the_query() {
+    // Whitespace at the end of the last query parameter survived one pass
+    // (the query keeps it) and was trimmed by the next (it is now the end of
+    // the whole string) — one value, two UIDs. Query keys and values are
+    // trimmed like the host and path, which is invisible for any valid URL.
+    for (raw, expected) in [
+        (
+            "HTTPS://Example.com/Path/?utm_source=x&b=2\u{a0}&a=1#frag",
+            "https://example.com/Path?a=1&b=2",
+        ),
+        (
+            "HTTPS://Example.com/Path/?utm_source=x&b=\u{2028}&a=1#frag",
+            "https://example.com/Path?a=1&b=",
+        ),
+        (
+            "HTTPS://Example.com/Path/N?utm_source=x&b\u{85}&a=1#frag",
+            "https://example.com/Path/N?a=1&b",
+        ),
+        ("http://example.com/?k = v ", "http://example.com?k=v"),
+    ] {
+        let once = normalise(&HseEntityKind::Url, raw);
+        assert_eq!(once, expected, "first pass of {raw:?}");
+        assert_eq!(
+            normalise(&HseEntityKind::Url, &once),
+            once,
+            "second pass of {raw:?} must be a fixed point"
+        );
+    }
+}

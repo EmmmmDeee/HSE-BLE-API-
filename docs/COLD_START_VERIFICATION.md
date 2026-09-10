@@ -99,6 +99,10 @@ per JDK major version, so the JDK is pinned to 21 in CI and recorded in
 COR-017/018/019 sources (decision #57): `classes.dex` 37,704 bytes,
 `resources.arsc` 3,084 bytes, native library unchanged, whole file 360,898
 bytes, signed with a fresh ephemeral debug identity as every rebuild is.
+Regenerated again for `bleradar-core` 0.6.1 (decision #58): only the
+`lib/arm64-v8a/libbleradar_jni.so` entry changed (318,536 → 318,504 bytes);
+`classes.dex`, `resources.arsc`, the manifest, and both icons are byte-identical
+to the previous build, and `verify-android-live` re-ran green.
 
 This layer proves the **reconstructed** APK builds and packages correctly. It
 does **not** claim differential parity with

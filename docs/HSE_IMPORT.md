@@ -52,3 +52,21 @@ The `HseEntity` confidence/corroboration model complements — and does not
 replace — the crate's canonical `EvidenceStore`: `HseEntity` is a lightweight
 working-graph finding, while `EvidenceStore` remains the authoritative
 provenance record.
+
+## Post-import corrections (2026-09-10)
+
+A randomised falsification campaign over the ported code
+(`docs/AUTONOMOUS_DECISIONS.md` #58, `tests/falsification_campaign.rs`) found
+four defects that the upstream port had inherited. Each fix changes behaviour
+only for forged, impossible, or whitespace-corrupted inputs, so the UID of
+every valid entity is unchanged from upstream; they are recorded here because
+the port is otherwise behaviour-preserving:
+
+- `coords::parse`: Plus Code digits must be ASCII (`olc_index` no longer
+  truncates a non-ASCII character to its low byte), COR-020.
+- `normalise(Coordinates)`: the bare-decimal fast path applies the same
+  `LatLon::new` validity gate as every other notation, COR-021.
+- `normalise(Domain)`: `www.` peeling and leading-whitespace trimming iterate
+  to a fixed point, COR-022.
+- `normalise(Url)`: host, path, and query key/value are trimmed so the
+  canonical form is a fixed point, COR-023.

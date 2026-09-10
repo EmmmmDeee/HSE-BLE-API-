@@ -617,8 +617,13 @@ const OLC_GRID_ROWS: f64 = 5.0;
 const OLC_GRID_COLS: f64 = 4.0;
 
 /// Index of an OLC digit in the base-20 alphabet (case-insensitive).
+///
+/// Only an ASCII character can be a digit: `char as u8` would truncate a
+/// non-ASCII code point to its low byte, which let characters such as
+/// U+1036 or an emoji whose low byte matches an alphabet letter decode as
+/// that letter and mint a plausible coordinate from a forged code.
 fn olc_index(c: char) -> Option<usize> {
-    let u = c.to_ascii_uppercase() as u8;
+    let u = u8::try_from(c).ok()?.to_ascii_uppercase();
     OLC_ALPHABET.iter().position(|&a| a == u)
 }
 
