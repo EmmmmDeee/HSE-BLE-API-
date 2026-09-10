@@ -102,7 +102,12 @@ bytes, signed with a fresh ephemeral debug identity as every rebuild is.
 Regenerated again for `bleradar-core` 0.6.1 (decision #58): only the
 `lib/arm64-v8a/libbleradar_jni.so` entry changed (318,536 → 318,504 bytes);
 `classes.dex`, `resources.arsc`, the manifest, and both icons are byte-identical
-to the previous build, and `verify-android-live` re-ran green.
+to the previous build, and `verify-android-live` re-ran green. Rebuilt once more
+from the `bleradar-core` 0.6.2 sources (decision #64, COR-024..026): every
+entry, the native library included (SHA-256 `86103a9b…`, 318,504 bytes), is
+byte-identical to the committed APK, because the JNI library does not link the
+website or infrastructure engines and LTO strips them; the committed APK was
+therefore left unchanged rather than re-signed for no content change.
 
 This layer proves the **reconstructed** APK builds and packages correctly. It
 does **not** claim differential parity with

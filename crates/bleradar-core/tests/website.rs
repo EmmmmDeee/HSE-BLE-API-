@@ -729,3 +729,126 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
         report.rankings()
     );
 }
+
+#[test]
+fn correlate_all_skips_pairs_already_correlated_in_either_direction_and_is_idempotent() {
+    // Three websites sharing one rare public asset, so every pair is
+    // comparable. One pair is correlated by hand in the reverse of key order
+    // before the batch runs: `correlate_all` must neither duplicate it nor
+    // abort on it, and a second batch must be a no-op instead of a
+    // `DuplicateCorrelation` error.
+    let mut engine = WebsiteLineageEcosystemAnalysisEngine::new(EvidenceStore::new());
+    for (index, site) in ["site-a", "site-b", "site-c"].into_iter().enumerate() {
+        engine
+            .observe(observation(
+                &format!("asset-{site}"),
+                site,
+                WebsiteFeatureKind::PublicAsset,
+                "assets/rare-logo.svg",
+                source(&format!("source-{index}"), None),
+                100,
+            ))
+            .unwrap();
+    }
+    engine.correlate("site-b", "site-a").unwrap();
+
+    let reports = engine.correlate_all().unwrap();
+    assert_eq!(
+        reports
+            .iter()
+            .map(|report| report.edge().id())
+            .collect::<Vec<_>>(),
+        [
+            "website-lineage:site-a:site-c",
+            "website-lineage:site-b:site-c"
+        ]
+    );
+    assert_eq!(engine.correlation_count(), 3);
+    assert!(
+        engine
+            .correlation("website-lineage:site-b:site-a")
+            .is_some()
+    );
+    assert!(
+        engine
+            .correlation("website-lineage:site-a:site-b")
+            .is_none()
+    );
+
+    assert!(engine.correlate_all().unwrap().is_empty());
+    assert_eq!(engine.correlation_count(), 3);
+    engine.evidence().validate().unwrap();
+}
+
+#[test]
+fn correlate_all_leaves_the_engine_unchanged_when_the_correlation_limit_is_hit() {
+    // Three mutually comparable websites but room for only two correlations:
+    // the third pair's `ResourceLimit` must roll back the whole batch, not
+    // leave two arbitrary correlations behind.
+    let limits = WebsiteLimits::new(10, 2).unwrap();
+    let mut engine =
+        WebsiteLineageEcosystemAnalysisEngine::with_limits(EvidenceStore::new(), limits);
+    for (index, site) in ["site-a", "site-b", "site-c"].into_iter().enumerate() {
+        engine
+            .observe(observation(
+                &format!("asset-{site}"),
+                site,
+                WebsiteFeatureKind::PublicAsset,
+                "assets/rare-logo.svg",
+                source(&format!("source-{index}"), None),
+                100,
+            ))
+            .unwrap();
+    }
+    let evidence_len = engine.evidence().len();
+
+    let error = engine.correlate_all().unwrap_err();
+    assert_eq!(
+        error,
+        WebsiteError::ResourceLimit {
+            resource: "correlations",
+            limit: 2,
+        }
+    );
+    assert_eq!(engine.correlation_count(), 0);
+    assert_eq!(engine.evidence().len(), evidence_len);
+    assert!(
+        engine
+            .evidence()
+            .relationship("website-lineage:site-a:site-b:relationship")
+            .is_none()
+    );
+    engine.evidence().validate().unwrap();
+}
+
+#[test]
+fn ranking_arithmetic_survives_hundreds_of_independent_supports() {
+    // 26 observations per website, each from its own source, so all 676
+    // matching pairs are independent supports. The ranking previously summed
+    // temporal compatibility in a `u16`, which overflowed at 656 overlapping
+    // supports: a panic in debug builds and a silently wrong mean (3 instead
+    // of 100) in release builds.
+    let mut engine = WebsiteLineageEcosystemAnalysisEngine::new(EvidenceStore::new());
+    for site in ["site-a", "site-b"] {
+        for index in 0..26 {
+            engine
+                .observe(observation(
+                    &format!("{site}-{index}"),
+                    site,
+                    WebsiteFeatureKind::Certificate,
+                    "sha256:shared",
+                    source(&format!("{site}-source-{index}"), None),
+                    100,
+                ))
+                .unwrap();
+        }
+    }
+
+    let report = engine.correlate("site-a", "site-b").unwrap();
+    let leading = &report.rankings()[0];
+    assert_eq!(leading.independent_support(), 676);
+    assert_eq!(leading.temporal_compatibility().value(), 100);
+    assert_eq!(report.confidence().value(), 100);
+    assert_eq!(report.edge().observation_ids().len(), 52);
+    engine.evidence().validate().unwrap();
+}

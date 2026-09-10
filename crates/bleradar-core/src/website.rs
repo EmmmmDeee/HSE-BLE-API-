@@ -11,8 +11,9 @@ use std::fmt;
 
 use crate::infrastructure::{
     ComparableValue, ObservationSource, ScoreMode, SupportFields, TemporalInterval,
-    TemporalRelation, active_weight, dependency_group, pair_key, temporal_relation, temporal_score,
-    values_match,
+    TemporalRelation, active_weight, corroborated_score, dependency_group, high_base_rate_pairs,
+    mean_temporal_compatibility, pair_key, temporal_relation, temporal_score,
+    unique_observation_ids, values_match,
 };
 use crate::{
     Confidence, EdgeType, Entity, EntityType, EvidenceStore, EvidenceValue, Observation,
@@ -1808,7 +1809,7 @@ impl WebsiteLineageEcosystemAnalysisEngine {
             });
         }
 
-        let correlation_id = format!("website-lineage:{left_website}:{right_website}");
+        let correlation_id = correlation_identifier(&left_website, &right_website);
         if self.correlations.contains_key(&correlation_id) {
             return Err(WebsiteError::DuplicateCorrelation { correlation_id });
         }
@@ -1841,7 +1842,7 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         let leading_explanation = baseline.explanation;
         let operator_assessment = operator_assessment(&baseline);
         let temporal_relation = strongest_temporal_relation(&baseline);
-        let observation_ids = unique_observation_ids(&baseline);
+        let observation_ids = unique_observation_ids(baseline.supporting_observation_ids());
         let predicate = format!("website-lineage:{}", leading_explanation.as_str());
         let relationship_id = format!("{correlation_id}:relationship");
         let edge_type = if falsification.survives {
@@ -1927,20 +1928,42 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         self.correlate(left_website, right_website)
     }
 
-    /// Correlates every pair of websites, skipping pairs without matches.
+    /// Correlates every pair of websites not yet correlated in either
+    /// direction, skipping pairs without matches.
+    ///
+    /// The batch is transactional: any other failure (a resource limit, a
+    /// source conflict, a provenance error) leaves the engine and its evidence
+    /// store unchanged. Only the reports persisted by this call are returned,
+    /// in website-identifier order, so repeating the call once every comparable
+    /// pair is covered yields an empty list rather than a duplicate-correlation
+    /// error.
     pub fn correlate_all(&mut self) -> Result<Vec<WebsiteLineageReport>, WebsiteError> {
         let website_ids: Vec<_> = self.website_observations.keys().cloned().collect();
+        let mut candidate = self.clone();
         let mut reports = Vec::new();
         for (left_index, left_website) in website_ids.iter().enumerate() {
             for right_website in website_ids.iter().skip(left_index + 1) {
-                match self.correlate(left_website, right_website) {
+                if candidate.is_correlated(left_website, right_website) {
+                    continue;
+                }
+                match candidate.correlate(left_website, right_website) {
                     Ok(report) => reports.push(report),
                     Err(WebsiteError::NoComparableObservations { .. }) => {}
                     Err(error) => return Err(error),
                 }
             }
         }
+        *self = candidate;
         Ok(reports)
+    }
+
+    /// Whether a pair already has a persisted correlation in either direction.
+    fn is_correlated(&self, left_website: &str, right_website: &str) -> bool {
+        self.correlations
+            .contains_key(&correlation_identifier(left_website, right_website))
+            || self
+                .correlations
+                .contains_key(&correlation_identifier(right_website, left_website))
     }
 
     /// Returns persisted correlations ordered by descending confidence.
@@ -2211,14 +2234,21 @@ impl SupportFields for Support {
     }
 }
 
+/// Stable identifier of the persisted correlation from `left_website` to
+/// `right_website`.
+fn correlation_identifier(left_website: &str, right_website: &str) -> String {
+    format!("website-lineage:{left_website}:{right_website}")
+}
+
 fn rank_supports(supports: &[Support], mode: ScoreMode<'_>) -> Vec<WebsiteCorrelationRanking> {
+    let flagged = high_base_rate_pairs(supports);
     let mut explanations = BTreeSet::new();
     for support in supports {
         explanations.insert(support.explanation);
     }
     let mut rankings = explanations
         .into_iter()
-        .map(|explanation| rank_explanation(supports, explanation, mode))
+        .map(|explanation| rank_explanation(supports, &flagged, explanation, mode))
         .collect::<Vec<_>>();
     rankings.sort_by(|left, right| {
         right.score.cmp(&left.score).then_with(|| {
@@ -2243,6 +2273,7 @@ fn explanation_order(explanation: WebsiteExplanation) -> u8 {
 
 fn rank_explanation(
     supports: &[Support],
+    flagged: &BTreeSet<(&str, &str)>,
     explanation: WebsiteExplanation,
     mode: ScoreMode<'_>,
 ) -> WebsiteCorrelationRanking {
@@ -2283,28 +2314,14 @@ fn rank_explanation(
         .map(|pair| pair.weight)
         .max()
         .unwrap_or(0);
-    let corroboration =
-        ((independent_support.saturating_sub(1) as u16) * 10).min(100 - strongest.min(100));
-    let score = strongest.saturating_add(corroboration);
-    let temporal_compatibility = if supporting_pairs.is_empty() {
-        0
-    } else {
-        let total: u16 = supporting_pairs
-            .iter()
-            .map(|pair| match pair.temporal_relation {
-                TemporalRelation::Overlapping => 100,
-                TemporalRelation::Contiguous => 75,
-                TemporalRelation::Disjoint => 0,
-            })
-            .sum();
-        (total / supporting_pairs.len() as u16) as u8
-    };
+    let score = corroborated_score(strongest, independent_support);
+    let temporal_compatibility =
+        mean_temporal_compatibility(supporting_pairs.iter().map(|pair| pair.temporal_relation));
     let high_base_rate_support = supporting_pairs.iter().any(|pair| {
-        supports.iter().any(|support| {
-            support.left_observation == pair.left_observation
-                && support.right_observation == pair.right_observation
-                && support.high_base_rate
-        })
+        flagged.contains(&(
+            pair.left_observation.as_str(),
+            pair.right_observation.as_str(),
+        ))
     });
     WebsiteCorrelationRanking {
         explanation,
@@ -2436,13 +2453,6 @@ fn strongest_temporal_relation(ranking: &WebsiteCorrelationRanking) -> TemporalR
         .map(WebsiteObservationPair::temporal_relation)
         .min()
         .unwrap_or(TemporalRelation::Disjoint)
-}
-
-fn unique_observation_ids(ranking: &WebsiteCorrelationRanking) -> Vec<String> {
-    let mut ids = ranking.supporting_observation_ids();
-    ids.sort();
-    ids.dedup();
-    ids
 }
 
 fn operator_assessment(ranking: &WebsiteCorrelationRanking) -> OperatorAssessment {
