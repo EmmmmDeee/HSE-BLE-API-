@@ -28,6 +28,13 @@
 //!   resumable point. Illegal transitions are rejected, never panic; installing
 //!   an unverified artifact is unrepresentable; a completed install is
 //!   idempotent.
+//! * [`RetryPolicy`] / [`UpdateSession::retry`] — bounded exponential-backoff
+//!   recovery from a transient download/verify fault, giving up only after the
+//!   budget is spent ([`RetryDecision`]).
+//! * [`UpdateSession::rollback`] — revert to the previous known-good version
+//!   after a bad update fails its post-install health check.
+//! * [`should_check_for_update`] — a re-check throttle so the app polls no more
+//!   often than a minimum interval, robust against a backward clock.
 //!
 //! Every guard is a permanent invariant locked by `tests/update.rs` and the
 //! randomized `tests/update_campaign.rs`; `examples/update_flow.rs` exercises the
@@ -342,6 +349,8 @@ pub enum UpdateError {
     },
     /// A serialized session string could not be parsed back.
     MalformedSession(&'static str),
+    /// `rollback` was called with no previous version recorded.
+    NothingToRollBack,
 }
 
 impl fmt::Display for UpdateError {
@@ -373,11 +382,98 @@ impl fmt::Display for UpdateError {
                 write!(f, "cannot `{op}` from stage `{from}`")
             }
             Self::MalformedSession(r) => write!(f, "serialized update session is invalid: {r}"),
+            Self::NothingToRollBack => write!(f, "no previous version to roll back to"),
         }
     }
 }
 
 impl std::error::Error for UpdateError {}
+
+/// A bounded exponential-backoff retry policy for transient update failures.
+///
+/// A robust auto-update must survive a dropped connection or a corrupt download
+/// without either giving up on the first fault or hammering the server: it
+/// retries a bounded number of times, waiting longer after each failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Total failed attempts tolerated before giving up (must be >= 1).
+    pub max_attempts: u32,
+    /// Delay after the first failure, in seconds.
+    pub base_delay_secs: u64,
+    /// Upper bound on any single backoff delay, in seconds.
+    pub max_delay_secs: u64,
+}
+
+impl RetryPolicy {
+    /// A sensible default: up to 5 attempts, 30 s base, capped at 1 h.
+    #[must_use]
+    pub const fn standard() -> Self {
+        Self {
+            max_attempts: 5,
+            base_delay_secs: 30,
+            max_delay_secs: 3600,
+        }
+    }
+
+    /// The backoff delay before the given attempt number (`attempt >= 1`):
+    /// `base * 2^(attempt-1)`, saturating and clamped to `max_delay_secs`.
+    ///
+    /// # Examples
+    /// ```
+    /// use bleradar_core::update::RetryPolicy;
+    /// let p = RetryPolicy { max_attempts: 5, base_delay_secs: 10, max_delay_secs: 60 };
+    /// assert_eq!(p.backoff_delay_secs(1), 10);
+    /// assert_eq!(p.backoff_delay_secs(2), 20);
+    /// assert_eq!(p.backoff_delay_secs(3), 40);
+    /// assert_eq!(p.backoff_delay_secs(4), 60); // clamped
+    /// assert_eq!(p.backoff_delay_secs(9), 60); // clamped, no overflow
+    /// ```
+    #[must_use]
+    pub const fn backoff_delay_secs(&self, attempt: u32) -> u64 {
+        // base << (attempt-1), saturating; any overflow means "use the cap".
+        let scaled = if attempt <= 1 {
+            self.base_delay_secs
+        } else {
+            let shift = attempt - 1;
+            if shift >= 63 {
+                u64::MAX
+            } else {
+                self.base_delay_secs.saturating_mul(1u64 << shift)
+            }
+        };
+        // const-compatible min (u64::min is not yet stable as a const fn).
+        if scaled < self.max_delay_secs {
+            scaled
+        } else {
+            self.max_delay_secs
+        }
+    }
+}
+
+/// The outcome of [`UpdateSession::retry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryDecision {
+    /// Retry the download after waiting this many seconds.
+    RetryAfter(u64),
+    /// The retry budget is exhausted; the session is now `Failed`.
+    GaveUp,
+}
+
+/// Whether enough time has elapsed since the last check to poll for an update
+/// again, given the current and last-check timestamps (any monotonic unit) and
+/// the minimum interval. Robust against a clock that went backwards.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::update::should_check_for_update;
+/// assert!(should_check_for_update(1_000, 0, 900));       // 1000s elapsed >= 900s
+/// assert!(!should_check_for_update(1_000, 500, 900));    // only 500s elapsed
+/// assert!(!should_check_for_update(400, 1_000, 900));    // clock went backwards
+/// ```
+#[must_use]
+pub fn should_check_for_update(now: u64, last_check: u64, min_interval: u64) -> bool {
+    now.saturating_sub(last_check) >= min_interval
+}
 
 /// Streaming integrity verifier for a downloading artifact.
 ///
@@ -545,6 +641,10 @@ pub struct UpdateSession {
     target: Option<ReleaseManifest>,
     received_bytes: u64,
     fail_reason: Option<String>,
+    /// Failed download/verify attempts for the current target (reset on `offer`).
+    attempts: u32,
+    /// The version installed before the current one, kept as the rollback target.
+    previous: Option<Version>,
 }
 
 impl UpdateSession {
@@ -557,6 +657,8 @@ impl UpdateSession {
             target: None,
             received_bytes: 0,
             fail_reason: None,
+            attempts: 0,
+            previous: None,
         }
     }
 
@@ -623,6 +725,7 @@ impl UpdateSession {
             self.target = Some(manifest);
             self.received_bytes = 0;
             self.fail_reason = None;
+            self.attempts = 0;
         }
         Ok(decision)
     }
@@ -745,11 +848,14 @@ impl UpdateSession {
         match self.stage {
             UpdateStage::Installing => {
                 if let Some(manifest) = self.target.take() {
-                    self.installed = manifest.version;
+                    // Remember the version we are upgrading from as the rollback
+                    // target before adopting the new one.
+                    self.previous = Some(std::mem::replace(&mut self.installed, manifest.version));
                 }
                 self.stage = UpdateStage::Installed;
                 self.received_bytes = 0;
                 self.fail_reason = None;
+                self.attempts = 0;
                 Ok(())
             }
             UpdateStage::Installed => Ok(()),
@@ -767,12 +873,83 @@ impl UpdateSession {
     }
 
     /// Discards any in-flight update and returns to [`UpdateStage::Idle`],
-    /// keeping the installed version. Used to retry or roll back to a clean state.
+    /// keeping the installed version and the rollback target. Used to abandon a
+    /// download and start clean; the attempt counter is cleared.
     pub fn reset(&mut self) {
         self.stage = UpdateStage::Idle;
         self.target = None;
         self.received_bytes = 0;
         self.fail_reason = None;
+        self.attempts = 0;
+    }
+
+    /// Failed download/verify attempts recorded for the current target.
+    #[must_use]
+    pub const fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    /// The version installed before the current one — the rollback target set by
+    /// the most recent [`finish_install`](Self::finish_install).
+    #[must_use]
+    pub const fn previous(&self) -> Option<&Version> {
+        self.previous.as_ref()
+    }
+
+    /// Records a transient download/verify failure and decides whether to retry.
+    ///
+    /// Increments the attempt counter; while it stays below the policy's
+    /// `max_attempts` the session is re-armed to [`UpdateStage::Available`] (the
+    /// download restarts from zero) and [`RetryDecision::RetryAfter`] carries the
+    /// backoff delay; once the counter reaches `max_attempts` the session moves to
+    /// [`UpdateStage::Failed`] and [`RetryDecision::GaveUp`] is returned. Call it
+    /// when the caller observes a recoverable fault (a dropped connection, a
+    /// corrupt download) — a genuine integrity mismatch already fails
+    /// [`verify`](Self::verify), and calling `retry` after it drives the standard
+    /// backoff.
+    ///
+    /// # Errors
+    /// [`UpdateError::IllegalTransition`] if there is no in-flight target to retry
+    /// (i.e. from `Idle` or `Installed`).
+    pub fn retry(&mut self, policy: &RetryPolicy) -> Result<RetryDecision, UpdateError> {
+        if self.target.is_none() || matches!(self.stage, UpdateStage::Idle | UpdateStage::Installed)
+        {
+            return Err(UpdateError::IllegalTransition {
+                from: self.stage.as_str(),
+                op: "retry",
+            });
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        self.received_bytes = 0;
+        if self.attempts >= policy.max_attempts {
+            self.stage = UpdateStage::Failed;
+            self.fail_reason = Some(format!("gave up after {} attempt(s)", self.attempts));
+            Ok(RetryDecision::GaveUp)
+        } else {
+            self.stage = UpdateStage::Available;
+            self.fail_reason = None;
+            Ok(RetryDecision::RetryAfter(
+                policy.backoff_delay_secs(self.attempts),
+            ))
+        }
+    }
+
+    /// Rolls the installed version back to the previous known-good one after a bad
+    /// update, discarding any in-flight target and returning to
+    /// [`UpdateStage::Idle`]. Models the OS rollback path a caller invokes when a
+    /// freshly-installed version fails its post-install health check.
+    ///
+    /// # Errors
+    /// [`UpdateError::NothingToRollBack`] if no previous version is recorded.
+    pub fn rollback(&mut self) -> Result<(), UpdateError> {
+        let previous = self.previous.take().ok_or(UpdateError::NothingToRollBack)?;
+        self.installed = previous;
+        self.stage = UpdateStage::Idle;
+        self.target = None;
+        self.received_bytes = 0;
+        self.fail_reason = None;
+        self.attempts = 0;
+        Ok(())
     }
 
     /// Maps a stage that a crash could have interrupted to a safe, resumable one,
@@ -810,6 +987,11 @@ impl UpdateSession {
         out.push_str(&format!("installed_code = {}\n", self.installed.code));
         out.push_str(&format!("installed_name = {}\n", self.installed.name));
         out.push_str(&format!("received_bytes = {}\n", self.received_bytes));
+        out.push_str(&format!("attempts = {}\n", self.attempts));
+        if let Some(prev) = &self.previous {
+            out.push_str(&format!("previous_code = {}\n", prev.code));
+            out.push_str(&format!("previous_name = {}\n", prev.name));
+        }
         if let Some(reason) = &self.fail_reason {
             out.push_str(&format!("fail_reason = {reason}\n"));
         }
@@ -833,6 +1015,9 @@ impl UpdateSession {
         let mut installed_code: Option<u64> = None;
         let mut installed_name: Option<String> = None;
         let mut received_bytes: Option<u64> = None;
+        let mut attempts: Option<u32> = None;
+        let mut previous_code: Option<u64> = None;
+        let mut previous_name: Option<String> = None;
         let mut fail_reason: Option<String> = None;
         let mut target_lines = String::new();
 
@@ -875,6 +1060,21 @@ impl UpdateSession {
                             .map_err(|_| UpdateError::MalformedSession("received_bytes"))?,
                     );
                 }
+                "attempts" => {
+                    attempts = Some(
+                        value
+                            .parse()
+                            .map_err(|_| UpdateError::MalformedSession("attempts"))?,
+                    );
+                }
+                "previous_code" => {
+                    previous_code = Some(
+                        value
+                            .parse()
+                            .map_err(|_| UpdateError::MalformedSession("previous_code"))?,
+                    );
+                }
+                "previous_name" => previous_name = Some(value.to_string()),
                 "fail_reason" => fail_reason = Some(value.to_string()),
                 _ => return Err(UpdateError::MalformedSession("unknown session key")),
             }
@@ -908,12 +1108,23 @@ impl UpdateSession {
                 "in-flight stage requires a target manifest",
             ));
         }
+        let previous = match (previous_code, previous_name) {
+            (Some(code), Some(name)) => Some(Version::new(code, name)),
+            (None, None) => None,
+            _ => {
+                return Err(UpdateError::MalformedSession(
+                    "previous version needs both previous_code and previous_name",
+                ));
+            }
+        };
         Ok(Self {
             stage,
             installed,
             target,
             received_bytes: received_bytes.unwrap_or(0),
             fail_reason,
+            attempts: attempts.unwrap_or(0),
+            previous,
         })
     }
 }

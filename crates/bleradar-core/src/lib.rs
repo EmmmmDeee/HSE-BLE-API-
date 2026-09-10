@@ -96,8 +96,9 @@ pub use tracking::{
     TrackingSnapshotInput, tracking_profile, tracking_profile_from_ordinal, tracking_snapshot,
 };
 pub use update::{
-    ArtifactVerifier, ReleaseManifest, UpdateDecision, UpdateError, UpdateSession, UpdateStage,
-    Version, check_update, update_decision, verify_artifact,
+    ArtifactVerifier, ReleaseManifest, RetryDecision, RetryPolicy, UpdateDecision, UpdateError,
+    UpdateSession, UpdateStage, Version, check_update, should_check_for_update, update_decision,
+    verify_artifact,
 };
 pub use verification::{
     DifferentialCase, DifferentialReport, DifferentialViolation, ExecutionOutcome, FailureCause,

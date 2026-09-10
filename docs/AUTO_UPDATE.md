@@ -39,6 +39,11 @@ actual OS install only once the engine has reached [`UpdateStage::Verified`].
   requires the exact declared size **and** SHA-256. This is the only path by
   which an artifact becomes installable.
 * [`UpdateSession`] — a restart-safe state machine over the whole lifecycle.
+* [`RetryPolicy`] / [`UpdateSession::retry`] — bounded exponential-backoff
+  recovery from a transient download/verify fault ([`RetryDecision`]).
+* [`UpdateSession::rollback`] — revert to the previous known-good version after a
+  bad update.
+* [`should_check_for_update`] — a re-check throttle (minimum poll interval).
 
 ## Lifecycle and safety invariants
 
@@ -82,22 +87,50 @@ interrupted to a safe, resumable one without losing progress:
 So a process killed at any point resumes correctly on next launch, and never
 installs an unverified artifact.
 
+## Resilience: retry, rollback, and re-check throttle
+
+A robust auto-update must survive transient faults, recover from a bad release,
+and not hammer the server:
+
+* **Retry with bounded exponential backoff.** On a dropped connection or corrupt
+  download the caller invokes [`UpdateSession::retry`] with a [`RetryPolicy`]; it
+  increments the attempt counter, re-arms the session for a fresh download, and
+  returns [`RetryDecision::RetryAfter`] with the backoff delay
+  (`base · 2^(attempt-1)`, saturating and capped at `max_delay_secs`) — until the
+  budget is spent, when it returns [`RetryDecision::GaveUp`] and the session is
+  `Failed`. The attempt counter resets on a new `offer` or a successful install.
+* **Rollback to the previous known-good version.** Every `finish_install` records
+  the version it upgraded *from*; if the new version fails its post-install
+  health check the caller calls [`UpdateSession::rollback`], which reverts
+  `installed` to that previous version and returns to `Idle` (or
+  [`UpdateError::NothingToRollBack`] if there is no prior version). This models
+  the OS rollback path a caller drives when a fresh install misbehaves.
+* **Re-check throttle.** [`should_check_for_update`] answers whether enough time
+  has elapsed since the last check to poll again, robust against a clock that
+  went backwards.
+
+Both `attempts` and the rollback target survive `serialize`/`deserialize`, so a
+retry budget and the previous known-good version persist across a restart.
+
 ## Verifying it
 
-* `cargo test -p bleradar-core --test update` — 23 unit/invariant tests over every
-  rule, transition, and error path.
+* `cargo test -p bleradar-core --test update` — 32 unit/invariant tests over every
+  rule, transition, error path, and the retry/backoff, rollback, and throttle logic.
 * `cargo test -p bleradar-core --test update_campaign` — a deterministic 200,000-op
   differential campaign against an independent reference state machine (zero
-  divergence), plus a 50,000-trial integrity oracle proving an install is
-  unreachable without a genuine size+SHA-256 match, and a serialize→deserialize
-  identity + `recover` idempotence check after every step.
+  divergence) that exercises offer/download/verify/install **plus retry and
+  rollback**, with a serialize→deserialize identity + `recover` idempotence check
+  after every step, plus a 50,000-trial integrity oracle proving an install is
+  unreachable without a genuine size+SHA-256 match.
 * `cargo run -p bleradar-core --example update_flow` — the whole lifecycle over a
   real 64 KiB artifact and a real SHA-256, including a simulated crash mid-install
-  (persist → restart → recover → finish), an idempotent re-install, and the
-  tamper / downgrade / incompatible-OS rails.
+  (persist → restart → recover → finish), an idempotent re-install, retry with
+  exponential backoff, a rollback, and the tamper / downgrade / incompatible-OS rails.
 
-Falsified (each restored): allowing a downgrade, bypassing the SHA-256 check, and
-recovering `Installing` to `Installed` (unsafe) each break the tests or campaign.
+Falsified (each restored): allowing a downgrade, bypassing the SHA-256 check,
+recovering `Installing` to `Installed` (unsafe), a linear (non-exponential)
+backoff, an off-by-one retry give-up, and a rollback that fails to consume the
+previous version — each breaks the tests or campaign.
 
 [`Version`]: https://docs.rs/bleradar-core
 [`ReleaseManifest`]: https://docs.rs/bleradar-core
@@ -109,3 +142,11 @@ recovering `Installing` to `Installed` (unsafe) each break the tests or campaign
 [`verify_artifact`]: https://docs.rs/bleradar-core
 [`UpdateSession`]: https://docs.rs/bleradar-core
 [`UpdateStage::Verified`]: https://docs.rs/bleradar-core
+[`RetryPolicy`]: https://docs.rs/bleradar-core
+[`RetryDecision`]: https://docs.rs/bleradar-core
+[`RetryDecision::RetryAfter`]: https://docs.rs/bleradar-core
+[`RetryDecision::GaveUp`]: https://docs.rs/bleradar-core
+[`UpdateSession::retry`]: https://docs.rs/bleradar-core
+[`UpdateSession::rollback`]: https://docs.rs/bleradar-core
+[`UpdateError::NothingToRollBack`]: https://docs.rs/bleradar-core
+[`should_check_for_update`]: https://docs.rs/bleradar-core

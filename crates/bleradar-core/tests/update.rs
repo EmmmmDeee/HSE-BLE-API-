@@ -6,8 +6,9 @@
 //! surface over randomized sequences with independent oracles.
 
 use bleradar_core::update::{
-    ArtifactVerifier, ReleaseManifest, UpdateDecision, UpdateError, UpdateSession, UpdateStage,
-    Version, check_update, update_decision, verify_artifact,
+    ArtifactVerifier, ReleaseManifest, RetryDecision, RetryPolicy, UpdateDecision, UpdateError,
+    UpdateSession, UpdateStage, Version, check_update, should_check_for_update, update_decision,
+    verify_artifact,
 };
 use bleradar_core::{Sha256, hex_encode};
 
@@ -560,4 +561,209 @@ fn a_verified_session_survives_persist_recover_and_completes_install() {
     resumed.finish_install().unwrap();
     assert_eq!(resumed.stage(), UpdateStage::Installed);
     assert_eq!(resumed.installed(), &Version::new(42, "1.2.3"));
+}
+
+// ---- retry / backoff ----
+
+#[test]
+fn backoff_is_exponential_bounded_and_overflow_safe() {
+    let p = RetryPolicy {
+        max_attempts: 10,
+        base_delay_secs: 5,
+        max_delay_secs: 200,
+    };
+    assert_eq!(p.backoff_delay_secs(0), 5); // treated as attempt 1
+    assert_eq!(p.backoff_delay_secs(1), 5);
+    assert_eq!(p.backoff_delay_secs(2), 10);
+    assert_eq!(p.backoff_delay_secs(3), 20);
+    assert_eq!(p.backoff_delay_secs(4), 40);
+    assert_eq!(p.backoff_delay_secs(5), 80);
+    assert_eq!(p.backoff_delay_secs(6), 160);
+    assert_eq!(p.backoff_delay_secs(7), 200); // clamped
+    // Monotonic non-decreasing and never above the cap, even at huge attempts.
+    let mut last = 0;
+    for a in 1..=200u32 {
+        let d = p.backoff_delay_secs(a);
+        assert!(d >= last && d <= p.max_delay_secs, "attempt {a}: {d}");
+        last = d;
+    }
+    assert_eq!(p.backoff_delay_secs(u32::MAX), 200);
+    // A giant base still cannot overflow.
+    let big = RetryPolicy {
+        max_attempts: 3,
+        base_delay_secs: u64::MAX / 2,
+        max_delay_secs: u64::MAX,
+    };
+    assert_eq!(big.backoff_delay_secs(64), u64::MAX);
+    assert_eq!(RetryPolicy::standard().max_attempts, 5);
+}
+
+#[test]
+fn retry_re_arms_within_budget_then_gives_up() {
+    let bytes = b"artifact-for-retry-drill";
+    let policy = RetryPolicy {
+        max_attempts: 3,
+        base_delay_secs: 10,
+        max_delay_secs: 1000,
+    };
+    let mut s = UpdateSession::new(Version::new(1, "1"));
+    s.offer(manifest(2, "2", bytes, 21, false), 30).unwrap();
+    s.begin_download().unwrap();
+    s.record_progress(4).unwrap();
+    assert_eq!(s.attempts(), 0);
+
+    // First transient failure -> retry granted, re-armed to Available, progress reset.
+    assert_eq!(s.retry(&policy).unwrap(), RetryDecision::RetryAfter(10));
+    assert_eq!(s.stage(), UpdateStage::Available);
+    assert_eq!(s.attempts(), 1);
+    assert_eq!(s.received_bytes(), 0);
+    assert!(s.target().is_some());
+
+    // Second failure -> still within budget, backoff doubles.
+    s.begin_download().unwrap();
+    assert_eq!(s.retry(&policy).unwrap(), RetryDecision::RetryAfter(20));
+    assert_eq!(s.attempts(), 2);
+
+    // Third failure -> budget exhausted.
+    s.begin_download().unwrap();
+    assert_eq!(s.retry(&policy).unwrap(), RetryDecision::GaveUp);
+    assert_eq!(s.stage(), UpdateStage::Failed);
+    assert_eq!(s.attempts(), 3);
+    assert!(s.fail_reason().is_some());
+}
+
+#[test]
+fn retry_from_failed_verify_follows_backoff() {
+    let bytes = b"the-correct-artifact-bytes!!";
+    let policy = RetryPolicy::standard();
+    let mut s = UpdateSession::new(Version::new(1, "1"));
+    s.offer(manifest(2, "2", bytes, 21, false), 30).unwrap();
+    s.begin_download().unwrap();
+    s.record_progress(bytes.len() as u64).unwrap();
+    s.finish_download().unwrap();
+    // corrupt bytes -> verify fails to Failed
+    let mut wrong = bytes.to_vec();
+    wrong[0] ^= 0xff;
+    assert!(s.verify(&wrong).is_err());
+    assert_eq!(s.stage(), UpdateStage::Failed);
+    // retry from Failed re-arms for another download
+    assert_eq!(
+        s.retry(&policy).unwrap(),
+        RetryDecision::RetryAfter(policy.backoff_delay_secs(1))
+    );
+    assert_eq!(s.stage(), UpdateStage::Available);
+    // and a clean re-download now verifies and installs
+    s.begin_download().unwrap();
+    s.record_progress(bytes.len() as u64).unwrap();
+    s.finish_download().unwrap();
+    s.verify(bytes).unwrap();
+    s.begin_install().unwrap();
+    s.finish_install().unwrap();
+    assert_eq!(s.installed(), &Version::new(2, "2"));
+}
+
+#[test]
+fn retry_is_illegal_without_an_in_flight_target() {
+    let policy = RetryPolicy::standard();
+    let mut idle = UpdateSession::new(Version::new(1, "1"));
+    assert!(matches!(
+        idle.retry(&policy).unwrap_err(),
+        UpdateError::IllegalTransition { op: "retry", .. }
+    ));
+    // After a completed install there is nothing in flight to retry.
+    let mut installed = UpdateSession::new(Version::new(1, "1"));
+    installed
+        .offer(manifest(2, "2", b"x", 21, false), 30)
+        .unwrap();
+    installed.begin_download().unwrap();
+    installed.record_progress(1).unwrap();
+    installed.finish_download().unwrap();
+    installed.verify(b"x").unwrap();
+    installed.begin_install().unwrap();
+    installed.finish_install().unwrap();
+    assert!(matches!(
+        installed.retry(&policy).unwrap_err(),
+        UpdateError::IllegalTransition { op: "retry", .. }
+    ));
+}
+
+// ---- rollback to previous known-good ----
+
+#[test]
+fn rollback_reverts_to_the_previous_known_good_version() {
+    let bytes = b"payload-vv";
+    let mut s = drive_happy_path(bytes);
+    assert_eq!(s.installed(), &Version::new(42, "1.2.3"));
+    assert_eq!(s.previous(), Some(&Version::new(41, "1.2.2")));
+
+    // A failed post-install health check triggers rollback to the prior version.
+    s.rollback().unwrap();
+    assert_eq!(s.stage(), UpdateStage::Idle);
+    assert_eq!(s.installed(), &Version::new(41, "1.2.2"));
+    assert_eq!(s.previous(), None);
+    assert_eq!(s.target(), None);
+
+    // Nothing left to roll back to.
+    assert!(matches!(
+        s.rollback().unwrap_err(),
+        UpdateError::NothingToRollBack
+    ));
+}
+
+#[test]
+fn rollback_without_a_previous_version_is_an_error() {
+    let mut fresh = UpdateSession::new(Version::new(5, "5"));
+    assert!(matches!(
+        fresh.rollback().unwrap_err(),
+        UpdateError::NothingToRollBack
+    ));
+    assert_eq!(fresh.installed(), &Version::new(5, "5"));
+}
+
+#[test]
+fn finish_install_records_the_prior_version_as_the_rollback_target() {
+    let bytes = b"an-artifact!!";
+    let mut s = UpdateSession::new(Version::new(10, "1.0"));
+    assert_eq!(s.previous(), None);
+    s.offer(manifest(11, "1.1", bytes, 21, false), 30).unwrap();
+    s.begin_download().unwrap();
+    s.record_progress(bytes.len() as u64).unwrap();
+    s.finish_download().unwrap();
+    s.verify(bytes).unwrap();
+    s.begin_install().unwrap();
+    s.finish_install().unwrap();
+    assert_eq!(s.installed(), &Version::new(11, "1.1"));
+    assert_eq!(s.previous(), Some(&Version::new(10, "1.0")));
+}
+
+// ---- re-check throttle ----
+
+#[test]
+fn should_check_for_update_respects_the_interval_and_clock_skew() {
+    assert!(should_check_for_update(900, 0, 900)); // exactly the interval
+    assert!(should_check_for_update(901, 0, 900));
+    assert!(!should_check_for_update(899, 0, 900));
+    assert!(!should_check_for_update(100, 1_000, 900)); // clock went backwards
+    assert!(should_check_for_update(0, 0, 0)); // always-check policy
+}
+
+// ---- persistence of the new fields ----
+
+#[test]
+fn serde_round_trips_attempts_and_previous() {
+    let bytes = b"round-trip-artifact";
+    // A session mid-retry (attempts > 0) with a target.
+    let mut s = UpdateSession::new(Version::new(3, "3"));
+    s.offer(manifest(4, "4", bytes, 21, true), 30).unwrap();
+    s.begin_download().unwrap();
+    let _ = s.retry(&RetryPolicy::standard()).unwrap();
+    assert_eq!(s.attempts(), 1);
+    assert_eq!(UpdateSession::deserialize(&s.serialize()).unwrap(), s);
+
+    // An installed session carrying a rollback target (previous = Some).
+    let installed = drive_happy_path(bytes);
+    assert!(installed.previous().is_some());
+    let round = UpdateSession::deserialize(&installed.serialize()).unwrap();
+    assert_eq!(round, installed);
+    assert_eq!(round.previous(), Some(&Version::new(41, "1.2.2")));
 }

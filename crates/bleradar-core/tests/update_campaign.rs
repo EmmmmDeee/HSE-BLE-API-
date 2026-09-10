@@ -19,7 +19,8 @@
 //! falsification tests at the bottom show a deliberately-broken engine is caught.
 
 use bleradar_core::update::{
-    ReleaseManifest, UpdateDecision, UpdateSession, UpdateStage, Version, update_decision,
+    ReleaseManifest, RetryDecision, RetryPolicy, UpdateDecision, UpdateSession, UpdateStage,
+    Version, update_decision,
 };
 use bleradar_core::{Sha256, hex_encode};
 
@@ -82,6 +83,9 @@ struct RefModel {
     target_size: u64,
     target_mandatory: bool,
     received: u64,
+    attempts: u32,
+    previous_code: Option<u64>,
+    previous_name: Option<String>,
 }
 
 impl RefModel {
@@ -94,6 +98,9 @@ impl RefModel {
             target_size: 0,
             target_mandatory: false,
             received: 0,
+            attempts: 0,
+            previous_code: None,
+            previous_name: None,
         }
     }
 
@@ -103,8 +110,18 @@ impl RefModel {
             && s.installed().name == self.installed_name
             && s.target().map(|m| m.version.code) == self.target_code
             && s.received_bytes() == self.received
+            && s.attempts() == self.attempts
+            && s.previous().map(|v| v.code) == self.previous_code
+            && s.previous().map(|v| v.name.clone()) == self.previous_name
     }
 }
+
+/// Fixed retry policy used by the campaign's retry op.
+const CAMPAIGN_RETRY: RetryPolicy = RetryPolicy {
+    max_attempts: 4,
+    base_delay_secs: 5,
+    max_delay_secs: 3600,
+};
 
 #[test]
 fn randomized_sessions_match_the_reference_and_hold_every_invariant() {
@@ -114,6 +131,9 @@ fn randomized_sessions_match_the_reference_and_hold_every_invariant() {
     let mut verify_ok = 0u64;
     let mut verify_fail = 0u64;
     let mut rejects = 0u64;
+    let mut retries_after = 0u64;
+    let mut gave_ups = 0u64;
+    let mut rollbacks = 0u64;
 
     // A rolling session/model pair; periodically reset to a fresh install.
     let mut session = UpdateSession::new(Version::new(1, "v1"));
@@ -153,7 +173,7 @@ fn randomized_sessions_match_the_reference_and_hold_every_invariant() {
         let op = if rng.below(10) < 7 {
             advancing
         } else {
-            rng.below(11)
+            rng.below(13)
         };
         match op {
             0 => {
@@ -186,6 +206,7 @@ fn randomized_sessions_match_the_reference_and_hold_every_invariant() {
                         model.target_size = release.manifest.size_bytes;
                         model.target_mandatory = release.manifest.mandatory;
                         model.received = 0;
+                        model.attempts = 0;
                         current = Some(release);
                     }
                 }
@@ -283,11 +304,14 @@ fn randomized_sessions_match_the_reference_and_hold_every_invariant() {
                 match model.stage {
                     UpdateStage::Installing => {
                         got.unwrap();
+                        model.previous_code = Some(model.installed_code);
+                        model.previous_name = Some(model.installed_name.clone());
                         model.installed_code = model.target_code.unwrap();
                         model.installed_name = format!("v{}", model.installed_code);
                         model.stage = UpdateStage::Installed;
                         model.target_code = None;
                         model.received = 0;
+                        model.attempts = 0;
                         installs += 1;
                     }
                     UpdateStage::Installed => got.unwrap(), // idempotent
@@ -308,6 +332,7 @@ fn randomized_sessions_match_the_reference_and_hold_every_invariant() {
                 model.stage = UpdateStage::Idle;
                 model.target_code = None;
                 model.received = 0;
+                model.attempts = 0;
                 current = None;
             }
             10 => {
@@ -327,6 +352,52 @@ fn randomized_sessions_match_the_reference_and_hold_every_invariant() {
                 // idempotent
                 assert_eq!(session.clone().recover().stage(), after);
                 model.stage = after;
+            }
+            11 => {
+                // retry: only legal with an in-flight target (not Idle/Installed).
+                let got = session.retry(&CAMPAIGN_RETRY);
+                let legal = model.target_code.is_some()
+                    && !matches!(model.stage, UpdateStage::Idle | UpdateStage::Installed);
+                if !legal {
+                    assert!(got.is_err());
+                    rejects += 1;
+                } else {
+                    model.attempts += 1;
+                    model.received = 0;
+                    if model.attempts >= CAMPAIGN_RETRY.max_attempts {
+                        assert_eq!(got.unwrap(), RetryDecision::GaveUp);
+                        model.stage = UpdateStage::Failed;
+                        gave_ups += 1;
+                    } else {
+                        assert_eq!(
+                            got.unwrap(),
+                            RetryDecision::RetryAfter(
+                                CAMPAIGN_RETRY.backoff_delay_secs(model.attempts)
+                            )
+                        );
+                        model.stage = UpdateStage::Available;
+                        retries_after += 1;
+                    }
+                }
+            }
+            12 => {
+                // rollback: only legal with a recorded previous version.
+                let got = session.rollback();
+                if let Some(prev_code) = model.previous_code {
+                    got.unwrap();
+                    model.installed_code = prev_code;
+                    model.installed_name = model.previous_name.take().unwrap();
+                    model.previous_code = None;
+                    model.stage = UpdateStage::Idle;
+                    model.target_code = None;
+                    model.received = 0;
+                    model.attempts = 0;
+                    current = None;
+                    rollbacks += 1;
+                } else {
+                    assert!(got.is_err());
+                    rejects += 1;
+                }
             }
             _ => unreachable!(),
         }
@@ -356,12 +427,21 @@ fn randomized_sessions_match_the_reference_and_hold_every_invariant() {
     }
 
     println!(
-        "update campaign: {iterations} ops, installs={installs}, verify_ok={verify_ok}, verify_fail={verify_fail}, rejects={rejects}"
+        "update campaign: {iterations} ops, installs={installs}, verify_ok={verify_ok}, verify_fail={verify_fail}, rejects={rejects}, retries_after={retries_after}, gave_ups={gave_ups}, rollbacks={rollbacks}"
     );
     assert!(installs > 500, "too few installs exercised: {installs}");
     assert!(verify_ok > 500, "too few successful verifies: {verify_ok}");
     assert!(verify_fail > 40, "too few tamper rejections: {verify_fail}");
     assert!(rejects > 5000, "too few illegal-op rejections: {rejects}");
+    assert!(
+        retries_after > 100,
+        "too few granted retries: {retries_after}"
+    );
+    assert!(
+        gave_ups > 3,
+        "the exhausted-retry give-up path was not exercised: {gave_ups}"
+    );
+    assert!(rollbacks > 50, "too few rollbacks exercised: {rollbacks}");
 }
 
 /// An install is *only ever* reached for bytes whose independent SHA-256 and

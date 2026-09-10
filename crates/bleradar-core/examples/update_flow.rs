@@ -9,8 +9,8 @@
 //! and installing on too-old an OS is declined.
 
 use bleradar_core::update::{
-    ArtifactVerifier, ReleaseManifest, UpdateDecision, UpdateSession, UpdateStage, Version,
-    check_update,
+    ArtifactVerifier, ReleaseManifest, RetryDecision, RetryPolicy, UpdateDecision, UpdateSession,
+    UpdateStage, Version, check_update,
 };
 use bleradar_core::{Sha256, hex_encode};
 
@@ -133,6 +133,59 @@ fn main() {
         "  incompatible-OS decision: {:?}",
         check_update(&Version::new(42, "1.2.3"), 30, &needs_new_os)
     );
+
+    // 7. Transient-failure resilience: two download faults, retried with backoff,
+    //    then a clean download that installs.
+    println!("\n[retry with backoff]");
+    let policy = RetryPolicy {
+        max_attempts: 4,
+        base_delay_secs: 15,
+        max_delay_secs: 3600,
+    };
+    let mut r = UpdateSession::new(Version::new(41, "1.2.2"));
+    r.offer(manifest.clone(), 34).unwrap();
+    for fault in 1..=2 {
+        r.begin_download().unwrap();
+        r.record_progress(20_000).unwrap(); // partial, then the connection drops
+        match r.retry(&policy).unwrap() {
+            RetryDecision::RetryAfter(secs) => {
+                println!(
+                    "  download fault {fault}: retry after {secs}s (attempt {})",
+                    r.attempts()
+                );
+            }
+            RetryDecision::GaveUp => unreachable!(),
+        }
+    }
+    // The next attempt succeeds.
+    let faults = r.attempts();
+    r.begin_download().unwrap();
+    for chunk in artifact.chunks(4096) {
+        r.record_progress(chunk.len() as u64).unwrap();
+    }
+    r.finish_download().unwrap();
+    r.verify(&artifact).unwrap();
+    r.begin_install().unwrap();
+    r.finish_install().unwrap();
+    println!(
+        "  recovered after {faults} fault(s); installed v{}",
+        r.installed().code
+    );
+
+    // 8. Bad-update recovery: a freshly-installed version fails its health check,
+    //    so roll back to the previous known-good version.
+    println!("\n[rollback]");
+    println!(
+        "  running v{} (rolled up from v{})",
+        r.installed().code,
+        r.previous().unwrap().code
+    );
+    r.rollback().unwrap();
+    println!(
+        "  health check failed → rolled back to v{}",
+        r.installed().code
+    );
+    assert_eq!(r.installed(), &Version::new(41, "1.2.2"));
 
     println!("\nupdate_flow: OK");
 }
