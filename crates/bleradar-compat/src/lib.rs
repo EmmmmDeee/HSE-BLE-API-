@@ -124,6 +124,11 @@ pub const CONTRACTS: &[ContractStatus] = &[
         evidence: "executed-oracle differential under qemu-aarch64 over 2.4/5/6 GHz edges and flooring (docs/ORACLE_DIFFERENTIAL.md); the source matches every executed-oracle output over its u16 domain and the oracle's Option<i32> domain collapses to None outside it (oracle_differential.rs)",
     },
     ContractStatus {
+        name: "wifi_band",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "reconstructed from the executed oracle (previously unmapped, statically-reachable shipped contract); the source `wifi_band(u16)` splits at 3000/5900 MHz and matches every executed-oracle band over its u16 domain (docs/ORACLE_DIFFERENTIAL.md, oracle_differential.rs); the oracle's wider Option<i32> domain (None -> \"?\", negatives -> 2.4 GHz) is outside the u16 contract",
+    },
+    ContractStatus {
         name: "ble_distance",
         status: ParityStatus::SourceAnalog,
         evidence: "executed-oracle differential under qemu-aarch64 (docs/ORACLE_DIFFERENTIAL.md): the source's calibration formula reproduces the oracle to machine precision (<1e-12 rel, measured 2e-16) in the valid region with fixed -59 dBm/2.4; the oracle additionally clamps to [0.1, 100] m, ignores tx_power, and treats rssi>=0 as a 100 m sentinel, which the raw source model does not (oracle_signal_differential.rs)",

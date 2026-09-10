@@ -54,10 +54,12 @@ reachability. The five unknowns are read-only `RadarStore` methods that require
 trustworthy Android/Bionic state. All shipped ABI implementations are
 Rust-native. Differential verification against the oracle *binary* has now
 begun: the immutable native core is executed under `qemu-aarch64` against a real
-Bionic runtime, and the WiFi channel↔frequency contracts are
-`DifferentiallyVerified` — the safe-Rust reconstruction reproduces every
-executed-oracle output over its input domain (`docs/ORACLE_DIFFERENTIAL.md`,
-`cargo xtask oracle-differential`). The pure geodesy contracts (`haversine_m`,
+Bionic runtime, and the WiFi `channel_to_frequency`, `frequency_to_channel` and
+`band` contracts are `DifferentiallyVerified` — the safe-Rust reconstruction
+reproduces every executed-oracle output over its input domain
+(`docs/ORACLE_DIFFERENTIAL.md`, `cargo xtask oracle-differential`); `wifi_band`
+was a previously-unmapped, statically-reachable shipped contract reconstructed
+from the executed oracle. The pure geodesy contracts (`haversine_m`,
 `bearing_deg`) also have a broad executed-oracle differential — the
 reconstruction matches the executed oracle to under a micrometre / nanodegree
 over 308 coordinate pairs — but stay `SourceAnalog` because Bionic and host

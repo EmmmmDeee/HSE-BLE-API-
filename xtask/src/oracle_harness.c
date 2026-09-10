@@ -34,6 +34,7 @@ typedef struct {
 extern RustBuffer ffi_bleradar_core_rustbuffer_from_bytes(ForeignBytes, void *);
 extern RustBuffer uniffi_bleradar_core_fn_func_wifi_channel_to_frequency(int32_t, void *);
 extern RustBuffer uniffi_bleradar_core_fn_func_wifi_frequency_to_channel(RustBuffer, void *);
+extern RustBuffer uniffi_bleradar_core_fn_func_wifi_band(RustBuffer, void *);
 
 /* Prints a decoded UniFFI Option<i32> as `None` or its decimal value. */
 static void emit_option(const RustBuffer *r, int status) {
@@ -58,7 +59,8 @@ static void wifi_channel_to_frequency(int channel) {
     emit_option(&r, (signed char)status[0]);
 }
 
-static void wifi_frequency_to_channel(int has_value, long mhz) {
+/* Builds a UniFFI Option<i32> RustBuffer (None or Some(value)). */
+static RustBuffer option_i32(int has_value, long value) {
     unsigned char status[64];
     memset(status, 0, sizeof status);
     unsigned char in[5];
@@ -68,16 +70,21 @@ static void wifi_frequency_to_channel(int has_value, long mhz) {
         in_len = 1;
     } else {
         in[0] = 1;
-        in[1] = (mhz >> 24) & 0xff;
-        in[2] = (mhz >> 16) & 0xff;
-        in[3] = (mhz >> 8) & 0xff;
-        in[4] = mhz & 0xff;
+        in[1] = (value >> 24) & 0xff;
+        in[2] = (value >> 16) & 0xff;
+        in[3] = (value >> 8) & 0xff;
+        in[4] = value & 0xff;
         in_len = 5;
     }
     ForeignBytes fb;
     fb.len = in_len;
     fb.data = in;
-    RustBuffer arg = ffi_bleradar_core_rustbuffer_from_bytes(fb, status);
+    return ffi_bleradar_core_rustbuffer_from_bytes(fb, status);
+}
+
+static void wifi_frequency_to_channel(int has_value, long mhz) {
+    unsigned char status[64];
+    RustBuffer arg = option_i32(has_value, mhz);
     memset(status, 0, sizeof status);
     RustBuffer r = uniffi_bleradar_core_fn_func_wifi_frequency_to_channel(arg, status);
     if (has_value) {
@@ -86,6 +93,24 @@ static void wifi_frequency_to_channel(int has_value, long mhz) {
         printf("WFC\tNone\t");
     }
     emit_option(&r, (signed char)status[0]);
+}
+
+static void wifi_band(int has_value, long mhz) {
+    unsigned char status[64];
+    RustBuffer arg = option_i32(has_value, mhz);
+    memset(status, 0, sizeof status);
+    RustBuffer r = uniffi_bleradar_core_fn_func_wifi_band(arg, status);
+    char band[64];
+    memset(band, 0, sizeof band);
+    unsigned long n = r.len < 63 ? (unsigned long)r.len : 63;
+    if ((signed char)status[0] == 0 && r.data) {
+        memcpy(band, r.data, n);
+    }
+    if (has_value) {
+        printf("WBAND\t%ld\t%s\n", mhz, band);
+    } else {
+        printf("WBAND\tNone\t%s\n", band);
+    }
 }
 
 int main(void) {
@@ -115,6 +140,23 @@ int main(void) {
     }
     for (long m = 7105; m <= 7125; m++) {
         wifi_frequency_to_channel(1, m); /* 6 GHz high edge */
+    }
+    /* band label: None sentinel, out-of-u16 and negative inputs, dense sweeps
+       across both band boundaries (3000, 5900 MHz), and high-u16 samples. */
+    wifi_band(0, 0);
+    wifi_band(1, -1000);
+    wifi_band(1, -1);
+    wifi_band(1, 0);
+    wifi_band(1, 1);
+    for (long m = 2900; m <= 3100; m++) {
+        wifi_band(1, m); /* 2.4/5 GHz boundary at 3000 */
+    }
+    for (long m = 5800; m <= 6000; m++) {
+        wifi_band(1, m); /* 5/6 GHz boundary at 5900 */
+    }
+    long band_samples[] = {2412, 2484, 5180, 5825, 5955, 7115, 8000, 10000, 20000, 40000, 65535, 100000};
+    for (unsigned i = 0; i < sizeof band_samples / sizeof band_samples[0]; i++) {
+        wifi_band(1, band_samples[i]);
     }
     return 0;
 }

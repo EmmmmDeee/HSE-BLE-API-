@@ -30,6 +30,7 @@ sweep):
 | --- | --- | --- |
 | `wifi_channel_to_frequency` | `(i32) -> Option<i32>` | source reproduces every executed-oracle output over its `u16` domain (bit-exact → `DifferentiallyVerified`) |
 | `wifi_frequency_to_channel` | `(Option<i32>) -> Option<i32>` | source reproduces every executed-oracle output over its `u16` domain, incl. the 6 GHz band (bit-exact → `DifferentiallyVerified`) |
+| `wifi_band` | `(Option<i32>) -> String` | reconstructed from the executed oracle (previously unmapped); source `wifi_band(u16)` splits at 3000/5900 MHz and matches every executed-oracle band over its `u16` domain (bit-exact → `DifferentiallyVerified`) |
 | `haversine_m` | `(f64,f64,f64,f64) -> f64` | source matches the executed oracle to <1e-6 m over 308 pairs (transcendental libm rounding; `SourceAnalog` coverage) |
 | `bearing_deg` | `(f64,f64,f64,f64) -> f64` | source matches the executed oracle to <1e-8 deg (circular) over 308 pairs (transcendental libm rounding; `SourceAnalog` coverage) |
 | `ble_distance` | `(i32, Option<i32>) -> f64` | source calibration formula matches the executed oracle to 2e-16 rel in the valid region; the oracle's `[0.1,100]` m clamp + `rssi>=0`→100 sentinel are documented, locked divergences (`SourceAnalog`) |

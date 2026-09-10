@@ -154,6 +154,59 @@ pub fn wifi_frequency_to_channel(mhz: u16) -> Option<u16> {
     }
 }
 
+/// The Wi-Fi frequency band a channel center frequency (MHz) falls in.
+///
+/// [`label`](WifiBand::label) returns the exact string the shipped native
+/// `wifi_band` contract emits, so the two are differentially comparable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WifiBand {
+    /// 2.4 GHz band.
+    TwoPointFourGhz,
+    /// 5 GHz band.
+    FiveGhz,
+    /// 6 GHz band.
+    SixGhz,
+}
+
+impl WifiBand {
+    /// The band label, matching the shipped native `wifi_band` output verbatim.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TwoPointFourGhz => "2.4 GHz",
+            Self::FiveGhz => "5 GHz",
+            Self::SixGhz => "6 GHz",
+        }
+    }
+}
+
+/// Wi-Fi band for a center frequency in MHz, matching the shipped native
+/// `wifi_band` contract's split at 3000 and 5900 MHz.
+///
+/// The native contract's argument is an `Option<i32>` (a missing frequency maps
+/// to the `"?"` band, and negatives to 2.4 GHz); this reconstruction takes the
+/// narrower `u16` domain, mirroring [`wifi_channel_to_frequency`]. Over that
+/// domain it is differentially verified bit-for-bit against the executed oracle
+/// (`docs/ORACLE_DIFFERENTIAL.md`).
+///
+/// # Examples
+/// ```
+/// use bleradar_core::{wifi_band, WifiBand};
+/// assert_eq!(wifi_band(2412), WifiBand::TwoPointFourGhz);
+/// assert_eq!(wifi_band(5180), WifiBand::FiveGhz);
+/// assert_eq!(wifi_band(5955), WifiBand::SixGhz);
+/// ```
+#[must_use]
+pub fn wifi_band(mhz: u16) -> WifiBand {
+    if mhz < 3000 {
+        WifiBand::TwoPointFourGhz
+    } else if mhz < 5900 {
+        WifiBand::FiveGhz
+    } else {
+        WifiBand::SixGhz
+    }
+}
+
 /// Unsupported reconstructed behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatibilityGap {
