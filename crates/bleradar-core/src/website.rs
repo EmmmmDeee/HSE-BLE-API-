@@ -1664,68 +1664,66 @@ impl WebsiteLineageEcosystemAnalysisEngine {
     }
 
     /// Registers and transactionally persists one website observation.
+    ///
+    /// A refused observation (limit, duplicate id, conflicting source or
+    /// canonical record, invalid provenance) leaves the engine and its
+    /// evidence store unchanged.
     pub fn observe(&mut self, observation: WebsiteObservation) -> Result<(), WebsiteError> {
-        if self.observations.len() >= self.limits.max_observations {
-            return Err(WebsiteError::ResourceLimit {
-                resource: "observations",
-                limit: self.limits.max_observations,
-            });
-        }
-        let observation_id = observation.id().to_owned();
-        if self.observations.contains_key(&observation_id) {
-            return Err(WebsiteError::DuplicateObservation { observation_id });
-        }
-
-        let mut evidence = self.evidence.clone();
-        if let Some(existing) = evidence.source(observation.source_id()) {
-            if existing != observation.source() {
-                return Err(WebsiteError::SourceConflict {
-                    source_id: observation.source_id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_source(observation.source().clone())?;
-        }
-        if evidence.entity(observation.website_id()).is_none() {
-            evidence.add_entity(
-                Entity::new(observation.website_id(), EntityType::Website)
-                    .map_err(WebsiteError::from)?,
-            )?;
-        }
-        let canonical = observation.canonical_observation()?;
-        if let Some(existing) = evidence.observation(observation.id()) {
-            if existing != &canonical {
-                return Err(WebsiteError::ObservationConflict {
-                    observation_id: observation.id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_observation(canonical)?;
-        }
-
-        self.evidence = evidence;
-        self.website_observations
-            .entry(observation.website_id().to_owned())
-            .or_default()
-            .insert(observation.id().to_owned());
-        self.observations.insert(observation_id, observation);
-        Ok(())
+        let Self {
+            evidence,
+            limits,
+            observations,
+            website_observations,
+            ..
+        } = self;
+        observe_into(
+            evidence,
+            observations,
+            website_observations,
+            *limits,
+            observation,
+        )
     }
 
     /// Extracts and transactionally persists every feature in a snapshot.
+    ///
+    /// The snapshot is all-or-nothing: if any extracted feature is refused,
+    /// the engine and its evidence store are left unchanged.
     pub fn observe_snapshot(
         &mut self,
         snapshot: &WebsiteSnapshot,
     ) -> Result<Vec<String>, WebsiteError> {
-        let observations = snapshot.extract_observations()?;
-        let mut candidate = self.clone();
-        let mut ids = Vec::with_capacity(observations.len());
-        for observation in observations {
-            ids.push(observation.id().to_owned());
-            candidate.observe(observation)?;
+        let extracted = snapshot.extract_observations()?;
+        let Self {
+            evidence,
+            limits,
+            observations,
+            website_observations,
+            ..
+        } = self;
+        let mut ids = Vec::with_capacity(extracted.len());
+        let outcome = evidence.transaction(|store| {
+            for observation in extracted {
+                let id = observation.id().to_owned();
+                observe_into(
+                    store,
+                    observations,
+                    website_observations,
+                    *limits,
+                    observation,
+                )?;
+                ids.push(id);
+            }
+            Ok::<(), WebsiteError>(())
+        });
+        if outcome.is_err() {
+            for id in &ids {
+                if let Some(observation) = observations.remove(id) {
+                    forget_index(website_observations, observation.website_id(), id);
+                }
+            }
         }
-        *self = candidate;
-        Ok(ids)
+        outcome.map(|()| ids)
     }
 
     /// Convenience alias for [`Self::observe`].
@@ -1864,15 +1862,12 @@ impl WebsiteLineageEcosystemAnalysisEngine {
             relationship_id: relationship_id.clone(),
         };
 
-        let mut evidence = self.evidence.clone();
-        if let Some(existing) = evidence.source(self.lineage_source.id()) {
-            if existing != &self.lineage_source {
-                return Err(WebsiteError::SourceConflict {
-                    source_id: self.lineage_source.id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_source(self.lineage_source.clone())?;
+        if let Some(existing) = self.evidence.source(self.lineage_source.id())
+            && existing != &self.lineage_source
+        {
+            return Err(WebsiteError::SourceConflict {
+                source_id: self.lineage_source.id().to_owned(),
+            });
         }
         let timestamp = observation_ids
             .iter()
@@ -1895,7 +1890,14 @@ impl WebsiteLineageEcosystemAnalysisEngine {
             provenance,
         )?
         .with_confidence(baseline.confidence);
-        evidence.add_relationship(relationship)?;
+        let lineage_source = &self.lineage_source;
+        self.evidence.transaction(|store| {
+            if store.source(lineage_source.id()).is_none() {
+                store.add_source(lineage_source.clone())?;
+            }
+            store.add_relationship(relationship)?;
+            Ok::<(), WebsiteError>(())
+        })?;
 
         let report = WebsiteLineageReport {
             edge,
@@ -1914,7 +1916,6 @@ impl WebsiteLineageEcosystemAnalysisEngine {
                 WebsitePhase::Recompute,
             ],
         };
-        self.evidence = evidence;
         self.correlations.insert(correlation_id, report.clone());
         Ok(report)
     }
@@ -1939,22 +1940,40 @@ impl WebsiteLineageEcosystemAnalysisEngine {
     /// error.
     pub fn correlate_all(&mut self) -> Result<Vec<WebsiteLineageReport>, WebsiteError> {
         let website_ids: Vec<_> = self.website_observations.keys().cloned().collect();
-        let mut candidate = self.clone();
         let mut reports = Vec::new();
+        let outcome = EvidenceStore::transaction_through(
+            self,
+            |engine| &mut engine.evidence,
+            |engine| engine.correlate_pairs(&website_ids, &mut reports),
+        );
+        if outcome.is_err() {
+            for report in &reports {
+                self.correlations.remove(report.edge().id());
+            }
+        }
+        outcome.map(|()| reports)
+    }
+
+    /// Correlates every uncorrelated comparable pair in key order, appending
+    /// each persisted report; the caller provides the transaction.
+    fn correlate_pairs(
+        &mut self,
+        website_ids: &[String],
+        reports: &mut Vec<WebsiteLineageReport>,
+    ) -> Result<(), WebsiteError> {
         for (left_index, left_website) in website_ids.iter().enumerate() {
             for right_website in website_ids.iter().skip(left_index + 1) {
-                if candidate.is_correlated(left_website, right_website) {
+                if self.is_correlated(left_website, right_website) {
                     continue;
                 }
-                match candidate.correlate(left_website, right_website) {
+                match self.correlate(left_website, right_website) {
                     Ok(report) => reports.push(report),
                     Err(WebsiteError::NoComparableObservations { .. }) => {}
                     Err(error) => return Err(error),
                 }
             }
         }
-        *self = candidate;
-        Ok(reports)
+        Ok(())
     }
 
     /// Whether a pair already has a persisted correlation in either direction.
@@ -2231,6 +2250,76 @@ impl SupportFields for Support {
 
     fn right_observation(&self) -> &str {
         &self.right_observation
+    }
+}
+
+/// Validates one observation against the registry and the live store, then
+/// persists it inside a (nested) store transaction and indexes it.
+///
+/// Nothing is written unless every check passes, so the caller's registry
+/// and the store agree after both success and refusal.
+fn observe_into(
+    evidence: &mut EvidenceStore,
+    observations: &mut BTreeMap<String, WebsiteObservation>,
+    website_observations: &mut BTreeMap<String, BTreeSet<String>>,
+    limits: WebsiteLimits,
+    observation: WebsiteObservation,
+) -> Result<(), WebsiteError> {
+    if observations.len() >= limits.max_observations() {
+        return Err(WebsiteError::ResourceLimit {
+            resource: "observations",
+            limit: limits.max_observations(),
+        });
+    }
+    let observation_id = observation.id().to_owned();
+    if observations.contains_key(&observation_id) {
+        return Err(WebsiteError::DuplicateObservation { observation_id });
+    }
+    if let Some(existing) = evidence.source(observation.source_id())
+        && existing != observation.source()
+    {
+        return Err(WebsiteError::SourceConflict {
+            source_id: observation.source_id().to_owned(),
+        });
+    }
+    let canonical = observation.canonical_observation()?;
+    if let Some(existing) = evidence.observation(observation.id())
+        && existing != &canonical
+    {
+        return Err(WebsiteError::ObservationConflict { observation_id });
+    }
+    evidence.transaction(|store| {
+        if store.source(observation.source_id()).is_none() {
+            store.add_source(observation.source().clone())?;
+        }
+        if store.entity(observation.website_id()).is_none() {
+            store.add_entity(Entity::new(observation.website_id(), EntityType::Website)?)?;
+        }
+        if store.observation(observation.id()).is_none() {
+            store.add_observation(canonical)?;
+        }
+        Ok::<(), WebsiteError>(())
+    })?;
+    website_observations
+        .entry(observation.website_id().to_owned())
+        .or_default()
+        .insert(observation_id.clone());
+    observations.insert(observation_id, observation);
+    Ok(())
+}
+
+/// Drops one observation id from a website's index, removing the website's
+/// entry when it becomes empty.
+fn forget_index(
+    website_observations: &mut BTreeMap<String, BTreeSet<String>>,
+    website_id: &str,
+    observation_id: &str,
+) {
+    if let Some(ids) = website_observations.get_mut(website_id) {
+        ids.remove(observation_id);
+        if ids.is_empty() {
+            website_observations.remove(website_id);
+        }
     }
 }
 

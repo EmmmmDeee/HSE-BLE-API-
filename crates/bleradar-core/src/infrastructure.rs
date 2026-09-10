@@ -1458,41 +1458,39 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         if self.observations.contains_key(&observation_id) {
             return Err(InfrastructureError::DuplicateObservation { observation_id });
         }
-
-        let mut evidence = self.evidence.clone();
-        if let Some(existing) = evidence.source(observation.source_id()) {
-            if existing != observation.source() {
-                return Err(InfrastructureError::SourceConflict {
-                    source_id: observation.source_id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_source(observation.source().clone())?;
+        if let Some(existing) = self.evidence.source(observation.source_id())
+            && existing != observation.source()
+        {
+            return Err(InfrastructureError::SourceConflict {
+                source_id: observation.source_id().to_owned(),
+            });
         }
-
-        if evidence.entity(observation.node_id()).is_none() {
-            evidence.add_entity(
-                Entity::new(observation.node_id(), EntityType::Infrastructure)
-                    .map_err(InfrastructureError::from)?,
-            )?;
-        }
-
         let canonical = observation.canonical_observation()?;
-        if let Some(existing) = evidence.observation(observation.id()) {
-            if existing != &canonical {
-                return Err(InfrastructureError::ObservationConflict {
-                    observation_id: observation.id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_observation(canonical)?;
+        if let Some(existing) = self.evidence.observation(observation.id())
+            && existing != &canonical
+        {
+            return Err(InfrastructureError::ObservationConflict { observation_id });
         }
 
-        self.evidence = evidence;
+        self.evidence.transaction(|store| {
+            if store.source(observation.source_id()).is_none() {
+                store.add_source(observation.source().clone())?;
+            }
+            if store.entity(observation.node_id()).is_none() {
+                store.add_entity(Entity::new(
+                    observation.node_id(),
+                    EntityType::Infrastructure,
+                )?)?;
+            }
+            if store.observation(observation.id()).is_none() {
+                store.add_observation(canonical)?;
+            }
+            Ok::<(), InfrastructureError>(())
+        })?;
         self.node_observations
             .entry(observation.node_id().to_owned())
             .or_default()
-            .insert(observation.id().to_owned());
+            .insert(observation_id.clone());
         self.observations.insert(observation_id, observation);
         Ok(())
     }
@@ -1629,15 +1627,12 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
             relationship_id: relationship_id.clone(),
         };
 
-        let mut evidence = self.evidence.clone();
-        if let Some(existing) = evidence.source(self.correlation_source.id()) {
-            if existing != &self.correlation_source {
-                return Err(InfrastructureError::SourceConflict {
-                    source_id: self.correlation_source.id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_source(self.correlation_source.clone())?;
+        if let Some(existing) = self.evidence.source(self.correlation_source.id())
+            && existing != &self.correlation_source
+        {
+            return Err(InfrastructureError::SourceConflict {
+                source_id: self.correlation_source.id().to_owned(),
+            });
         }
         let timestamp = observation_ids
             .iter()
@@ -1660,7 +1655,14 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
             provenance,
         )?
         .with_confidence(baseline.confidence);
-        evidence.add_relationship(relationship)?;
+        let correlation_source = &self.correlation_source;
+        self.evidence.transaction(|store| {
+            if store.source(correlation_source.id()).is_none() {
+                store.add_source(correlation_source.clone())?;
+            }
+            store.add_relationship(relationship)?;
+            Ok::<(), InfrastructureError>(())
+        })?;
 
         let report = InfrastructureCorrelationReport {
             edge,
@@ -1678,7 +1680,6 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
                 InfrastructurePhase::Recompute,
             ],
         };
-        self.evidence = evidence;
         self.correlations.insert(correlation_id, report.clone());
         Ok(report)
     }
@@ -1705,22 +1706,40 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         &mut self,
     ) -> Result<Vec<InfrastructureCorrelationReport>, InfrastructureError> {
         let node_ids: Vec<_> = self.node_observations.keys().cloned().collect();
-        let mut candidate = self.clone();
         let mut reports = Vec::new();
+        let outcome = EvidenceStore::transaction_through(
+            self,
+            |engine| &mut engine.evidence,
+            |engine| engine.correlate_pairs(&node_ids, &mut reports),
+        );
+        if outcome.is_err() {
+            for report in &reports {
+                self.correlations.remove(report.edge().id());
+            }
+        }
+        outcome.map(|()| reports)
+    }
+
+    /// Correlates every uncorrelated comparable pair in key order, appending
+    /// each persisted report; the caller provides the transaction.
+    fn correlate_pairs(
+        &mut self,
+        node_ids: &[String],
+        reports: &mut Vec<InfrastructureCorrelationReport>,
+    ) -> Result<(), InfrastructureError> {
         for (left_index, left_node) in node_ids.iter().enumerate() {
             for right_node in node_ids.iter().skip(left_index + 1) {
-                if candidate.is_correlated(left_node, right_node) {
+                if self.is_correlated(left_node, right_node) {
                     continue;
                 }
-                match candidate.correlate(left_node, right_node) {
+                match self.correlate(left_node, right_node) {
                     Ok(report) => reports.push(report),
                     Err(InfrastructureError::NoComparableObservations { .. }) => {}
                     Err(error) => return Err(error),
                 }
             }
         }
-        *self = candidate;
-        Ok(reports)
+        Ok(())
     }
 
     /// Whether a pair already has a persisted correlation in either direction.
