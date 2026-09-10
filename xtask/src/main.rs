@@ -47,6 +47,9 @@ const SIGNAL_VECTORS_PATH: &str = "crates/bleradar-compat/tests/oracle/signal_ex
 /// Committed executed-oracle wifi_distance ground truth (relative to the repo root).
 const WIFI_DISTANCE_VECTORS_PATH: &str =
     "crates/bleradar-compat/tests/oracle/wifi_distance_executed_vectors.tsv";
+/// Committed executed-oracle wifi_security/is_enterprise ground truth (relative to the repo root).
+const WIFI_SECURITY_VECTORS_PATH: &str =
+    "crates/bleradar-compat/tests/oracle/wifi_security_executed_vectors.tsv";
 /// The WiFi differential harness source, compiled for aarch64 and run under qemu.
 const ORACLE_HARNESS_C: &str = include_str!("oracle_harness.c");
 /// The geodesy differential harness source, compiled for aarch64 and run under qemu.
@@ -55,6 +58,8 @@ const ORACLE_HARNESS_GEO_C: &str = include_str!("oracle_harness_geo.c");
 const ORACLE_HARNESS_SIGNAL_C: &str = include_str!("oracle_harness_signal.c");
 /// The wifi_distance differential harness source, compiled for aarch64 and run under qemu.
 const ORACLE_HARNESS_WIFI_DISTANCE_C: &str = include_str!("oracle_harness_wifi_distance.c");
+/// The wifi_security/is_enterprise differential harness source, compiled for aarch64 and run under qemu.
+const ORACLE_HARNESS_WIFI_SECURITY_C: &str = include_str!("oracle_harness_wifi_security.c");
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -2023,16 +2028,17 @@ fn cmd_verify_android_live() -> Result<(), String> {
 
 /// Executes the immutable v0.3.0 native oracle under `qemu-aarch64` against a
 /// real Android Bionic runtime and checks that its pure-contract outputs (WiFi
-/// channel<->frequency + band, geodesy, BLE signal, and wifi_distance) still
-/// match the committed executed-oracle ground truth. See
+/// channel<->frequency + band + distance + security/is_enterprise, geodesy, and
+/// BLE signal) still match the committed executed-oracle ground truth. See
 /// `docs/ORACLE_DIFFERENTIAL.md`.
 ///
 /// This is a live command (like `verify-android-live`): it needs an NDK,
 /// `qemu-aarch64`, and a Bionic runtime, so it is not part of `gates`. The
 /// committed vectors it drift-checks are what the ordinary CI tests
 /// `oracle_differential.rs`, `oracle_geodesy_differential.rs`,
-/// `oracle_signal_differential.rs` and `oracle_wifi_distance_differential.rs`
-/// replay against the safe-Rust reconstruction.
+/// `oracle_signal_differential.rs`, `oracle_wifi_distance_differential.rs` and
+/// `oracle_wifi_security_differential.rs` replay against the safe-Rust
+/// reconstruction.
 fn cmd_oracle_differential() -> Result<(), String> {
     let root = repo_root()?;
     let sdk = discover_sdk_root()?;
@@ -2069,6 +2075,12 @@ fn cmd_oracle_differential() -> Result<(), String> {
         "wifi_distance",
         ORACLE_HARNESS_WIFI_DISTANCE_C,
         WIFI_DISTANCE_VECTORS_PATH,
+    )?;
+    drift_check_harness(
+        &ctx,
+        "wifi_security",
+        ORACLE_HARNESS_WIFI_SECURITY_C,
+        WIFI_SECURITY_VECTORS_PATH,
     )?;
     Ok(())
 }

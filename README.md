@@ -54,12 +54,14 @@ reachability. The five unknowns are read-only `RadarStore` methods that require
 trustworthy Android/Bionic state. All shipped ABI implementations are
 Rust-native. Differential verification against the oracle *binary* has now
 begun: the immutable native core is executed under `qemu-aarch64` against a real
-Bionic runtime, and the WiFi `channel_to_frequency`, `frequency_to_channel` and
-`band` contracts are `DifferentiallyVerified` — the safe-Rust reconstruction
-reproduces every executed-oracle output over its input domain
-(`docs/ORACLE_DIFFERENTIAL.md`, `cargo xtask oracle-differential`); `wifi_band`
-was a previously-unmapped, statically-reachable shipped contract reconstructed
-from the executed oracle. The pure geodesy contracts (`haversine_m`,
+Bionic runtime, and the WiFi `channel_to_frequency`, `frequency_to_channel`,
+`band`, `security` and `is_enterprise` contracts are `DifferentiallyVerified` —
+the safe-Rust reconstruction reproduces every executed-oracle output bit-for-bit
+over its input domain (`docs/ORACLE_DIFFERENTIAL.md`, `cargo xtask
+oracle-differential`); `wifi_band`, `wifi_security` and `wifi_is_enterprise` were
+previously-unmapped, statically-reachable shipped contracts reconstructed from
+the executed oracle (`wifi_security` classifies a capabilities string by a
+case-sensitive substring precedence; `wifi_is_enterprise` tests for `EAP`). The pure geodesy contracts (`haversine_m`,
 `bearing_deg`) also have a broad executed-oracle differential — the
 reconstruction matches the executed oracle to under a micrometre / nanodegree
 over 308 coordinate pairs — but stay `SourceAnalog` because Bionic and host
@@ -75,7 +77,10 @@ executed oracle (the log-distance formula, an `rssi>=0`→400 m sentinel, a
 `2000..=7199` MHz plausible-frequency window defaulting to 2437 MHz, and a
 `[0.1,400]` m clamp) with no behavioural or domain divergence, and stays
 `SourceAnalog` because its `log10`/`powf` step is transcendental (matched to
-`<1e-12` relative, observed max 2e-15).
+`<1e-12` relative, observed max 2e-15). Together these complete the
+reconstruction of the entire WiFi ABI family — all six `wifi_*` contracts are now
+reconstructed and executed-oracle-differentiated (five `DifferentiallyVerified`,
+`wifi_distance` `SourceAnalog`).
 
 See `docs/VERIFIED_RUNTIME_TOPOLOGY.md`,
 `docs/BEHAVIORAL_CONTRACT.md`, and `docs/RUST_TARGET_ARCHITECTURE.md` before

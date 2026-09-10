@@ -276,6 +276,106 @@ pub fn wifi_distance(rssi_dbm: i32, frequency_mhz: i32) -> f64 {
         .clamp(WIFI_DISTANCE_MIN_M, WIFI_DISTANCE_MAX_M)
 }
 
+/// The Wi-Fi security scheme inferred from an access point's capabilities string.
+///
+/// [`label`](WifiSecurity::label) returns the exact string the shipped native
+/// `wifi_security` contract emits, so the two are differentially comparable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WifiSecurity {
+    /// No capabilities were supplied (`"?"`).
+    Unknown,
+    /// No recognised security token (`"Open"`).
+    Open,
+    /// WEP (`"WEP"`).
+    Wep,
+    /// WPA (`"WPA"`).
+    Wpa,
+    /// WPA2 / RSN (`"WPA2"`).
+    Wpa2,
+    /// WPA3 / SAE (`"WPA3"`).
+    Wpa3,
+    /// Opportunistic Wireless Encryption / Enhanced Open (`"OWE"`).
+    Owe,
+}
+
+impl WifiSecurity {
+    /// The label, matching the shipped native `wifi_security` output verbatim.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "?",
+            Self::Open => "Open",
+            Self::Wep => "WEP",
+            Self::Wpa => "WPA",
+            Self::Wpa2 => "WPA2",
+            Self::Wpa3 => "WPA3",
+            Self::Owe => "OWE",
+        }
+    }
+}
+
+/// Classifies a Wi-Fi access point's security scheme from its capabilities
+/// string, reproducing the shipped native `wifi_security` contract exactly.
+///
+/// The classification is a case-sensitive substring test applied in a fixed
+/// precedence order, recovered from the executed oracle
+/// (`docs/ORACLE_DIFFERENTIAL.md`): a missing capabilities string is
+/// [`Unknown`](WifiSecurity::Unknown) (`"?"`); otherwise `"SAE"` or `"WPA3"` →
+/// WPA3, then `"WPA2"` or `"RSN"` → WPA2, then `"OWE"` → OWE, then `"WPA"` →
+/// WPA, then `"WEP"` → WEP, else [`Open`](WifiSecurity::Open). Because a WPA2
+/// network is advertised as RSN and mixed WPA2/WPA3 as `[WPA2-…][RSN-SAE-…]`,
+/// the WPA3 and WPA2 tests deliberately precede the WPA/WEP ones.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::{wifi_security, WifiSecurity};
+/// assert_eq!(wifi_security(Some("[WPA2-PSK-CCMP][ESS]")), WifiSecurity::Wpa2);
+/// assert_eq!(wifi_security(Some("[RSN-SAE-CCMP][ESS]")), WifiSecurity::Wpa3);
+/// assert_eq!(wifi_security(Some("[RSN-OWE-CCMP][ESS]")), WifiSecurity::Wpa2);
+/// assert_eq!(wifi_security(Some("[OWE][ESS]")), WifiSecurity::Owe);
+/// assert_eq!(wifi_security(Some("[ESS]")), WifiSecurity::Open);
+/// assert_eq!(wifi_security(None), WifiSecurity::Unknown);
+/// ```
+#[must_use]
+pub fn wifi_security(caps: Option<&str>) -> WifiSecurity {
+    let Some(caps) = caps else {
+        return WifiSecurity::Unknown;
+    };
+    if caps.contains("SAE") || caps.contains("WPA3") {
+        WifiSecurity::Wpa3
+    } else if caps.contains("WPA2") || caps.contains("RSN") {
+        WifiSecurity::Wpa2
+    } else if caps.contains("OWE") {
+        WifiSecurity::Owe
+    } else if caps.contains("WPA") {
+        WifiSecurity::Wpa
+    } else if caps.contains("WEP") {
+        WifiSecurity::Wep
+    } else {
+        WifiSecurity::Open
+    }
+}
+
+/// Whether a Wi-Fi access point uses enterprise (802.1X/EAP) authentication,
+/// reproducing the shipped native `wifi_is_enterprise` contract exactly.
+///
+/// This is a case-sensitive test for the substring `"EAP"` in the capabilities
+/// string (a missing string is not enterprise), recovered from the executed
+/// oracle (`docs/ORACLE_DIFFERENTIAL.md`).
+///
+/// # Examples
+/// ```
+/// use bleradar_core::wifi_is_enterprise;
+/// assert!(wifi_is_enterprise(Some("[WPA2-EAP-CCMP][ESS]")));
+/// assert!(!wifi_is_enterprise(Some("[WPA2-PSK-CCMP][ESS]")));
+/// assert!(!wifi_is_enterprise(Some("[wpa2-eap]"))); // case-sensitive
+/// assert!(!wifi_is_enterprise(None));
+/// ```
+#[must_use]
+pub fn wifi_is_enterprise(caps: Option<&str>) -> bool {
+    caps.is_some_and(|caps| caps.contains("EAP"))
+}
+
 /// Unsupported reconstructed behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatibilityGap {

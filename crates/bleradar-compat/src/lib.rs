@@ -129,6 +129,16 @@ pub const CONTRACTS: &[ContractStatus] = &[
         evidence: "reconstructed from the executed oracle (previously unmapped, statically-reachable shipped contract); the source `wifi_band(u16)` splits at 3000/5900 MHz and matches every executed-oracle band over its u16 domain (docs/ORACLE_DIFFERENTIAL.md, oracle_differential.rs); the oracle's wider Option<i32> domain (None -> \"?\", negatives -> 2.4 GHz) is outside the u16 contract",
     },
     ContractStatus {
+        name: "wifi_is_enterprise",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "reconstructed from the executed oracle (previously unmapped, statically-reachable shipped contract); a pure case-sensitive `caps.contains(\"EAP\")` test (None -> false) reproduced bit-for-bit over the executed-oracle sweep (docs/ORACLE_DIFFERENTIAL.md, oracle_wifi_security_differential.rs)",
+    },
+    ContractStatus {
+        name: "wifi_security",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "reconstructed from the executed oracle (previously unmapped, statically-reachable shipped contract); a pure case-sensitive substring classifier with precedence SAE|WPA3 -> WPA3, WPA2|RSN -> WPA2, OWE -> OWE, WPA -> WPA, WEP -> WEP, else Open (None -> \"?\"), reproduced bit-for-bit over the executed-oracle sweep (docs/ORACLE_DIFFERENTIAL.md, oracle_wifi_security_differential.rs)",
+    },
+    ContractStatus {
         name: "wifi_distance",
         status: ParityStatus::SourceAnalog,
         evidence: "reconstructed from the executed oracle (previously unmapped, statically-reachable shipped contract); the source reproduces the executed oracle across its whole i32 domain (docs/ORACLE_DIFFERENTIAL.md, oracle_wifi_distance_differential.rs) -- the rssi>=0 far-clamp sentinel, the 2000..=7199 MHz plausible-frequency window with a 2437 MHz default outside it, the log-distance formula, and the [0.1, 400] m clamps -- with no behavioral divergence; the transcendental log10/powf step is matched to <1e-12 relative (observed max 2e-15 over 797 formula points) rather than guaranteed bit-for-bit, so it stays SourceAnalog like haversine_m/bearing_deg",

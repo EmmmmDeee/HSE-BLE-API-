@@ -23,9 +23,9 @@ Android **Bionic** runtime, and its outputs read back through the UniFFI ABI.
 ## What is verified
 
 Every pure oracle contract that has a reconstruction analogue — the WiFi
-channel↔frequency and band contracts (bit-exact), the geodesy and `wifi_distance`
-contracts (transcendental tolerance), and the BLE signal contracts (verified
-formula with locked divergences):
+channel↔frequency, band, security and is_enterprise contracts (bit-exact), the
+geodesy and `wifi_distance` contracts (transcendental tolerance), and the BLE
+signal contracts (verified formula with locked divergences):
 
 | Contract | Oracle signature (from `UNIFFI_META_*`) | Result |
 | --- | --- | --- |
@@ -37,6 +37,8 @@ formula with locked divergences):
 | `ble_distance` | `(i32, Option<i32>) -> f64` | source calibration formula matches the executed oracle to 2e-16 rel in the valid region; the oracle's `[0.1,100]` m clamp + `rssi>=0`→100 sentinel are documented, locked divergences (`SourceAnalog`) |
 | `proximity_label` | `(f64) -> String` | oracle bands `<1.5`/`<5`/`<15` are wider than the source's `<=1`/`<=2`/`<=5`; the banding gap is documented and locked (`SourceAnalog`) |
 | `wifi_distance` | `(i32, i32) -> f64` | reconstructed from the executed oracle (previously unmapped); `10^((47.55−20·log10(f)−rssi)/27)` with an `rssi>=0`→400 m sentinel, a `2000..=7199` MHz plausible-frequency window defaulting to 2437 MHz outside it, and a `[0.1,400]` m clamp; the source replicates all of it over the full `i32` domain (no behavioural or domain divergence) and matches the executed oracle to `<1e-6` relative — transcendental `log10`/`powf` rounding, observed max 2e-15; `SourceAnalog` like the geodesy contracts |
+| `wifi_is_enterprise` | `(Option<String>) -> bool` | reconstructed from the executed oracle (previously unmapped); a case-sensitive `caps.contains("EAP")` test (`None` → false); pure/deterministic, reproduced bit-for-bit over the full `String` domain → `DifferentiallyVerified` |
+| `wifi_security` | `(Option<String>) -> String` | reconstructed from the executed oracle (previously unmapped); case-sensitive substring precedence `SAE`\|`WPA3`→WPA3, `WPA2`\|`RSN`→WPA2, `OWE`→OWE, `WPA`→WPA, `WEP`→WEP, else Open (`None`→`"?"`); pure/deterministic, reproduced bit-for-bit over the full `String` domain → `DifferentiallyVerified` |
 
 For the WiFi channel↔frequency contracts the one intentional divergence is domain
 width: the oracle accepts signed `i32` (and an `Option` frequency), the
@@ -66,10 +68,11 @@ a bit bound).
    `cargo xtask oracle-differential` writes each executed-oracle result to a
    committed vectors file under `crates/bleradar-compat/tests/oracle/`
    (`wifi_executed_vectors.tsv`, `geodesy_executed_vectors.tsv`,
-   `signal_executed_vectors.tsv`, `wifi_distance_executed_vectors.tsv`), each
-   with the provenance header below. The matching CI tests
-   (`oracle_differential.rs`, `oracle_geodesy_differential.rs`,
-   `oracle_signal_differential.rs`, `oracle_wifi_distance_differential.rs`)
+   `signal_executed_vectors.tsv`, `wifi_distance_executed_vectors.tsv`,
+   `wifi_security_executed_vectors.tsv`), each with the provenance header below.
+   The matching CI tests (`oracle_differential.rs`,
+   `oracle_geodesy_differential.rs`, `oracle_signal_differential.rs`,
+   `oracle_wifi_distance_differential.rs`, `oracle_wifi_security_differential.rs`)
    replay those files against the reconstruction with no emulator, so they run
    in ordinary CI (`cargo test` / `cargo xtask gates`).
 
@@ -119,12 +122,14 @@ The command:
    or uses `BIONIC_SYSROOT` if you exported a prepared one;
 3. compiles each committed harness (`xtask/src/oracle_harness.c` for WiFi,
    `oracle_harness_geo.c` for geodesy, `oracle_harness_signal.c` for BLE signal,
-   `oracle_harness_wifi_distance.c` for wifi_distance) for `aarch64` with the
-   NDK, linking the oracle;
+   `oracle_harness_wifi_distance.c` for wifi_distance,
+   `oracle_harness_wifi_security.c` for wifi_security/is_enterprise) for
+   `aarch64` with the NDK, linking the oracle;
 4. runs each under `qemu-aarch64 -L <sysroot>`;
 5. compares the output to the committed vectors (`wifi_executed_vectors.tsv`,
    `geodesy_executed_vectors.tsv`, `signal_executed_vectors.tsv`,
-   `wifi_distance_executed_vectors.tsv`) and fails on any drift.
+   `wifi_distance_executed_vectors.tsv`, `wifi_security_executed_vectors.tsv`)
+   and fails on any drift.
 
 To regenerate the committed vectors after an intentional sweep change, run the
 harness the same way and replace the data rows in the `.tsv` (keep the header).
@@ -146,3 +151,9 @@ harness the same way and replace the data rows in the `.tsv` (keep the header).
   a larger tamper fails both. The two tiers are complementary: the tolerance CI
   test catches real regressions, the exact drift gate guarantees the committed
   vectors are faithful to the oracle bit-for-bit.
+- For `wifi_security`/`wifi_is_enterprise` (pure string classifiers, bit-exact,
+  no tolerance), mutating the reconstruction — flipping the `"EAP"` substring,
+  reordering the security precedence (e.g. testing `OWE` before `WPA2`/`RSN`, or
+  dropping the `SAE`/`WPA3` precedence) — fails
+  `tests/oracle_wifi_security_differential.rs` at a named capability string, and
+  relabelling any committed row fails both the CI test and the xtask drift gate.
