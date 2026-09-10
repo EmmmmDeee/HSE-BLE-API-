@@ -12,8 +12,8 @@ use std::fmt;
 use crate::infrastructure::{
     ComparableValue, ObservationSource, ScoreMode, SupportFields, TemporalInterval,
     TemporalRelation, active_weight, corroborated_score, dependency_group, high_base_rate_pairs,
-    mean_temporal_compatibility, pair_key, temporal_relation, temporal_score,
-    unique_observation_ids, values_match,
+    matching_pairs, mean_temporal_compatibility, pair_key_cmp, temporal_relation, temporal_score,
+    unique_observation_ids,
 };
 use crate::{
     Confidence, EdgeType, Entity, EntityType, EvidenceStore, EvidenceValue, Observation,
@@ -1586,9 +1586,9 @@ struct Support {
 }
 
 #[derive(Debug, Clone)]
-struct ComparablePair {
-    left: WebsiteObservation,
-    right: WebsiteObservation,
+struct ComparablePair<'a> {
+    left: &'a WebsiteObservation,
+    right: &'a WebsiteObservation,
     temporal_relation: TemporalRelation,
     base_weight: u16,
 }
@@ -1997,52 +1997,42 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         reports
     }
 
-    fn comparable_pairs(&self, left_website: &str, right_website: &str) -> Vec<ComparablePair> {
-        let left_observations: Vec<_> = self
-            .observations_for_website(left_website)
-            .cloned()
-            .collect();
-        let right_observations: Vec<_> = self
-            .observations_for_website(right_website)
-            .cloned()
-            .collect();
+    fn comparable_pairs(&self, left_website: &str, right_website: &str) -> Vec<ComparablePair<'_>> {
+        let left_observations: Vec<&WebsiteObservation> =
+            self.observations_for_website(left_website).collect();
+        let right_observations: Vec<&WebsiteObservation> =
+            self.observations_for_website(right_website).collect();
         let mut pairs = Vec::new();
-        for left in left_observations {
-            for right in &right_observations {
-                if !values_match(&left, right) {
-                    continue;
-                }
-                let temporal_relation = temporal_relation(
-                    left.timeline(),
-                    right.timeline(),
-                    self.limits.maximum_temporal_gap,
-                );
-                let temporal_score = temporal_score(
-                    temporal_relation,
-                    left.timeline(),
-                    right.timeline(),
-                    self.limits.maximum_temporal_gap,
-                );
-                let factor_weight = (u16::from(left.factors().calibrated_weight())
-                    + u16::from(right.factors().calibrated_weight()))
-                    / 2;
-                let signal_weight = feature_signal_weight(&left, right);
-                let mut base_weight = (factor_weight.saturating_mul(signal_weight) / 100
-                    + u16::from(temporal_score))
-                    / 2;
-                if left.is_high_base_rate() || right.is_high_base_rate() {
-                    base_weight /= 2;
-                }
-                if temporal_relation == TemporalRelation::Disjoint {
-                    base_weight /= 2;
-                }
-                pairs.push(ComparablePair {
-                    left: left.clone(),
-                    right: right.clone(),
-                    temporal_relation,
-                    base_weight,
-                });
+        for (left, right) in matching_pairs(&left_observations, &right_observations) {
+            let temporal_relation = temporal_relation(
+                left.timeline(),
+                right.timeline(),
+                self.limits.maximum_temporal_gap,
+            );
+            let temporal_score = temporal_score(
+                temporal_relation,
+                left.timeline(),
+                right.timeline(),
+                self.limits.maximum_temporal_gap,
+            );
+            let factor_weight = (u16::from(left.factors().calibrated_weight())
+                + u16::from(right.factors().calibrated_weight()))
+                / 2;
+            let signal_weight = feature_signal_weight(left, right);
+            let mut base_weight =
+                (factor_weight.saturating_mul(signal_weight) / 100 + u16::from(temporal_score)) / 2;
+            if left.is_high_base_rate() || right.is_high_base_rate() {
+                base_weight /= 2;
             }
+            if temporal_relation == TemporalRelation::Disjoint {
+                base_weight /= 2;
+            }
+            pairs.push(ComparablePair {
+                left,
+                right,
+                temporal_relation,
+                base_weight,
+            });
         }
         pairs.sort_by(|left, right| {
             left.left
@@ -2053,14 +2043,14 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         pairs
     }
 
-    fn supports(&self, pairs: &[ComparablePair]) -> Vec<Support> {
+    fn supports(&self, pairs: &[ComparablePair<'_>]) -> Vec<Support> {
         let mut supports = Vec::new();
         for pair in pairs {
-            let explanations = explanations_for(&pair.left, &pair.right);
+            let explanations = explanations_for(pair.left, pair.right);
             let group = format!(
                 "{}|{}",
-                dependency_group(&pair.left),
-                dependency_group(&pair.right)
+                dependency_group(pair.left),
+                dependency_group(pair.right)
             );
             let uncertainty = pair
                 .left
@@ -2070,7 +2060,7 @@ impl WebsiteLineageEcosystemAnalysisEngine {
                 .max(pair.right.factors().uncertainty().value());
             for explanation in explanations {
                 let mut weight = pair.base_weight;
-                weight = explanation_weight(explanation, weight, &pair.left, &pair.right);
+                weight = explanation_weight(explanation, weight, pair.left, pair.right);
                 supports.push(Support {
                     explanation,
                     left_observation: pair.left.id().to_owned(),
@@ -2379,8 +2369,7 @@ fn rank_explanation(
         match retained.get(&support.group) {
             Some((previous, previous_weight))
                 if *previous_weight > weight
-                    || (*previous_weight == weight
-                        && pair_key(previous).as_str() <= pair_key(support).as_str()) =>
+                    || (*previous_weight == weight && pair_key_cmp(*previous, support).is_le()) =>
             {
                 collapsed.push(to_pair(support, weight));
             }
@@ -2448,7 +2437,7 @@ fn build_falsification(
         .max_by(|left, right| {
             active_weight(left, ScoreMode::Baseline)
                 .cmp(&active_weight(right, ScoreMode::Baseline))
-                .then_with(|| pair_key(left).cmp(&pair_key(right)))
+                .then_with(|| pair_key_cmp(left, right))
         })
         .map(|support| support.group.clone());
     let without_strongest_support = rank_supports(
@@ -2475,7 +2464,7 @@ fn build_falsification(
             .max_by(|left, right| {
                 active_weight(left, ScoreMode::Baseline)
                     .cmp(&active_weight(right, ScoreMode::Baseline))
-                    .then_with(|| pair_key(left).cmp(&pair_key(right)))
+                    .then_with(|| pair_key_cmp(left, right))
             })
             .map(|support| to_pair(support, active_weight(support, ScoreMode::Baseline)))
     });

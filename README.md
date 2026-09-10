@@ -77,7 +77,12 @@ rejects missing references and exposes trace APIs for:
 
 Raw observations are immutable through the public API: normalization returns a
 new record and cannot replace the captured value. Other engines should write to
-this store rather than maintaining parallel evidence histories.
+this store rather than maintaining parallel evidence histories. Multi-record
+writes go through `EvidenceStore::transaction`, the store's single
+all-or-nothing mechanism (an undo journal that is nested and panic-safe), which
+every engine uses instead of copying the store; a refused engine operation
+therefore leaves the store exactly as it was, at a cost that does not grow
+with the store.
 
 `VerificationEngine` keeps required semantics separate from implementation and
 supports metamorphic relations for invariance, idempotence, commutativity,

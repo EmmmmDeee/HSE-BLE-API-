@@ -1366,9 +1366,9 @@ struct Support {
 }
 
 #[derive(Debug, Clone)]
-struct ComparablePair {
-    left: InfrastructureObservation,
-    right: InfrastructureObservation,
+struct ComparablePair<'a> {
+    left: &'a InfrastructureObservation,
+    right: &'a InfrastructureObservation,
     temporal_relation: TemporalRelation,
     base_weight: u16,
 }
@@ -1763,43 +1763,40 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         reports
     }
 
-    fn comparable_pairs(&self, left_node: &str, right_node: &str) -> Vec<ComparablePair> {
-        let left_observations: Vec<_> = self.observations_for_node(left_node).cloned().collect();
-        let right_observations: Vec<_> = self.observations_for_node(right_node).cloned().collect();
+    fn comparable_pairs(&self, left_node: &str, right_node: &str) -> Vec<ComparablePair<'_>> {
+        let left_observations: Vec<&InfrastructureObservation> =
+            self.observations_for_node(left_node).collect();
+        let right_observations: Vec<&InfrastructureObservation> =
+            self.observations_for_node(right_node).collect();
         let mut pairs = Vec::new();
-        for left in left_observations {
-            for right in &right_observations {
-                if !values_match(&left, right) {
-                    continue;
-                }
-                let temporal_relation = temporal_relation(
-                    left.timeline(),
-                    right.timeline(),
-                    self.limits.maximum_temporal_gap,
-                );
-                let temporal_score = temporal_score(
-                    temporal_relation,
-                    left.timeline(),
-                    right.timeline(),
-                    self.limits.maximum_temporal_gap,
-                );
-                let factor_weight = (u16::from(left.factors().calibrated_weight())
-                    + u16::from(right.factors().calibrated_weight()))
-                    / 2;
-                let mut base_weight = (factor_weight + u16::from(temporal_score)) / 2;
-                if left.is_high_base_rate() || right.is_high_base_rate() {
-                    base_weight /= 2;
-                }
-                if temporal_relation == TemporalRelation::Disjoint {
-                    base_weight /= 2;
-                }
-                pairs.push(ComparablePair {
-                    left: left.clone(),
-                    right: right.clone(),
-                    temporal_relation,
-                    base_weight,
-                });
+        for (left, right) in matching_pairs(&left_observations, &right_observations) {
+            let temporal_relation = temporal_relation(
+                left.timeline(),
+                right.timeline(),
+                self.limits.maximum_temporal_gap,
+            );
+            let temporal_score = temporal_score(
+                temporal_relation,
+                left.timeline(),
+                right.timeline(),
+                self.limits.maximum_temporal_gap,
+            );
+            let factor_weight = (u16::from(left.factors().calibrated_weight())
+                + u16::from(right.factors().calibrated_weight()))
+                / 2;
+            let mut base_weight = (factor_weight + u16::from(temporal_score)) / 2;
+            if left.is_high_base_rate() || right.is_high_base_rate() {
+                base_weight /= 2;
             }
+            if temporal_relation == TemporalRelation::Disjoint {
+                base_weight /= 2;
+            }
+            pairs.push(ComparablePair {
+                left,
+                right,
+                temporal_relation,
+                base_weight,
+            });
         }
         pairs.sort_by(|left, right| {
             left.left
@@ -1810,12 +1807,11 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         pairs
     }
 
-    fn supports(&self, pairs: &[ComparablePair]) -> Vec<Support> {
+    fn supports(&self, pairs: &[ComparablePair<'_>]) -> Vec<Support> {
         let mut supports = Vec::new();
         for pair in pairs {
-            let explanations = explanations_for(&pair.left, &pair.right);
-            let group =
-                dependency_group(&pair.left).to_owned() + "|" + dependency_group(&pair.right);
+            let explanations = explanations_for(pair.left, pair.right);
+            let group = dependency_group(pair.left).to_owned() + "|" + dependency_group(pair.right);
             let uncertainty = pair
                 .left
                 .factors()
@@ -1883,6 +1879,85 @@ pub(crate) fn values_match<O: ComparableValue>(left: &O, right: &O) -> bool {
         (_, Some(right_value)) if left.raw_value() == right_value => true,
         _ => left.raw_value() == right.raw_value(),
     }
+}
+
+/// Orderable projection of an [`EvidenceValue`] used to index observations by
+/// value; `None` for a NaN float, which never matches anything. Signed zeros
+/// share one key so the index never misses a pair that [`values_match`]
+/// would accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ValueKey<'a> {
+    Text(&'a str),
+    Bytes(&'a [u8]),
+    Integer(i128),
+    Float(u64),
+    Boolean(bool),
+    Null,
+}
+
+fn value_key(value: &EvidenceValue) -> Option<ValueKey<'_>> {
+    Some(match value {
+        EvidenceValue::Text(text) => ValueKey::Text(text),
+        EvidenceValue::Bytes(bytes) => ValueKey::Bytes(bytes),
+        EvidenceValue::Integer(integer) => ValueKey::Integer(*integer),
+        EvidenceValue::Float(float) if float.is_nan() => return None,
+        EvidenceValue::Float(float) => {
+            ValueKey::Float(if *float == 0.0 { 0.0f64 } else { *float }.to_bits())
+        }
+        EvidenceValue::Boolean(boolean) => ValueKey::Boolean(*boolean),
+        EvidenceValue::Null => ValueKey::Null,
+    })
+}
+
+/// Every `(left, right)` pair for which [`values_match`] holds, found through
+/// indexes over the right-hand feature keys, normalized values and raw values
+/// instead of a left × right scan. Every candidate the indexes propose is
+/// re-checked with [`values_match`], and the indexes cover each of its
+/// clauses, so the result is exactly the scan's set (in index order).
+pub(crate) fn matching_pairs<'a, O: ComparableValue>(
+    left: &[&'a O],
+    right: &[&'a O],
+) -> Vec<(&'a O, &'a O)> {
+    let mut by_feature: BTreeMap<&'a str, Vec<usize>> = BTreeMap::new();
+    let mut by_normalized: BTreeMap<ValueKey<'a>, Vec<usize>> = BTreeMap::new();
+    let mut by_raw: BTreeMap<ValueKey<'a>, Vec<usize>> = BTreeMap::new();
+    for (index, &observation) in right.iter().enumerate() {
+        if let Some(feature) = observation.feature_key() {
+            by_feature.entry(feature).or_default().push(index);
+        }
+        if let Some(key) = observation.normalized_value().and_then(value_key) {
+            by_normalized.entry(key).or_default().push(index);
+        }
+        if let Some(key) = value_key(observation.raw_value()) {
+            by_raw.entry(key).or_default().push(index);
+        }
+    }
+    let mut pairs = Vec::new();
+    let mut candidates = BTreeSet::new();
+    for &observation in left {
+        candidates.clear();
+        if let Some(indexes) = observation.feature_key().and_then(|f| by_feature.get(f)) {
+            candidates.extend(indexes.iter().copied());
+        }
+        let keys = [
+            observation.normalized_value().and_then(value_key),
+            value_key(observation.raw_value()),
+        ];
+        for key in keys.iter().flatten() {
+            if let Some(indexes) = by_normalized.get(key) {
+                candidates.extend(indexes.iter().copied());
+            }
+            if let Some(indexes) = by_raw.get(key) {
+                candidates.extend(indexes.iter().copied());
+            }
+        }
+        for &index in &candidates {
+            if values_match(observation, right[index]) {
+                pairs.push((observation, right[index]));
+            }
+        }
+    }
+    pairs
 }
 
 pub(crate) fn temporal_relation(
@@ -2130,12 +2205,44 @@ pub(crate) fn active_weight<S: SupportFields>(support: &S, mode: ScoreMode<'_>) 
     }
 }
 
-pub(crate) fn pair_key<S: SupportFields>(support: &S) -> String {
-    format!(
-        "{}:{}",
-        support.left_observation(),
-        support.right_observation()
-    )
+/// Orders two supports by their `"{left}:{right}"` pair key, exactly as the
+/// concatenated strings would compare, without building them: the common
+/// prefix of the left identifiers is compared as slices, and only when one
+/// left identifier is a prefix of the other does the comparison continue
+/// byte by byte across the separator.
+pub(crate) fn pair_key_cmp<S: SupportFields>(left: &S, right: &S) -> std::cmp::Ordering {
+    let (l1, r1) = (
+        left.left_observation().as_bytes(),
+        left.right_observation().as_bytes(),
+    );
+    let (l2, r2) = (
+        right.left_observation().as_bytes(),
+        right.right_observation().as_bytes(),
+    );
+    let shared = l1.len().min(l2.len());
+    match l1[..shared].cmp(&l2[..shared]) {
+        std::cmp::Ordering::Equal if l1.len() == l2.len() => r1.cmp(r2),
+        std::cmp::Ordering::Equal => {
+            let tail = |longer: &[u8], own: &[u8]| -> Vec<u8> {
+                let mut bytes = longer[shared..].to_vec();
+                bytes.push(b':');
+                bytes.extend_from_slice(own);
+                bytes
+            };
+            // One left identifier extends the other: compare the remaining
+            // bytes of each key from the divergence point.
+            if l1.len() < l2.len() {
+                let mut own = vec![b':'];
+                own.extend_from_slice(r1);
+                own.cmp(&tail(l2, r2))
+            } else {
+                let mut other = vec![b':'];
+                other.extend_from_slice(r2);
+                tail(l1, r1).cmp(&other)
+            }
+        }
+        ordering => ordering,
+    }
 }
 
 /// Corroborated score for one explanation: the strongest retained support
@@ -2258,8 +2365,7 @@ fn rank_explanation(
         match retained.get(&support.group) {
             Some((previous, previous_weight))
                 if *previous_weight > weight
-                    || (*previous_weight == weight
-                        && pair_key(previous).as_str() <= pair_key(support).as_str()) =>
+                    || (*previous_weight == weight && pair_key_cmp(*previous, support).is_le()) =>
             {
                 collapsed.push(to_pair(support, weight));
             }
@@ -2327,7 +2433,7 @@ fn build_falsification(
         .max_by(|left, right| {
             active_weight(left, ScoreMode::Baseline)
                 .cmp(&active_weight(right, ScoreMode::Baseline))
-                .then_with(|| pair_key(left).cmp(&pair_key(right)))
+                .then_with(|| pair_key_cmp(left, right))
         })
         .map(|support| support.group.clone());
     let without_strongest_support = rank_supports(
@@ -2476,7 +2582,81 @@ pub type InfrastructureFalsificationReport = CorrelationFalsification;
 
 #[cfg(test)]
 mod tests {
-    use super::{TemporalRelation, corroborated_score, mean_temporal_compatibility};
+    use super::{
+        InfrastructureKind, InfrastructureObservation, TemporalRelation, corroborated_score,
+        matching_pairs, mean_temporal_compatibility, values_match,
+    };
+    use crate::{EvidenceValue, RetrievalMethod, Source, SourceType};
+
+    #[test]
+    fn matching_pairs_equals_the_full_scan_on_random_observations() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let source = Source::new("s", SourceType::Api, RetrievalMethod::Direct).unwrap();
+        let values = [
+            EvidenceValue::Text("a".to_owned()),
+            EvidenceValue::Text("b".to_owned()),
+            EvidenceValue::Bytes(vec![1, 2]),
+            EvidenceValue::Integer(7),
+            EvidenceValue::Float(0.0),
+            EvidenceValue::Float(-0.0),
+            EvidenceValue::Float(f64::NAN),
+            EvidenceValue::Float(2.5),
+            EvidenceValue::Boolean(true),
+            EvidenceValue::Null,
+        ];
+        let observation = |id: usize, next: &mut dyn FnMut() -> u64| {
+            let raw = values[(next() % values.len() as u64) as usize].clone();
+            let mut item = InfrastructureObservation::new(
+                format!("o{id}"),
+                "node",
+                InfrastructureKind::Domain,
+                raw,
+                source.clone(),
+                1,
+            )
+            .unwrap();
+            if next().is_multiple_of(2) {
+                item = item
+                    .with_normalized_value(values[(next() % values.len() as u64) as usize].clone());
+            }
+            if next().is_multiple_of(3) {
+                item = item.with_feature(format!("f{}", next() % 3)).unwrap();
+            }
+            item
+        };
+        for round in 0..300 {
+            let left: Vec<InfrastructureObservation> = (0..(round % 7))
+                .map(|i| observation(i, &mut next))
+                .collect();
+            let right: Vec<InfrastructureObservation> = (0..(round % 5))
+                .map(|i| observation(100 + i, &mut next))
+                .collect();
+            let left_refs: Vec<&InfrastructureObservation> = left.iter().collect();
+            let right_refs: Vec<&InfrastructureObservation> = right.iter().collect();
+            let mut indexed: Vec<(&str, &str)> = matching_pairs(&left_refs, &right_refs)
+                .into_iter()
+                .map(|(l, r)| (l.id(), r.id()))
+                .collect();
+            let mut scanned: Vec<(&str, &str)> = left
+                .iter()
+                .flat_map(|l| {
+                    right
+                        .iter()
+                        .filter(move |r| values_match(l, *r))
+                        .map(move |r| (l.id(), r.id()))
+                })
+                .collect();
+            indexed.sort_unstable();
+            scanned.sort_unstable();
+            assert_eq!(indexed, scanned, "round {round}");
+        }
+    }
 
     #[test]
     fn corroborated_score_caps_corroboration_at_the_headroom_below_100() {

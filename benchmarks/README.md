@@ -64,5 +64,7 @@ Observed 2026-09-10 (Linux x86_64 sandbox, rustc 1.98.0), before and after
 
 The "after" cost is flat with store size, as the journal makes it. One
 `correlate` over the two websites/nodes in that load (16,000 comparable pairs
-at 8,000 records) takes 585 ms / 428 ms and is dominated by ranking, not
-persistence.
+at 8,000 records) took 730 ms / 500 ms with the original left × right
+`values_match` scan and takes 470 ms / 245 ms since decision #69 replaced the
+scan with value indexes (`matching_pairs`); what remains is ranking, not
+persistence or matching.

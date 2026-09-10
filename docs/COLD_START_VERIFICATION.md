@@ -117,7 +117,15 @@ the 47 imports are identical, so the change is symbol-table layout, not
 code — and `verify-android-live` re-ran green. The committed APK was
 regenerated so that a rebuild from the integrated sources reproduces its
 native library byte-for-byte; `classes.dex`, `resources.arsc`, the manifest,
-and both icons are byte-identical to the previous build.
+and both icons are byte-identical to the previous build. Rebuilt once more
+after decision #69 (indexed pair matching in the correlation engines, which
+the JNI library does not call): the native library grew by 32 bytes to
+318,536 (SHA-256 `b6225924…`) with 73 of 56,739 address-normalized
+disassembly lines differing — the size-optimising LTO build inlined shared
+standard-library code slightly differently — while the 21 exports, the
+manifest, `classes.dex` and `resources.arsc` are unchanged and
+`verify-android-live` re-ran green; the committed APK was regenerated again
+for the same reproducibility reason.
 
 This layer proves the **reconstructed** APK builds and packages correctly. It
 does **not** claim differential parity with
