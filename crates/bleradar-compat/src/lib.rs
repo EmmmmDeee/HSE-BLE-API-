@@ -126,12 +126,12 @@ pub const CONTRACTS: &[ContractStatus] = &[
     ContractStatus {
         name: "ble_distance",
         status: ParityStatus::SourceAnalog,
-        evidence: "oracle fixes calibration at -59/2.4, ignores tx power, and clamps at 100 m",
+        evidence: "executed-oracle differential under qemu-aarch64 (docs/ORACLE_DIFFERENTIAL.md): the source's calibration formula reproduces the oracle to machine precision (<1e-12 rel, measured 2e-16) in the valid region with fixed -59 dBm/2.4; the oracle additionally clamps to [0.1, 100] m, ignores tx_power, and treats rssi>=0 as a 100 m sentinel, which the raw source model does not (oracle_signal_differential.rs)",
     },
     ContractStatus {
         name: "proximity_label",
         status: ParityStatus::SourceAnalog,
-        evidence: "oracle accepts distance while the source analogue accepts RSSI",
+        evidence: "executed-oracle differential under qemu-aarch64 (docs/ORACLE_DIFFERENTIAL.md): the oracle's distance banding is <1.5 immediate / <5 near / <15 mid / else far, wider than the source's proximity_label_from_distance_m (<=1 / <=2 / <=5); the source's proximity_label also takes RSSI not distance (oracle_signal_differential.rs)",
     },
     ContractStatus {
         name: "ui_radar_points",

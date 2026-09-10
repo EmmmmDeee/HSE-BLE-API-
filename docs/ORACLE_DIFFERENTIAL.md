@@ -32,6 +32,8 @@ sweep):
 | `wifi_frequency_to_channel` | `(Option<i32>) -> Option<i32>` | source reproduces every executed-oracle output over its `u16` domain, incl. the 6 GHz band (bit-exact → `DifferentiallyVerified`) |
 | `haversine_m` | `(f64,f64,f64,f64) -> f64` | source matches the executed oracle to <1e-6 m over 308 pairs (transcendental libm rounding; `SourceAnalog` coverage) |
 | `bearing_deg` | `(f64,f64,f64,f64) -> f64` | source matches the executed oracle to <1e-8 deg (circular) over 308 pairs (transcendental libm rounding; `SourceAnalog` coverage) |
+| `ble_distance` | `(i32, Option<i32>) -> f64` | source calibration formula matches the executed oracle to 2e-16 rel in the valid region; the oracle's `[0.1,100]` m clamp + `rssi>=0`→100 sentinel are documented, locked divergences (`SourceAnalog`) |
+| `proximity_label` | `(f64) -> String` | oracle bands `<1.5`/`<5`/`<15` are wider than the source's `<=1`/`<=2`/`<=5`; the banding gap is documented and locked (`SourceAnalog`) |
 
 The one intentional divergence is domain width: the oracle accepts signed `i32`
 (and an `Option` frequency), the reconstruction a narrower `u16`. Outside the
@@ -106,11 +108,12 @@ The command:
    `debugfs` into a temporary Bionic sysroot (no root, no loopback mount) —
    or uses `BIONIC_SYSROOT` if you exported a prepared one;
 3. compiles each committed harness (`xtask/src/oracle_harness.c` for WiFi,
-   `xtask/src/oracle_harness_geo.c` for geodesy) for `aarch64` with the NDK,
-   linking the oracle;
+   `oracle_harness_geo.c` for geodesy, `oracle_harness_signal.c` for BLE signal)
+   for `aarch64` with the NDK, linking the oracle;
 4. runs each under `qemu-aarch64 -L <sysroot>`;
 5. compares the output to the committed vectors (`wifi_executed_vectors.tsv`,
-   `geodesy_executed_vectors.tsv`) and fails on any drift.
+   `geodesy_executed_vectors.tsv`, `signal_executed_vectors.tsv`) and fails on
+   any drift.
 
 To regenerate the committed vectors after an intentional sweep change, run the
 harness the same way and replace the data rows in the `.tsv` (keep the header).

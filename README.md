@@ -62,8 +62,12 @@ executed-oracle output over its input domain (`docs/ORACLE_DIFFERENTIAL.md`,
 reconstruction matches the executed oracle to under a micrometre / nanodegree
 over 308 coordinate pairs — but stay `SourceAnalog` because Bionic and host
 `libm` are not bit-identical for transcendentals (coverage, not a bit-exact
-promotion). The other pure contracts (`ble_distance`, `proximity_label`) remain
-`SourceAnalog` documented divergences.
+promotion). The core BLE signal contracts (`ble_distance`, `proximity_label`)
+also have an executed-oracle differential: the reconstruction's distance
+calibration formula matches the oracle to machine precision in the valid region,
+while the oracle's `[0.1,100]` m clamp + `rssi>=0` sentinel and its wider
+proximity bands (`<1.5`/`<5`/`<15` vs the source's `<=1`/`<=2`/`<=5`) are
+documented, locked `SourceAnalog` divergences.
 
 See `docs/VERIFIED_RUNTIME_TOPOLOGY.md`,
 `docs/BEHAVIORAL_CONTRACT.md`, and `docs/RUST_TARGET_ARCHITECTURE.md` before
