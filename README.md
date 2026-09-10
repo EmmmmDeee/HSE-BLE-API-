@@ -29,7 +29,8 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
   Code/Maidenhead), and the canonical tag vocabulary. See
   `docs/HSE_IMPORT.md`.
 - `crates/bleradar-compat` — complete native ABI runtime/reachability census plus a separate source-replacement parity registry.
-- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, live Java→JNI→Rust verification, and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
+- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
+- `android/app/src/main` — the hand-built Android radar app that consumes `bleradar-core` through `crates/bleradar-jni`; its design record is `docs/ANDROID_APP.md`.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
 - `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, and verification records.
 - `benchmarks/` — benchmark harness notes.
@@ -157,7 +158,8 @@ of which measures actual round-over-round yield.
 
 - Rust toolchain **1.98.0** with `clippy` and `rustfmt` — pinned by `rust-toolchain.toml`; `rustup` installs it automatically on first `cargo` invocation in the repo.
 - No third-party crates in the shipped workspace: it is intentionally dependency-free, and CI fails if that changes without a recorded decision. `xtask/` (developer tooling) and the vendored advisory database are outside that scope; see `xtask/Cargo.toml`.
-- `cargo-audit` and `cargo-deny` on `PATH` to run those two specific gates (`cargo install cargo-audit cargo-deny`); every other gate, including `cargo xtask gates` itself, needs nothing beyond the pinned toolchain.
+- `cargo-audit` and `cargo-deny` on `PATH` to run those two specific gates, at the versions CI pins (`cargo install --locked cargo-audit@0.22.2 cargo-deny@0.20.2`; bump them together with `.github/workflows/gates.yml`); every other gate, including `cargo xtask gates` itself, needs nothing beyond the pinned toolchain. The JNI export-contract gate inside `gates` reads the host-built `libbleradar_jni.so` with the in-tree ELF64 reader, so `gates` is proven on Linux hosts (what CI runs).
+- A JDK (`javac`/`java`) only for `cargo xtask verify-jni-live`, and an Android SDK/NDK only for `cargo xtask build-apk`/`verify-android-live` (see `docs/ANDROID_APP.md`).
 
 ## Installation
 
@@ -197,7 +199,9 @@ cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
-Or run every gate — the above plus the parity-report drift check, the
+Or run every gate — the above plus the JNI export-contract check (every
+`static native` in `NativeRadar.java` ↔ exactly one `Java_*` export in the
+built `bleradar-jni`, no orphans), the parity-report drift check, the
 zero-third-party-dependency policy check, the oracle-integrity check, and
 `cargo audit`/`cargo deny` against the vendored advisory database — with the
 single local gate runner:
@@ -207,8 +211,11 @@ cargo xtask gates
 ```
 
 These same gates run on every push and pull request via
-`.github/workflows/gates.yml`. Autonomous maintenance sessions operate under
-`docs/AUTONOMOUS_ENGINE.md`.
+`.github/workflows/gates.yml`, followed by the live JVM → JNI → Rust proof
+(`cargo xtask verify-jni-live`) on a pinned Temurin 21 JDK; the workflow pins
+`cargo-audit`/`cargo-deny` to exact versions and caches their binaries, so a
+run is reproducible and does not rebuild them from source every time.
+Autonomous maintenance sessions operate under `docs/AUTONOMOUS_ENGINE.md`.
 
 ## Live JNI proof
 
@@ -216,11 +223,16 @@ These same gates run on every push and pull request via
 cargo xtask verify-jni-live
 ```
 
-This compiles the host `bleradar-jni` library, compiles the repository's
-`android/app/src/main/java/com/hse/bleradar/NativeRadar.java`, then executes a
+This compiles the host `bleradar-jni` library, verifies its export contract
+against the repository's
+`android/app/src/main/java/com/hse/bleradar/NativeRadar.java`
+(`cargo xtask check-jni-contract`), compiles that façade, then executes a
 real JVM → JNI → Rust smoke harness. It proves both the failure path (wrong
-library path yields `UnsatisfiedLinkError`) and the success path (library loads,
-ABI version matches, and JNI calls return the expected values).
+library path yields `UnsatisfiedLinkError`) and the success path (library
+loads, ABI version matches, every declared native is resolved and invoked by
+the JVM through reflection with the count cross-checked against the Java
+source, and JNI calls return the expected values). CI runs it on every push
+and pull request.
 
 ## Strongest current Android live proof
 
@@ -232,8 +244,10 @@ This runs the strongest end-to-end proof currently possible in this sandbox:
 the live JVM → JNI → Rust proof above, a full `cargo xtask build-apk`, then
 post-build verification that the generated APK contains the required manifest,
 DEX, and JNI library entries, that the built DEX defines the critical Android
-classes, and that the cross-compiled native library exports the required JNI
-entrypoints.
+classes, and that the cross-compiled native library exports exactly the JNI
+entrypoints `NativeRadar.java` declares (the same export-contract rule as
+`gates`, applied to the `aarch64-linux-android` build). Design decisions for
+the app itself are recorded in `docs/ANDROID_APP.md`.
 
 ## Parity report
 
@@ -259,6 +273,10 @@ cargo xtask check-oracle-integrity
 cargo xtask apk-inventory <apk>
 cargo xtask native-abi <lib.so>
 cargo xtask dex-classes <classes.dex>
+cargo xtask check-jni-contract [lib.so]   # NativeRadar.java natives ↔ Java_* exports, 1:1 (host build by default)
+cargo xtask verify-jni-live        # real JVM → JNI → Rust proof (needs a JDK)
+cargo xtask build-apk              # cross-compile + package + sign the Android app (needs SDK/NDK)
+cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/export checks
 cargo xtask audit                  # cargo audit, offline, vendored advisory db
 cargo xtask deny                   # cargo deny check, offline, vendored advisory db
 cargo xtask gates                  # every gate, one command
@@ -286,3 +304,4 @@ Read, in order:
 8. `docs/FINAL_REPORT.md`
 9. `docs/REQUIREMENTS_LEDGER.md`
 10. `docs/COLD_START_VERIFICATION.md`
+11. `docs/ANDROID_APP.md`

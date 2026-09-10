@@ -38,6 +38,16 @@ workspace's `Cargo.lock` contains zero third-party crates, so the advisory
 surface is empty, and both tools confirm it rather than leaving the command
 unrun. See `docs/AUTONOMOUS_DECISIONS.md` #28.
 
+Since 2026-09-10 (`docs/AUTONOMOUS_DECISIONS.md` #54–#55) `cargo xtask gates`
+also runs the JNI export-contract check (`cargo xtask check-jni-contract`:
+every `static native` in `NativeRadar.java` ↔ exactly one `Java_*` export in
+the host-built `libbleradar_jni.so`, no orphans; observed 21 ↔ 21, exact
+match), and CI additionally runs `cargo xtask verify-jni-live` on a pinned
+Temurin 21 JDK with `cargo-audit` 0.22.2 / `cargo-deny` 0.20.2 pinned and
+cached. Observed on this host (rustc 1.98.0, OpenJDK 21.0.10): `gates` exit 0
+in 11 s with warm caches; `verify-jni-live` failure path
+`UnsatisfiedLinkError`, success path `linked-natives=21`, `abi=7`.
+
 ## Layer 3 — reconstructed Android APK live build (executed 2026-09-09)
 
 The hand-built radar app under `android/app/src/main` is packaged without
@@ -58,8 +68,8 @@ build-tools 37.0.0, NDK 27.3.13750724, platform android-36):
 | Output `HSE-BLE-Radar-arm64-v1.0.0.apk` | **Validated** (installable package artifact) |
 | Required APK entries (manifest, classes.dex, arm64 `.so`, resources.arsc) | **Validated** |
 | Required DEX classes (MainActivity, NativeRadar, RadarScanService, BleScanEngine) | **Validated** |
-| Required JNI exports (20 `Java_com_hse_bleradar_NativeRadar_*`) match `NativeRadar.java` natives 1:1 | **Validated** |
-| `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=6) |
+| JNI export contract derived from `NativeRadar.java` (`check-jni-contract`: 21 `static native` ↔ 21 `Java_com_hse_bleradar_NativeRadar_*` exports, no orphans) | **Validated** (2026-09-10, against the committed APK's `lib/arm64-v8a/libbleradar_jni.so`, SHA-256 `20e49084…d3aeb5`) |
+| `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=7, `linked-natives=21`, 2026-09-10; now also run by CI) |
 | On-device install / BLE scan / original-oracle differential | **Unverified** — no emulator, physical device, or original signing key (MIG-003) |
 
 Package identity from live `aapt dump badging`:

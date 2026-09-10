@@ -12,6 +12,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Pinned so the advisory/policy gates are reproducible run to run: the
+  # advisory *database* they read is already vendored and pinned under
+  # vendor/rustsec-advisory-db/, so the *tools* are pinned to match. Bump
+  # deliberately in a reviewed change; the cache key below follows the values.
+  CARGO_AUDIT_VERSION: 0.22.2
+  CARGO_DENY_VERSION: 0.20.2
+
 jobs:
   gates:
     runs-on: ubuntu-latest
@@ -19,7 +27,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Install cargo-audit and cargo-deny
-        run: cargo install --locked cargo-audit cargo-deny
+      - name: Restore pinned cargo-audit and cargo-deny binaries
+        id: cargo-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/bin/cargo-deny
+          key: cargo-tools-${{ runner.os }}-${{ runner.arch }}-audit-${{ env.CARGO_AUDIT_VERSION }}-deny-${{ env.CARGO_DENY_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Build pinned cargo-audit and cargo-deny (cache miss only)
+        if: steps.cargo-tools.outputs.cache-hit != 'true'
+        run: cargo install --locked "cargo-audit@${CARGO_AUDIT_VERSION}" "cargo-deny@${CARGO_DENY_VERSION}"
+      - name: Install pinned JDK for the live JVM → JNI → Rust proof
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - name: Run every gate via the local gate runner
         run: cargo xtask gates
+      - name: Live JVM → JNI → Rust proof against NativeRadar.java
+        run: cargo xtask verify-jni-live
