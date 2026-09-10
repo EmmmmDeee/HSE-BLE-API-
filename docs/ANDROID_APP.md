@@ -6,7 +6,7 @@ This is the design record that the app's own sources cite
 tree evidence it rests on, so the app can be extended without re-deriving the
 decisions. It was cited from PR #13 (commit `ea842c1`) onward but never
 committed on any branch until 2026-09-10 (`docs/AUTONOMOUS_DECISIONS.md`
-decision #54), which is why the earlier Android decisions are recorded here
+decision #56), which is why the earlier Android decisions are recorded here
 retroactively rather than in the append-only log's 2026-09-09 entries.
 
 ## What it is, and what it is not
