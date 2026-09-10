@@ -207,6 +207,75 @@ pub fn wifi_band(mhz: u16) -> WifiBand {
     }
 }
 
+// wifi_distance calibration, recovered bit-for-bit from the executed oracle
+// (docs/ORACLE_DIFFERENTIAL.md): a log-distance path-loss estimate with a folded
+// free-space/TX-power constant and a path-loss exponent of 2.7.
+const WIFI_DISTANCE_FSPL_CONST: f64 = 47.55;
+const WIFI_DISTANCE_PATH_LOSS_DENOM: f64 = 27.0; // 10 * path-loss exponent (2.7)
+// Plausible WiFi channel center-frequency window (MHz). The shipped contract
+// substitutes the 2.4 GHz channel-6 default for any frequency outside it.
+const WIFI_DISTANCE_FREQ_MIN_MHZ: i32 = 2000;
+const WIFI_DISTANCE_FREQ_MAX_MHZ: i32 = 7199;
+const WIFI_DISTANCE_DEFAULT_FREQ_MHZ: i32 = 2437;
+// Output range (metres): the shipped contract clamps the estimate to [0.1, 400]
+// and treats a non-negative RSSI as an invalid/implausibly-strong reading that
+// saturates to the far clamp.
+const WIFI_DISTANCE_MIN_M: f64 = 0.1;
+const WIFI_DISTANCE_MAX_M: f64 = 400.0;
+
+/// Estimated distance in metres to a Wi-Fi transmitter from its RSSI (dBm) and
+/// channel center frequency (MHz), reproducing the shipped native `wifi_distance`
+/// contract exactly.
+///
+/// The estimate is `10^((47.55 - 20·log10(f) - rssi) / 27)` — a log-distance
+/// path-loss model with a path-loss exponent of 2.7 — subject to the shipped
+/// contract's three guards, each recovered from the executed oracle
+/// (`docs/ORACLE_DIFFERENTIAL.md`):
+///
+/// * a non-negative `rssi_dbm` is treated as invalid/implausibly strong and
+///   saturates to the [`WIFI_DISTANCE_MAX_M`](self) far clamp (400 m);
+/// * a `frequency_mhz` outside the plausible `2000..=7199` MHz window falls back
+///   to the 2437 MHz (channel 6) default before the estimate is computed;
+/// * the estimate is clamped to `[0.1, 400]` m.
+///
+/// The reconstruction accepts the oracle's full `i32` domain on both arguments,
+/// so it reproduces the executed oracle with no domain divergence; only the
+/// transcendental `log10`/`powf` step differs from Bionic `libm` by last-bit
+/// rounding (verified to `<1e-12` relative — `oracle_wifi_distance_differential.rs`).
+///
+/// # Examples
+/// ```
+/// use bleradar_core::wifi_distance;
+/// // A non-negative RSSI is invalid and saturates to the 400 m far clamp.
+/// assert_eq!(wifi_distance(0, 2412), 400.0);
+/// // A very weak signal saturates to the same far clamp.
+/// assert_eq!(wifi_distance(-130, 2412), 400.0);
+/// // A strong 6 GHz reading saturates to the 0.1 m near clamp.
+/// assert_eq!(wifi_distance(-1, 7115), 0.1);
+/// // An out-of-band frequency falls back to the 2437 MHz (channel 6) default.
+/// assert_eq!(wifi_distance(-70, 100), wifi_distance(-70, 2437));
+/// // In the valid region the estimate grows as the signal weakens.
+/// assert!(wifi_distance(-80, 2437) > wifi_distance(-50, 2437));
+/// ```
+#[must_use]
+pub fn wifi_distance(rssi_dbm: i32, frequency_mhz: i32) -> f64 {
+    if rssi_dbm >= 0 {
+        return WIFI_DISTANCE_MAX_M;
+    }
+    let effective_mhz =
+        if (WIFI_DISTANCE_FREQ_MIN_MHZ..=WIFI_DISTANCE_FREQ_MAX_MHZ).contains(&frequency_mhz) {
+            frequency_mhz
+        } else {
+            WIFI_DISTANCE_DEFAULT_FREQ_MHZ
+        };
+    let exponent =
+        (WIFI_DISTANCE_FSPL_CONST - 20.0 * f64::from(effective_mhz).log10() - f64::from(rssi_dbm))
+            / WIFI_DISTANCE_PATH_LOSS_DENOM;
+    10_f64
+        .powf(exponent)
+        .clamp(WIFI_DISTANCE_MIN_M, WIFI_DISTANCE_MAX_M)
+}
+
 /// Unsupported reconstructed behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatibilityGap {

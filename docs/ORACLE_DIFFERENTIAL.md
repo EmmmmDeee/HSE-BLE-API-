@@ -22,9 +22,10 @@ Android **Bionic** runtime, and its outputs read back through the UniFFI ABI.
 
 ## What is verified
 
-The WiFi channel↔frequency contracts (bit-exact, over a comprehensive input
-sweep) and the pure geodesy contracts (physical-tolerance, over a 308-pair
-sweep):
+Every pure oracle contract that has a reconstruction analogue — the WiFi
+channel↔frequency and band contracts (bit-exact), the geodesy and `wifi_distance`
+contracts (transcendental tolerance), and the BLE signal contracts (verified
+formula with locked divergences):
 
 | Contract | Oracle signature (from `UNIFFI_META_*`) | Result |
 | --- | --- | --- |
@@ -35,11 +36,15 @@ sweep):
 | `bearing_deg` | `(f64,f64,f64,f64) -> f64` | source matches the executed oracle to <1e-8 deg (circular) over 308 pairs (transcendental libm rounding; `SourceAnalog` coverage) |
 | `ble_distance` | `(i32, Option<i32>) -> f64` | source calibration formula matches the executed oracle to 2e-16 rel in the valid region; the oracle's `[0.1,100]` m clamp + `rssi>=0`→100 sentinel are documented, locked divergences (`SourceAnalog`) |
 | `proximity_label` | `(f64) -> String` | oracle bands `<1.5`/`<5`/`<15` are wider than the source's `<=1`/`<=2`/`<=5`; the banding gap is documented and locked (`SourceAnalog`) |
+| `wifi_distance` | `(i32, i32) -> f64` | reconstructed from the executed oracle (previously unmapped); `10^((47.55−20·log10(f)−rssi)/27)` with an `rssi>=0`→400 m sentinel, a `2000..=7199` MHz plausible-frequency window defaulting to 2437 MHz outside it, and a `[0.1,400]` m clamp; the source replicates all of it over the full `i32` domain (no behavioural or domain divergence) and matches the executed oracle to `<1e-6` relative — transcendental `log10`/`powf` rounding, observed max 2e-15; `SourceAnalog` like the geodesy contracts |
 
-The one intentional divergence is domain width: the oracle accepts signed `i32`
-(and an `Option` frequency), the reconstruction a narrower `u16`. Outside the
-`u16` domain the executed oracle returns `None`, which the differential asserts
-explicitly. Both contracts are consequently `ParityStatus::DifferentiallyVerified`.
+For the WiFi channel↔frequency contracts the one intentional divergence is domain
+width: the oracle accepts signed `i32` (and an `Option` frequency), the
+reconstruction a narrower `u16`. Outside the `u16` domain the executed oracle
+returns `None`, which the differential asserts explicitly. Those contracts are
+consequently `ParityStatus::DifferentiallyVerified`. (`wifi_distance` instead
+takes the oracle's full `i32` domain, so it has no domain divergence — see its
+row above.)
 
 The pure geodesy contracts `haversine_m` and `bearing_deg` are also
 executed-oracle differentials, over 308 coordinate pairs (edge cases + a
@@ -58,11 +63,15 @@ a bit bound).
 ## Two tiers
 
 1. **Baked ground truth + CI test (always runs).**
-   `cargo xtask oracle-differential` writes each executed-oracle result to
-   `crates/bleradar-compat/tests/oracle/wifi_executed_vectors.tsv` (committed,
-   with the provenance header below). `tests/oracle_differential.rs` replays
-   that file against the reconstruction with no emulator, so it runs in ordinary
-   CI (`cargo test` / `cargo xtask gates`).
+   `cargo xtask oracle-differential` writes each executed-oracle result to a
+   committed vectors file under `crates/bleradar-compat/tests/oracle/`
+   (`wifi_executed_vectors.tsv`, `geodesy_executed_vectors.tsv`,
+   `signal_executed_vectors.tsv`, `wifi_distance_executed_vectors.tsv`), each
+   with the provenance header below. The matching CI tests
+   (`oracle_differential.rs`, `oracle_geodesy_differential.rs`,
+   `oracle_signal_differential.rs`, `oracle_wifi_distance_differential.rs`)
+   replay those files against the reconstruction with no emulator, so they run
+   in ordinary CI (`cargo test` / `cargo xtask gates`).
 
 2. **Live regeneration + drift gate (needs the runtime).**
    `cargo xtask oracle-differential` re-extracts the oracle, rebuilds the
@@ -109,12 +118,13 @@ The command:
    `debugfs` into a temporary Bionic sysroot (no root, no loopback mount) —
    or uses `BIONIC_SYSROOT` if you exported a prepared one;
 3. compiles each committed harness (`xtask/src/oracle_harness.c` for WiFi,
-   `oracle_harness_geo.c` for geodesy, `oracle_harness_signal.c` for BLE signal)
-   for `aarch64` with the NDK, linking the oracle;
+   `oracle_harness_geo.c` for geodesy, `oracle_harness_signal.c` for BLE signal,
+   `oracle_harness_wifi_distance.c` for wifi_distance) for `aarch64` with the
+   NDK, linking the oracle;
 4. runs each under `qemu-aarch64 -L <sysroot>`;
 5. compares the output to the committed vectors (`wifi_executed_vectors.tsv`,
-   `geodesy_executed_vectors.tsv`, `signal_executed_vectors.tsv`) and fails on
-   any drift.
+   `geodesy_executed_vectors.tsv`, `signal_executed_vectors.tsv`,
+   `wifi_distance_executed_vectors.tsv`) and fails on any drift.
 
 To regenerate the committed vectors after an intentional sweep change, run the
 harness the same way and replace the data rows in the `.tsv` (keep the header).
@@ -127,3 +137,12 @@ harness the same way and replace the data rows in the `.tsv` (keep the header).
 - Tampering a committed vector makes both the CI test fail and
   `cargo xtask oracle-differential` report the first drifting row (the executed
   oracle disagrees with the tampered value).
+- For `wifi_distance`, mutating the reconstruction's formula constant
+  (`47.55`→`48.55`), frequency window (`2000`→`2001`) or default (`2437`→`2438`)
+  each fails `tests/oracle_wifi_distance_differential.rs` (relative 0.089 /
+  0.136 / 3e-4). Because its formula region is matched to a `1e-12` relative
+  tolerance (transcendental `libm`), a *one-ULP* vector tamper is correctly
+  absorbed by the CI test but still caught by the byte-exact xtask drift gate;
+  a larger tamper fails both. The two tiers are complementary: the tolerance CI
+  test catches real regressions, the exact drift gate guarantees the committed
+  vectors are faithful to the oracle bit-for-bit.

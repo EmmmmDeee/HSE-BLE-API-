@@ -69,7 +69,13 @@ also have an executed-oracle differential: the reconstruction's distance
 calibration formula matches the oracle to machine precision in the valid region,
 while the oracle's `[0.1,100]` m clamp + `rssi>=0` sentinel and its wider
 proximity bands (`<1.5`/`<5`/`<15` vs the source's `<=1`/`<=2`/`<=5`) are
-documented, locked `SourceAnalog` divergences.
+documented, locked `SourceAnalog` divergences. `wifi_distance` — another
+previously-unmapped shipped contract — is reconstructed faithfully from the
+executed oracle (the log-distance formula, an `rssi>=0`→400 m sentinel, a
+`2000..=7199` MHz plausible-frequency window defaulting to 2437 MHz, and a
+`[0.1,400]` m clamp) with no behavioural or domain divergence, and stays
+`SourceAnalog` because its `log10`/`powf` step is transcendental (matched to
+`<1e-12` relative, observed max 2e-15).
 
 See `docs/VERIFIED_RUNTIME_TOPOLOGY.md`,
 `docs/BEHAVIORAL_CONTRACT.md`, and `docs/RUST_TARGET_ARCHITECTURE.md` before

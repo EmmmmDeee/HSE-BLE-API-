@@ -192,13 +192,16 @@ fn wifi_frequency_oracle_parity_removal_gate() {
 fn no_source_analogue_is_mislabeled_as_differentially_verified() {
     // The WiFi channel<->frequency contracts were promoted to
     // DifferentiallyVerified once the immutable oracle was executed under
-    // qemu-aarch64 (oracle_differential.rs); the rest still lack an
-    // executed-oracle differential and must remain SourceAnalog.
+    // qemu-aarch64 (oracle_differential.rs), because they are integer-exact. The
+    // rest are matched to the executed oracle only within a tolerance
+    // (transcendental libm rounding) or carry documented divergences, so they
+    // must remain SourceAnalog.
     for name in [
         "bearing_deg",
         "haversine_m",
         "ble_distance",
         "proximity_label",
+        "wifi_distance",
     ] {
         assert_ne!(
             parity_status(name),

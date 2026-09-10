@@ -24,7 +24,7 @@ Generated from `docs/NATIVE_ABI.txt` and the semantic compatibility/runtime regi
 ## Source-replacement parity frontier
 
 - Differentially verified: **3**
-- Source analogue only: **4**
+- Source analogue only: **5**
 - Oracle only: **5**
 - Blocked: **7**
 
@@ -35,6 +35,7 @@ Registered source-replacement contracts:
 - `wifi_channel_to_frequency`
 - `wifi_frequency_to_channel`
 - `wifi_band`
+- `wifi_distance`
 - `ble_distance`
 - `proximity_label`
 - `ui_radar_points`
