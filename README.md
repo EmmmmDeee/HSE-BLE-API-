@@ -283,6 +283,7 @@ cargo xtask gates                  # every gate, one command
 cargo run --release -p bleradar-jni --example scan_result_cost   # host hot-path baseline, see benchmarks/README.md
 BLERADAR_CAMPAIGN_ITERATIONS=5000000 cargo test -p bleradar-core --release --test falsification_campaign   # scale the randomised campaign
 BLERADAR_EVIDENCE_CAMPAIGN_SEQUENCES=20000 cargo test -p bleradar-core --release --test evidence_campaign   # scale the evidence-store campaign
+BLERADAR_OSINT_CAMPAIGN_SEQUENCES=50000 cargo test -p bleradar-core --release --test osint_campaign   # scale the OSINT engine campaign
 ```
 
 ## Distribution packaging
