@@ -21,24 +21,27 @@ public final class BootCompletedReceiver extends BroadcastReceiver {
         if (!Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) {
             return;
         }
-        Log.d(TAG, "Device boot completed; restoring pending update retry alarms");
+        Log.d(TAG, "Device boot completed; restoring pending updates");
 
-        // Check if there was a pending retry (retry count > 0)
         SharedPreferences prefs = context.getSharedPreferences("UpdateCheckService", Context.MODE_PRIVATE);
         int retryCount = prefs.getInt("retryCount", 0);
-        long lastRetryTime = prefs.getLong("lastRetryTime", 0);
+        long activeDownloadId = prefs.getLong("activeDownloadId", -1);
 
-        if (retryCount > 0 && lastRetryTime > 0) {
-            Log.d(TAG, "Found pending retry count=" + retryCount + "; rescheduling");
-            // Trigger an update check to restart the retry cycle
-            // This will re-evaluate the retry backoff and reschedule appropriately
-            Intent checkIntent = new Intent(context, UpdateCheckService.class);
-            checkIntent.putExtra("is_retry", true);
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                context.startForegroundService(checkIntent);
-            } else {
-                context.startService(checkIntent);
-            }
+        // Always start the service to restore in-progress downloads
+        // If there's a pending retry, mark it as a retry invocation so it skips the daily throttle
+        Intent serviceIntent = new Intent(context, UpdateCheckService.class);
+        if (retryCount > 0) {
+            serviceIntent.putExtra("is_retry", true);
+            Log.d(TAG, "Found pending retry count=" + retryCount + "; triggering as retry");
+        }
+        if (activeDownloadId != -1) {
+            Log.d(TAG, "Found in-progress download " + activeDownloadId + "; restoring receiver");
+        }
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            context.startForegroundService(serviceIntent);
+        } else {
+            context.startService(serviceIntent);
         }
     }
 }
