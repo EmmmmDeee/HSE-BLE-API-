@@ -1,15 +1,25 @@
 package com.hse.bleradar;
 
+import android.app.DownloadManager;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
+import android.net.Uri;
 import android.os.BatteryManager;
+import android.os.Build;
 import android.os.IBinder;
 import android.os.StatFs;
 import android.util.Log;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
 /**
  * Background service that periodically checks for app updates using the
@@ -41,11 +51,14 @@ public final class UpdateCheckService extends Service {
     private static final long STORAGE_HEADROOM_BYTES = 100 * 1024 * 1024; // 100 MiB
 
     private UpdateManager updateManager;
+    private DownloadManager downloadManager;
+    private long activeDownloadId = -1;
 
     @Override
     public void onCreate() {
         super.onCreate();
         updateManager = new UpdateManager(this);
+        downloadManager = getSystemService(DownloadManager.class);
         Log.d(TAG, "UpdateCheckService created");
     }
 
@@ -110,11 +123,7 @@ public final class UpdateCheckService extends Service {
 
         // Download and verify the APK
         Log.d(TAG, "Downloading update from: " + manifest.getUrl());
-        // TODO: implement DownloadManager integration
-        // TODO: verify SHA-256 on download complete
-        // TODO: hand to PackageInstaller
-
-        stopSelf(startId);
+        downloadAndInstallUpdate(manifest, startId);
         return START_NOT_STICKY;
     }
 
@@ -141,6 +150,154 @@ public final class UpdateCheckService extends Service {
     public IBinder onBind(Intent intent) {
         // Not bound; this is a started service only
         return null;
+    }
+
+    /**
+     * Initiates a download of the update APK via DownloadManager, then verifies
+     * and installs it when complete.
+     */
+    private void downloadAndInstallUpdate(ReleaseManifest manifest, int startId) {
+        if (downloadManager == null) {
+            Log.w(TAG, "DownloadManager unavailable");
+            stopSelf(startId);
+            return;
+        }
+
+        try {
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(manifest.getUrl()));
+            request.setTitle("BLE Radar Update");
+            request.setDescription("Downloading update...");
+            request.setDestinationInExternalFilesDir(this, null, "update.apk");
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+
+            activeDownloadId = downloadManager.enqueue(request);
+            Log.d(TAG, "Enqueued download with ID " + activeDownloadId);
+
+            // Register broadcast receiver for download completion
+            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, startId);
+            IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(receiver, filter);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to start download", e);
+            stopSelf(startId);
+        }
+    }
+
+    /**
+     * Verifies the SHA-256 of a downloaded file.
+     */
+    private String computeSha256(File file) throws IOException, NoSuchAlgorithmException {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] buffer = new byte[8192];
+        try (FileInputStream fis = new FileInputStream(file)) {
+            int read;
+            while ((read = fis.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+        }
+        byte[] hash = digest.digest();
+        StringBuilder sb = new StringBuilder();
+        for (byte b : hash) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Installs the verified APK using PackageInstaller (Android 5+) or
+     * Intent-based fallback (older versions).
+     */
+    private void installApk(File apkFile) {
+        try {
+            Intent install = new Intent(Intent.ACTION_VIEW);
+            install.setData(Uri.fromFile(apkFile));
+            install.setType("application/vnd.android.package-archive");
+            install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(install);
+            Log.d(TAG, "Handed APK to system installer");
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to install APK", e);
+        }
+    }
+
+    /**
+     * Broadcast receiver that handles download completion.
+     */
+    private class DownloadCompletionReceiver extends BroadcastReceiver {
+        private final ReleaseManifest manifest;
+        private final int startId;
+
+        DownloadCompletionReceiver(ReleaseManifest manifest, int startId) {
+            this.manifest = manifest;
+            this.startId = startId;
+        }
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            long downloadId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+            if (downloadId != activeDownloadId) {
+                return; // Not our download
+            }
+
+            try {
+                DownloadManager.Query query = new DownloadManager.Query()
+                        .setFilterById(downloadId);
+                android.database.Cursor cursor = downloadManager.query(query);
+                if (!cursor.moveToFirst()) {
+                    Log.e(TAG, "Download not found");
+                    cursor.close();
+                    unregisterReceiver(this);
+                    stopSelf(startId);
+                    return;
+                }
+
+                int status = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS));
+                if (status != DownloadManager.STATUS_SUCCESSFUL) {
+                    int reason = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_REASON));
+                    Log.w(TAG, "Download failed with reason " + reason);
+                    cursor.close();
+                    unregisterReceiver(this);
+                    stopSelf(startId);
+                    return;
+                }
+
+                String path = cursor.getString(cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI));
+                cursor.close();
+
+                // Extract file path from content URI
+                Uri fileUri = Uri.parse(path);
+                File apkFile = new File(fileUri.getPath());
+
+                // Verify SHA-256
+                if (apkFile.exists() && apkFile.length() == manifest.getSizeBytes()) {
+                    String actualSha = computeSha256(apkFile);
+                    if (actualSha.equalsIgnoreCase(manifest.getSha256())) {
+                        Log.d(TAG, "SHA-256 verification passed");
+                        installApk(apkFile);
+                    } else {
+                        Log.e(TAG, "SHA-256 mismatch: expected " + manifest.getSha256()
+                                + ", got " + actualSha);
+                    }
+                } else {
+                    Log.e(TAG, "Downloaded file missing or size mismatch");
+                }
+
+                unregisterReceiver(this);
+                stopSelf(startId);
+            } catch (Exception e) {
+                Log.e(TAG, "Error handling download completion", e);
+                try {
+                    unregisterReceiver(this);
+                } catch (IllegalArgumentException ignored) {
+                    // Already unregistered
+                }
+                stopSelf(startId);
+            }
+        }
     }
 
     @Override
