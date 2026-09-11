@@ -15,6 +15,8 @@ import android.os.IBinder;
 import android.os.StatFs;
 import android.util.Log;
 
+import androidx.core.content.FileProvider;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -208,15 +210,18 @@ public final class UpdateCheckService extends Service {
     }
 
     /**
-     * Installs the verified APK using PackageInstaller (Android 5+) or
-     * Intent-based fallback (older versions).
+     * Installs the verified APK using PackageInstaller via FileProvider.
+     * FileProvider is used instead of Uri.fromFile() to avoid FileUriExposedException
+     * on Android 7+ and to comply with file URI exposure protection on Android 10+.
      */
     private void installApk(File apkFile) {
         try {
+            Uri apkUri = FileProvider.getUriForFile(this, "com.hse.bleradar.fileprovider", apkFile);
             Intent install = new Intent(Intent.ACTION_VIEW);
-            install.setData(Uri.fromFile(apkFile));
+            install.setData(apkUri);
             install.setType("application/vnd.android.package-archive");
             install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(install);
             Log.d(TAG, "Handed APK to system installer");
         } catch (Exception e) {
