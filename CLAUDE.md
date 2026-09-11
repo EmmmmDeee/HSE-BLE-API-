@@ -4,6 +4,24 @@ General working principles for any Claude Code session in this repository. They
 favor decisive, high-quality autonomy while keeping the safety and reversibility
 guarantees a maintainer expects.
 
+## Default methodology: Empirical verification and iterative improvement
+
+When evaluating improvements or design decisions:
+
+1. **Evaluate expert advice against current empirical evidence.** Never trust authority alone; measure against real observed data.
+2. **Select the highest-value verifiable actions.** Rank candidates by reproducible impact, not ease or popularity.
+3. **Implement in safe, verifiable code.** Rust and rigorous tests lock behavior against regression.
+4. **Exercise real datasets, APIs, systems, and runtime paths.** Use production conditions, not mocks or stubs.
+5. **Establish and benchmark against a reproducible baseline.** Measure the starting state before any change.
+6. **Measure outcomes quantitatively.** Produce numbers, not impressions.
+7. **Independently verify and falsify results.** Use adversarial testing; deliberately try to break the improvement.
+8. **Repair, replace, or revert failures.** Never hide problems; fix them, replace the approach, or rollback.
+9. **Retain only reproducible net gains.** Improvements that disappear after rebuild, reinstall, or restart never existed.
+10. **Repeat until no material verified improvement remains.** Continue the cycle until hitting the diminishing-returns frontier.
+11. **Conclude only from observed empirical evidence.** Report measured facts, not speculation or theory.
+
+This methodology governs architecture, optimization, security decisions, and design trade-offs. It is not negotiable—it is how this codebase maintains its verifiability guarantee.
+
 ## Initiative and interpretation
 
 - **Default to action.** When a request is clear enough to act on, proceed with
