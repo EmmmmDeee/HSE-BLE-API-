@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo;
 import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 
 import java.util.Collections;
 import java.util.List;
@@ -46,6 +47,9 @@ import java.util.List;
  */
 public final class RadarScanService extends Service {
 
+    private static final String TAG = "RadarScanService";
+    private static final int MIN_ANDROID_VERSION_FOR_FOREGROUND_SERVICE_TYPE = Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
+
     private static final String CHANNEL_ID = "ble_radar_scanning";
     private static final int NOTIFICATION_ID = 1;
 
@@ -74,11 +78,7 @@ public final class RadarScanService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (!BleScanEngine.hasRequiredPermissions(this)) {
-            // Only reachable when a sticky restart finds the permissions
-            // revoked: the activity never issues a start before they are
-            // granted. Do not promote (the connectedDevice type would throw on
-            // API 34+) and drop the started state so the system stops
-            // restarting us.
+            Log.w(TAG, "Bluetooth permissions revoked on sticky restart; stopping service");
             stopSelf(startId);
             return START_NOT_STICKY;
         }
@@ -129,7 +129,7 @@ public final class RadarScanService extends Service {
 
     private void promoteToForeground(boolean scanning) {
         Notification notification = buildNotification(scanning);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        if (Build.VERSION.SDK_INT >= MIN_ANDROID_VERSION_FOR_FOREGROUND_SERVICE_TYPE) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
         } else {
             startForeground(NOTIFICATION_ID, notification);
@@ -153,6 +153,8 @@ public final class RadarScanService extends Service {
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {
             manager.createNotificationChannel(channel);
+        } else {
+            Log.w(TAG, "NotificationManager unavailable; notification channel creation failed");
         }
     }
 
