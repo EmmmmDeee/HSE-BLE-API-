@@ -59,6 +59,7 @@ public final class UpdateCheckService extends Service {
     private static final String PREFS_DOWNLOAD_ID = "activeDownloadId";
     private static final String PREFS_RETRY_COUNT = "retryCount";
     private static final String PREFS_LAST_RETRY_TIME = "lastRetryTime";
+    private static final String PREFS_PENDING_MANIFEST = "pendingManifest";
 
     private UpdateManager updateManager;
     private DownloadManager downloadManager;
@@ -80,7 +81,7 @@ public final class UpdateCheckService extends Service {
 
     /**
      * Restores a pending download from SharedPreferences if one was interrupted.
-     * Re-registers the broadcast receiver to monitor for completion.
+     * Re-registers the broadcast receiver to monitor for completion, using the stored manifest.
      */
     private void restorePendingDownload() {
         activeDownloadId = prefs.getLong(PREFS_DOWNLOAD_ID, -1);
@@ -92,22 +93,30 @@ public final class UpdateCheckService extends Service {
             if (cursor != null && cursor.moveToFirst()) {
                 int status = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS));
                 if (status == DownloadManager.STATUS_SUCCESSFUL || status == DownloadManager.STATUS_FAILED) {
-                    // Download is already complete; clear the saved ID
+                    // Download is already complete; clear the saved state
                     clearDownloadId();
                     activeDownloadId = -1;
                 } else {
-                    // Download is still in progress; re-register the receiver
-                    try {
-                        BroadcastReceiver receiver = new DownloadCompletionReceiver(null, 0);
-                        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
-                        } else {
-                            registerReceiver(receiver, filter);
+                    // Download is still in progress; restore manifest and re-register the receiver
+                    ReleaseManifest manifest = restoreDownloadManifest();
+                    if (manifest != null) {
+                        try {
+                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, 0);
+                            IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+                            } else {
+                                registerReceiver(receiver, filter);
+                            }
+                            Log.d(TAG, "Re-registered broadcast receiver for pending download with restored manifest");
+                        } catch (Exception e) {
+                            Log.w(TAG, "Failed to re-register download receiver", e);
+                            clearDownloadId();
                         }
-                        Log.d(TAG, "Re-registered broadcast receiver for pending download");
-                    } catch (Exception e) {
-                        Log.w(TAG, "Failed to re-register download receiver", e);
+                    } else {
+                        Log.w(TAG, "Could not restore manifest for pending download; clearing");
+                        clearDownloadId();
+                        activeDownloadId = -1;
                     }
                 }
                 cursor.close();
@@ -120,17 +129,34 @@ public final class UpdateCheckService extends Service {
     }
 
     /**
-     * Persists the download ID to SharedPreferences so it survives process termination.
+     * Persists the download ID and manifest to SharedPreferences so they survive process termination.
      */
-    private void saveDownloadId(long downloadId) {
-        prefs.edit().putLong(PREFS_DOWNLOAD_ID, downloadId).apply();
+    private void saveDownloadState(long downloadId, ReleaseManifest manifest) {
+        prefs.edit()
+                .putLong(PREFS_DOWNLOAD_ID, downloadId)
+                .putString(PREFS_PENDING_MANIFEST, manifest.serialize())
+                .apply();
     }
 
     /**
-     * Clears the persisted download ID from SharedPreferences.
+     * Clears the persisted download ID and manifest from SharedPreferences.
      */
     private void clearDownloadId() {
-        prefs.edit().remove(PREFS_DOWNLOAD_ID).apply();
+        prefs.edit()
+                .remove(PREFS_DOWNLOAD_ID)
+                .remove(PREFS_PENDING_MANIFEST)
+                .apply();
+    }
+
+    /**
+     * Restores the manifest for a pending download from SharedPreferences.
+     */
+    private ReleaseManifest restoreDownloadManifest() {
+        String manifestText = prefs.getString(PREFS_PENDING_MANIFEST, null);
+        if (manifestText == null) {
+            return null;
+        }
+        return ReleaseManifest.parse(manifestText);
     }
 
     /**
@@ -251,7 +277,7 @@ public final class UpdateCheckService extends Service {
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
 
             activeDownloadId = downloadManager.enqueue(request);
-            saveDownloadId(activeDownloadId);
+            saveDownloadState(activeDownloadId, manifest);
             Log.d(TAG, "Enqueued download with ID " + activeDownloadId);
 
             // Register broadcast receiver for download completion
