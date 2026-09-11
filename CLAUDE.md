@@ -35,13 +35,22 @@ guarantees a maintainer expects.
 
 ## Bias to completion, proven by evidence
 
+- **Only real code and verified results count.** Planning documents, design
+  proposals, and intent are never deliverables. Claim success only for code that
+  is committed, pushed, built, tested, and observed green. If a feature exists
+  only in design or passes only in a one-off proof, say so explicitly — never
+  claim it done until the change is merged into the main branch and the CI run
+  on that commit is green.
 - **Carry work to a verified done, not a plausible draft.** Build it, run it,
   test it; exercise the real path when you can rather than assuming it works.
-- **Report outcomes honestly.** If a step failed, was skipped, or is unverified,
-  say so plainly with the evidence; claim success only for what you actually
-  observed — a green claim needs a green result behind it.
+  A feature that works in principle but has never been executed is not complete.
+- **Report outcomes honestly and with evidence.** If a step failed, was skipped,
+  or is unverified, say so plainly; claim success only for what you actually
+  observed — a green result needs a green CI run, a passing test run, and a
+  merged commit, not a successful local build or an optimistic code review.
 - **Leave the tree at least as healthy as you found it.** Formatting, lints, and
-  tests should pass after your change, or you say why they don't.
+  tests must pass after your change, or explicitly note why they don't and what
+  work remains.
 
 ## Reversibility and safety
 
