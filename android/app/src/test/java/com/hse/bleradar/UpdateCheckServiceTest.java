@@ -115,6 +115,39 @@ public class UpdateCheckServiceTest {
         assertEquals("case-insensitive comparison", computed, uppercase.toLowerCase());
     }
 
+    @Test
+    public void manifest_validation_rejects_invalid_inputs() {
+        // Verify manifest parsing rejects malformed inputs with proper validation
+
+        // Missing required fields
+        assertNull("should reject missing version_code",
+                ReleaseManifest.parse("version_name = 1.0.0\nurl = https://example.com/app.apk\n"));
+        assertNull("should reject missing version_name",
+                ReleaseManifest.parse("version_code = 1\nurl = https://example.com/app.apk\n"));
+        assertNull("should reject missing url",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\n"));
+        assertNull("should reject missing size_bytes",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\n"));
+        assertNull("should reject missing sha256",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\n"));
+
+        // Invalid field values
+        assertNull("should reject non-HTTPS URL",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = http://example.com/app.apk\nsize_bytes = 1024\nsha256 = " + validSha256() + "\n"));
+        assertNull("should reject invalid SHA-256 (wrong length)",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\nsha256 = 0000\n"));
+        assertNull("should reject invalid SHA-256 (non-hex characters)",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\nsha256 = " + "z".repeat(64) + "\n"));
+        assertNull("should reject zero version_code",
+                ReleaseManifest.parse("version_code = 0\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\nsha256 = " + validSha256() + "\n"));
+        assertNull("should reject zero size_bytes",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 0\nsha256 = " + validSha256() + "\n"));
+    }
+
+    private static String validSha256() {
+        return "0000000000000000000000000000000000000000000000000000000000000000";
+    }
+
     /**
      * Standalone SHA-256 computation (mirrors UpdateCheckService.computeSha256).
      * Extracted to a static method so it can be unit-tested without running the full service.
