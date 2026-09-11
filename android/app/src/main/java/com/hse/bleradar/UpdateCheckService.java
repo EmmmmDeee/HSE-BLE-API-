@@ -174,6 +174,7 @@ public final class UpdateCheckService extends Service {
 
         if (decision != NativeRadar.UPDATE_AVAILABLE) {
             Log.d(TAG, "No safe update available (decision=" + decision + ")");
+            clearRetryCount();
             stopSelf(startId);
             return START_NOT_STICKY;
         }
