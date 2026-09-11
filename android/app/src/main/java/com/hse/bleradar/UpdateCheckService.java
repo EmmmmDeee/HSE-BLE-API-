@@ -1,8 +1,14 @@
 package com.hse.bleradar;
 
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
+import android.os.BatteryManager;
 import android.os.IBinder;
+import android.os.StatFs;
 import android.util.Log;
 
 /**
@@ -82,11 +88,11 @@ public final class UpdateCheckService extends Service {
         }
 
         // Check download readiness: network, battery, storage
-        // TODO: detect actual network state (ConnectivityManager)
-        int network = NativeRadar.NETWORK_UNMETERED; // Placeholder
-        int battery = 50; // Placeholder
-        boolean charging = true; // Placeholder
-        long freeStorage = 1024 * 1024 * 1024; // Placeholder (1 GiB)
+        // Detect actual device state for download gating
+        int network = detectNetworkType();
+        int battery = detectBatteryLevel();
+        boolean charging = isCharging();
+        long freeStorage = detectFreeStorage();
         boolean allowMetered = false;
 
         int readiness = updateManager.checkDownloadReadiness(
@@ -141,5 +147,75 @@ public final class UpdateCheckService extends Service {
     public void onDestroy() {
         Log.d(TAG, "UpdateCheckService destroyed");
         super.onDestroy();
+    }
+
+    /**
+     * Detects the current network type (unmetered, metered, or none).
+     *
+     * @return one of {@link NativeRadar#NETWORK_NONE}, {@link NativeRadar#NETWORK_METERED},
+     *         or {@link NativeRadar#NETWORK_UNMETERED}
+     */
+    private int detectNetworkType() {
+        ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+        if (cm == null) {
+            return NativeRadar.NETWORK_NONE;
+        }
+        android.net.Network network = cm.getActiveNetwork();
+        if (network == null) {
+            return NativeRadar.NETWORK_NONE;
+        }
+        NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+        if (caps == null) {
+            return NativeRadar.NETWORK_NONE;
+        }
+        boolean isMetered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+        return isMetered ? NativeRadar.NETWORK_METERED : NativeRadar.NETWORK_UNMETERED;
+    }
+
+    /**
+     * Detects the current battery level as a percentage (0–100).
+     *
+     * @return battery level in percent, or 0 on error
+     */
+    private int detectBatteryLevel() {
+        IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+        Intent batteryStatus = registerReceiver(null, filter);
+        if (batteryStatus == null) {
+            return 0;
+        }
+        int level = batteryStatus.getIntExtra(BatteryManager.EXTRA_LEVEL, 0);
+        int scale = batteryStatus.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+        return (level * 100) / Math.max(1, scale);
+    }
+
+    /**
+     * Detects whether the device is currently charging.
+     *
+     * @return true if charging, false otherwise
+     */
+    private boolean isCharging() {
+        IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+        Intent batteryStatus = registerReceiver(null, filter);
+        if (batteryStatus == null) {
+            return false;
+        }
+        int status = batteryStatus.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+        return status == BatteryManager.BATTERY_STATUS_CHARGING
+                || status == BatteryManager.BATTERY_STATUS_FULL;
+    }
+
+    /**
+     * Detects the free storage space in the app's cache directory.
+     *
+     * @return free space in bytes, or 0 on error
+     */
+    private long detectFreeStorage() {
+        try {
+            StatFs stat = new StatFs(getCacheDir().getAbsolutePath());
+            return stat.getAvailableBytes();
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to detect free storage", e);
+            return 0;
+        }
     }
 }
