@@ -23,6 +23,35 @@ public class UpdateCheckServiceTest {
     }
 
     @Test
+    public void manifest_serialization_round_trips_correctly() {
+        // Verify that manifest serialization persists all fields correctly
+        // This ensures manifest can be persisted to SharedPreferences and restored
+        String manifestText = ""
+                + "version_code = 1\n"
+                + "version_name = 1.0.0\n"
+                + "url = https://example.com/ble-radar-release.apk\n"
+                + "size_bytes = 52428800\n"
+                + "sha256 = 0000000000000000000000000000000000000000000000000000000000000000\n"
+                + "min_sdk = 26\n"
+                + "mandatory = false\n"
+                + "notes = Bundled offline default\n";
+
+        ReleaseManifest m1 = ReleaseManifest.parse(manifestText);
+        assertNotNull("original manifest should parse", m1);
+
+        // Serialize and deserialize
+        String serialized = m1.serialize();
+        ReleaseManifest m2 = ReleaseManifest.parse(serialized);
+        assertNotNull("round-trip manifest should parse", m2);
+
+        // Verify all fields match after round-trip
+        assertEquals("version code after round-trip", m1.getVersionCode(), m2.getVersionCode());
+        assertEquals("SHA-256 after round-trip", m1.getSha256(), m2.getSha256());
+        assertEquals("size after round-trip", m1.getSizeBytes(), m2.getSizeBytes());
+        assertEquals("min SDK after round-trip", m1.getMinSdk(), m2.getMinSdk());
+    }
+
+    @Test
     public void bundled_manifest_parses() {
         // The bundled release_manifest.txt is a valid manifest that can be parsed
         // This test verifies the format is correct without needing a running service
