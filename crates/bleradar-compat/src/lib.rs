@@ -106,32 +106,52 @@ pub const CONTRACTS: &[ContractStatus] = &[
     ContractStatus {
         name: "bearing_deg",
         status: ParityStatus::SourceAnalog,
-        evidence: "source analogue and sampled oracle outputs; exhaustive differential parity is pending",
+        evidence: "executed-oracle differential under qemu-aarch64 over 308 coordinate pairs (docs/ORACLE_DIFFERENTIAL.md): the source matches the executed oracle to <1e-8 deg (circular), transcendental libm rounding only — not bit-exact, so retained as SourceAnalog (oracle_geodesy_differential.rs)",
     },
     ContractStatus {
         name: "haversine_m",
         status: ParityStatus::SourceAnalog,
-        evidence: "oracle probe confirms the source now uses the same Earth-radius constant (6,371,008.8 m; BF-002 fixed); one sampled point, not exhaustive over the continuous domain",
+        evidence: "executed-oracle differential under qemu-aarch64 over 308 coordinate pairs (docs/ORACLE_DIFFERENTIAL.md): the source uses the oracle's Earth radius (6,371,008.8 m; BF-002) and matches the executed oracle to <1e-6 m, transcendental libm rounding only — not bit-exact, so retained as SourceAnalog (oracle_geodesy_differential.rs)",
     },
     ContractStatus {
         name: "wifi_channel_to_frequency",
-        status: ParityStatus::SourceAnalog,
-        evidence: "exact oracle ranges are captured; the source matches only over its narrower u16 input contract",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "the immutable oracle .so was executed under qemu-aarch64 (docs/ORACLE_DIFFERENTIAL.md); the source reproduces every executed-oracle output over its u16 domain and the oracle's wider i32 domain collapses to None outside it (oracle_differential.rs)",
     },
     ContractStatus {
         name: "wifi_frequency_to_channel",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "executed-oracle differential under qemu-aarch64 over 2.4/5/6 GHz edges and flooring (docs/ORACLE_DIFFERENTIAL.md); the source matches every executed-oracle output over its u16 domain and the oracle's Option<i32> domain collapses to None outside it (oracle_differential.rs)",
+    },
+    ContractStatus {
+        name: "wifi_band",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "reconstructed from the executed oracle (previously unmapped, statically-reachable shipped contract); the source `wifi_band(u16)` splits at 3000/5900 MHz and matches every executed-oracle band over its u16 domain (docs/ORACLE_DIFFERENTIAL.md, oracle_differential.rs); the oracle's wider Option<i32> domain (None -> \"?\", negatives -> 2.4 GHz) is outside the u16 contract",
+    },
+    ContractStatus {
+        name: "wifi_is_enterprise",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "reconstructed from the executed oracle (previously unmapped, statically-reachable shipped contract); a pure case-sensitive `caps.contains(\"EAP\")` test (None -> false) reproduced bit-for-bit over the executed-oracle sweep (docs/ORACLE_DIFFERENTIAL.md, oracle_wifi_security_differential.rs)",
+    },
+    ContractStatus {
+        name: "wifi_security",
+        status: ParityStatus::DifferentiallyVerified,
+        evidence: "reconstructed from the executed oracle (previously unmapped, statically-reachable shipped contract); a pure case-sensitive substring classifier with precedence SAE|WPA3 -> WPA3, WPA2|RSN -> WPA2, OWE -> OWE, WPA -> WPA, WEP -> WEP, else Open (None -> \"?\"), reproduced bit-for-bit over the executed-oracle sweep (docs/ORACLE_DIFFERENTIAL.md, oracle_wifi_security_differential.rs)",
+    },
+    ContractStatus {
+        name: "wifi_distance",
         status: ParityStatus::SourceAnalog,
-        evidence: "matches the oracle over its complete u16 domain (BF-004 fixed); the oracle's true domain is signed i32, wider than the source's u16 input contract",
+        evidence: "reconstructed from the executed oracle (previously unmapped, statically-reachable shipped contract); the source reproduces the executed oracle across its whole i32 domain (docs/ORACLE_DIFFERENTIAL.md, oracle_wifi_distance_differential.rs) -- the rssi>=0 far-clamp sentinel, the 2000..=7199 MHz plausible-frequency window with a 2437 MHz default outside it, the log-distance formula, and the [0.1, 400] m clamps -- with no behavioral divergence; the transcendental log10/powf step is matched to <1e-12 relative (observed max 2e-15 over 797 formula points) rather than guaranteed bit-for-bit, so it stays SourceAnalog like haversine_m/bearing_deg",
     },
     ContractStatus {
         name: "ble_distance",
         status: ParityStatus::SourceAnalog,
-        evidence: "oracle fixes calibration at -59/2.4, ignores tx power, and clamps at 100 m",
+        evidence: "executed-oracle differential under qemu-aarch64 (docs/ORACLE_DIFFERENTIAL.md): the source's calibration formula reproduces the oracle to machine precision (<1e-12 rel, measured 2e-16) in the valid region with fixed -59 dBm/2.4; the oracle additionally clamps to [0.1, 100] m, ignores tx_power, and treats rssi>=0 as a 100 m sentinel, which the raw source model does not (oracle_signal_differential.rs)",
     },
     ContractStatus {
         name: "proximity_label",
         status: ParityStatus::SourceAnalog,
-        evidence: "oracle accepts distance while the source analogue accepts RSSI",
+        evidence: "executed-oracle differential under qemu-aarch64 (docs/ORACLE_DIFFERENTIAL.md): the oracle's distance banding is <1.5 immediate / <5 near / <15 mid / else far, wider than the source's proximity_label_from_distance_m (<=1 / <=2 / <=5); the source's proximity_label also takes RSSI not distance (oracle_signal_differential.rs)",
     },
     ContractStatus {
         name: "ui_radar_points",

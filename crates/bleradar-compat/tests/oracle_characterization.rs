@@ -168,9 +168,12 @@ fn oracle_wifi_frequency_gap_is_exhaustively_classified_over_source_domain() {
         .collect::<Vec<_>>();
 
     assert_eq!(mismatches.len(), 0, "unexpected mismatches: {mismatches:?}");
+    // The oracle itself was later executed under qemu-aarch64 over this domain
+    // (oracle_differential.rs), so this contract is now DifferentiallyVerified
+    // against the binary, not merely against the hand-reconstructed model above.
     assert_eq!(
         parity_status("wifi_frequency_to_channel"),
-        Some(ParityStatus::SourceAnalog)
+        Some(ParityStatus::DifferentiallyVerified)
     );
 }
 
@@ -187,17 +190,23 @@ fn wifi_frequency_oracle_parity_removal_gate() {
 
 #[test]
 fn no_source_analogue_is_mislabeled_as_differentially_verified() {
+    // The WiFi channel<->frequency contracts were promoted to
+    // DifferentiallyVerified once the immutable oracle was executed under
+    // qemu-aarch64 (oracle_differential.rs), because they are integer-exact. The
+    // rest are matched to the executed oracle only within a tolerance
+    // (transcendental libm rounding) or carry documented divergences, so they
+    // must remain SourceAnalog.
     for name in [
         "bearing_deg",
         "haversine_m",
-        "wifi_channel_to_frequency",
-        "wifi_frequency_to_channel",
         "ble_distance",
         "proximity_label",
+        "wifi_distance",
     ] {
         assert_ne!(
             parity_status(name),
-            Some(ParityStatus::DifferentiallyVerified)
+            Some(ParityStatus::DifferentiallyVerified),
+            "{name} has no executed-oracle differential yet"
         );
     }
 }

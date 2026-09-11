@@ -28,8 +28,27 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
   merge, a universal coordinate parser (decimal/DMS/DDM/`geo:` URI/Plus
   Code/Maidenhead), and the canonical tag vocabulary. See
   `docs/HSE_IMPORT.md`.
+- `crates/bleradar-core::update` — the automatic-update engine: `versionCode`-keyed
+  update decisions (no silent downgrade, OS-gated), a strict HTTPS-only release
+  manifest, streaming SHA-256 + size integrity verification, and a restart-safe
+  lifecycle state machine that persists, recovers from a crash mid-update, and
+  makes installing an unverified or tampered artifact unrepresentable. It also
+  carries the resilience a robust updater needs: bounded exponential-backoff
+  retry of transient download faults, rollback to the previous known-good version
+  after a bad release, a re-check throttle, and pre-download gating on network
+  (metered/Wi-Fi), battery, and free storage so a download that would fail or
+  cost the user is never started. Verified by a 200,000-op
+  differential campaign (offer/download/verify/install/retry/rollback) and a
+  50,000-trial integrity oracle; the network fetch and OS installer are the
+  documented platform boundary. Its pure decision core (update decision,
+  re-check throttle, pre-download gating, retry backoff) is reachable from the
+  Android app through the JNI façade (`NativeRadar.updateDecision` /
+  `shouldCheckForUpdate` / `downloadReadiness` / `retryBackoffDelaySeconds`),
+  so the app makes those safety decisions in verified Rust. See
+  `docs/AUTO_UPDATE.md`.
 - `crates/bleradar-compat` — complete native ABI runtime/reachability census plus a separate source-replacement parity registry.
-- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, live Java→JNI→Rust verification, and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
+- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, executed-oracle differential verification under `qemu-aarch64` (`oracle-differential`, see `docs/ORACLE_DIFFERENTIAL.md`), and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
+- `android/app/src/main` — the hand-built Android radar app that consumes `bleradar-core` through `crates/bleradar-jni`; its design record is `docs/ANDROID_APP.md`.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
 - `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, and verification records.
 - `benchmarks/` — benchmark harness notes.
@@ -51,8 +70,35 @@ The runtime registry classifies all 124 contracts: 41 observed executing, 78
 statically reached from non-generated DEX call sites, and 5 of unknown
 reachability. The five unknowns are read-only `RadarStore` methods that require
 trustworthy Android/Bionic state. All shipped ABI implementations are
-Rust-native, but none of the similarly named workspace replacements is yet
-differentially verified across its complete observable contract.
+Rust-native. Differential verification against the oracle *binary* has now
+begun: the immutable native core is executed under `qemu-aarch64` against a real
+Bionic runtime, and the WiFi `channel_to_frequency`, `frequency_to_channel`,
+`band`, `security` and `is_enterprise` contracts are `DifferentiallyVerified` —
+the safe-Rust reconstruction reproduces every executed-oracle output bit-for-bit
+over its input domain (`docs/ORACLE_DIFFERENTIAL.md`, `cargo xtask
+oracle-differential`); `wifi_band`, `wifi_security` and `wifi_is_enterprise` were
+previously-unmapped, statically-reachable shipped contracts reconstructed from
+the executed oracle (`wifi_security` classifies a capabilities string by a
+case-sensitive substring precedence; `wifi_is_enterprise` tests for `EAP`). The pure geodesy contracts (`haversine_m`,
+`bearing_deg`) also have a broad executed-oracle differential — the
+reconstruction matches the executed oracle to under a micrometre / nanodegree
+over 308 coordinate pairs — but stay `SourceAnalog` because Bionic and host
+`libm` are not bit-identical for transcendentals (coverage, not a bit-exact
+promotion). The core BLE signal contracts (`ble_distance`, `proximity_label`)
+also have an executed-oracle differential: the reconstruction's distance
+calibration formula matches the oracle to machine precision in the valid region,
+while the oracle's `[0.1,100]` m clamp + `rssi>=0` sentinel and its wider
+proximity bands (`<1.5`/`<5`/`<15` vs the source's `<=1`/`<=2`/`<=5`) are
+documented, locked `SourceAnalog` divergences. `wifi_distance` — another
+previously-unmapped shipped contract — is reconstructed faithfully from the
+executed oracle (the log-distance formula, an `rssi>=0`→400 m sentinel, a
+`2000..=7199` MHz plausible-frequency window defaulting to 2437 MHz, and a
+`[0.1,400]` m clamp) with no behavioural or domain divergence, and stays
+`SourceAnalog` because its `log10`/`powf` step is transcendental (matched to
+`<1e-12` relative, observed max 2e-15). Together these complete the
+reconstruction of the entire WiFi ABI family — all six `wifi_*` contracts are now
+reconstructed and executed-oracle-differentiated (five `DifferentiallyVerified`,
+`wifi_distance` `SourceAnalog`).
 
 See `docs/VERIFIED_RUNTIME_TOPOLOGY.md`,
 `docs/BEHAVIORAL_CONTRACT.md`, and `docs/RUST_TARGET_ARCHITECTURE.md` before
@@ -76,7 +122,16 @@ rejects missing references and exposes trace APIs for:
 
 Raw observations are immutable through the public API: normalization returns a
 new record and cannot replace the captured value. Other engines should write to
-this store rather than maintaining parallel evidence histories.
+this store rather than maintaining parallel evidence histories. Multi-record
+writes go through `EvidenceStore::transaction`, the store's single
+all-or-nothing mechanism (an undo journal that is nested and panic-safe), which
+every engine uses instead of copying the store; a refused engine operation
+therefore leaves the store exactly as it was, at a cost that does not grow
+with the store. A caller composing engines over one investigation moves the
+canonical store from one engine into the next with `into_evidence()` (zero
+copy) rather than cloning it; `crates/bleradar-core/tests/composition.rs`
+threads one store through the OSINT, infrastructure, website and fusion
+engines and validates the composed result.
 
 `VerificationEngine` keeps required semantics separate from implementation and
 supports metamorphic relations for invariance, idempotence, commutativity,
@@ -157,7 +212,8 @@ of which measures actual round-over-round yield.
 
 - Rust toolchain **1.98.0** with `clippy` and `rustfmt` — pinned by `rust-toolchain.toml`; `rustup` installs it automatically on first `cargo` invocation in the repo.
 - No third-party crates in the shipped workspace: it is intentionally dependency-free, and CI fails if that changes without a recorded decision. `xtask/` (developer tooling) and the vendored advisory database are outside that scope; see `xtask/Cargo.toml`.
-- `cargo-audit` and `cargo-deny` on `PATH` to run those two specific gates (`cargo install cargo-audit cargo-deny`); every other gate, including `cargo xtask gates` itself, needs nothing beyond the pinned toolchain.
+- `cargo-audit` and `cargo-deny` on `PATH` to run those two specific gates, at the versions CI pins (`cargo install --locked cargo-audit@0.22.2 cargo-deny@0.20.2`; bump them together with `.github/workflows/gates.yml`); every other gate, including `cargo xtask gates` itself, needs nothing beyond the pinned toolchain. The JNI export-contract gate inside `gates` reads the host-built `libbleradar_jni.so` with the in-tree ELF64 reader, so `gates` is proven on Linux hosts (what CI runs).
+- A JDK (`javac`/`java`) only for `cargo xtask verify-jni-live`, and an Android SDK/NDK only for `cargo xtask build-apk`/`verify-android-live` (see `docs/ANDROID_APP.md`).
 
 ## Installation
 
@@ -197,7 +253,9 @@ cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
-Or run every gate — the above plus the parity-report drift check, the
+Or run every gate — the above plus the JNI export-contract check (every
+`static native` in `NativeRadar.java` ↔ exactly one `Java_*` export in the
+built `bleradar-jni`, no orphans), the parity-report drift check, the
 zero-third-party-dependency policy check, the oracle-integrity check, and
 `cargo audit`/`cargo deny` against the vendored advisory database — with the
 single local gate runner:
@@ -207,8 +265,11 @@ cargo xtask gates
 ```
 
 These same gates run on every push and pull request via
-`.github/workflows/gates.yml`. Autonomous maintenance sessions operate under
-`docs/AUTONOMOUS_ENGINE.md`.
+`.github/workflows/gates.yml`, followed by the live JVM → JNI → Rust proof
+(`cargo xtask verify-jni-live`) on a pinned Temurin 21 JDK; the workflow pins
+`cargo-audit`/`cargo-deny` to exact versions and caches their binaries, so a
+run is reproducible and does not rebuild them from source every time.
+Autonomous maintenance sessions operate under `docs/AUTONOMOUS_ENGINE.md`.
 
 ## Live JNI proof
 
@@ -216,11 +277,16 @@ These same gates run on every push and pull request via
 cargo xtask verify-jni-live
 ```
 
-This compiles the host `bleradar-jni` library, compiles the repository's
-`android/app/src/main/java/com/hse/bleradar/NativeRadar.java`, then executes a
+This compiles the host `bleradar-jni` library, verifies its export contract
+against the repository's
+`android/app/src/main/java/com/hse/bleradar/NativeRadar.java`
+(`cargo xtask check-jni-contract`), compiles that façade, then executes a
 real JVM → JNI → Rust smoke harness. It proves both the failure path (wrong
-library path yields `UnsatisfiedLinkError`) and the success path (library loads,
-ABI version matches, and JNI calls return the expected values).
+library path yields `UnsatisfiedLinkError`) and the success path (library
+loads, ABI version matches, every declared native is resolved and invoked by
+the JVM through reflection with the count cross-checked against the Java
+source, and JNI calls return the expected values). CI runs it on every push
+and pull request.
 
 ## Strongest current Android live proof
 
@@ -232,8 +298,10 @@ This runs the strongest end-to-end proof currently possible in this sandbox:
 the live JVM → JNI → Rust proof above, a full `cargo xtask build-apk`, then
 post-build verification that the generated APK contains the required manifest,
 DEX, and JNI library entries, that the built DEX defines the critical Android
-classes, and that the cross-compiled native library exports the required JNI
-entrypoints.
+classes, and that the cross-compiled native library exports exactly the JNI
+entrypoints `NativeRadar.java` declares (the same export-contract rule as
+`gates`, applied to the `aarch64-linux-android` build). Design decisions for
+the app itself are recorded in `docs/ANDROID_APP.md`.
 
 ## Parity report
 
@@ -259,9 +327,24 @@ cargo xtask check-oracle-integrity
 cargo xtask apk-inventory <apk>
 cargo xtask native-abi <lib.so>
 cargo xtask dex-classes <classes.dex>
+cargo xtask check-jni-contract [lib.so]   # NativeRadar.java natives ↔ Java_* exports, 1:1 (host build by default)
+cargo xtask verify-jni-live        # real JVM → JNI → Rust proof (needs a JDK)
+cargo xtask build-apk              # cross-compile + package + sign the Android app (needs SDK/NDK)
+cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/export checks
 cargo xtask audit                  # cargo audit, offline, vendored advisory db
 cargo xtask deny                   # cargo deny check, offline, vendored advisory db
 cargo xtask gates                  # every gate, one command
+cargo run --release -p bleradar-jni --example scan_result_cost   # host hot-path baseline, see benchmarks/README.md
+cargo run --release -p bleradar-core --example engine_load        # per-operation engine cost vs store size, see benchmarks/README.md
+BLERADAR_CAMPAIGN_ITERATIONS=5000000 cargo test -p bleradar-core --release --test falsification_campaign   # scale the randomised campaign
+BLERADAR_EVIDENCE_CAMPAIGN_SEQUENCES=20000 cargo test -p bleradar-core --release --test evidence_campaign   # scale the evidence-store campaign
+BLERADAR_OSINT_CAMPAIGN_SEQUENCES=50000 cargo test -p bleradar-core --release --test osint_campaign   # scale the OSINT engine campaign
+BLERADAR_WEBSITE_CAMPAIGN_SEQUENCES=20000 cargo test -p bleradar-core --release --test website_campaign   # scale the website lineage engine campaign
+BLERADAR_INFRASTRUCTURE_CAMPAIGN_SEQUENCES=20000 cargo test -p bleradar-core --release --test infrastructure_campaign   # scale the infrastructure correlation campaign
+BLERADAR_JNI_CAMPAIGN_ITERATIONS=2000000 cargo test -p bleradar-jni --release --test jni_campaign   # scale the JNI export differential campaign
+BLERADAR_FUSION_CAMPAIGN_ITERATIONS=300000 cargo test -p bleradar-core --release --test fusion_campaign   # scale the fusion differential campaign
+BLERADAR_VERIFICATION_CAMPAIGN_SEQUENCES=20000 cargo test -p bleradar-core --release --test verification_campaign   # scale the verification engine campaign
+BLERADAR_ADVANCEMENT_CAMPAIGN_SEQUENCES=50000 cargo test -p bleradar-core --release --test advancement_campaign   # scale the advancement engine campaign
 ```
 
 ## Distribution packaging
@@ -286,3 +369,4 @@ Read, in order:
 8. `docs/FINAL_REPORT.md`
 9. `docs/REQUIREMENTS_LEDGER.md`
 10. `docs/COLD_START_VERIFICATION.md`
+11. `docs/ANDROID_APP.md`

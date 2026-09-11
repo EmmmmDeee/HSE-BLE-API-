@@ -1342,6 +1342,15 @@ impl ExecutionFeedbackAdaptiveOsintSearchEngine {
         &mut self.evidence
     }
 
+    /// Consumes the engine and returns its canonical evidence store, so a caller composing OSINT with the
+    /// infrastructure, website, and fusion engines can move the store into the
+    /// next stage without cloning it
+    /// (see [`Self::evidence`] to borrow it in place).
+    #[must_use]
+    pub fn into_evidence(self) -> EvidenceStore {
+        self.evidence
+    }
+
     /// Configured resource limits.
     #[must_use]
     pub const fn limits(&self) -> SearchLimits {
@@ -1561,32 +1570,6 @@ impl ExecutionFeedbackAdaptiveOsintSearchEngine {
         }
 
         let action_id = format!("osint-search:{}", pivot.id());
-        let mut evidence = self.evidence.clone();
-        let mut observation_ids = Vec::new();
-        for finding in feedback.findings() {
-            if let Some(existing) = evidence.source(finding.source().id()) {
-                if existing != finding.source() {
-                    return Err(SearchError::SourceConflict {
-                        source_id: finding.source().id().to_owned(),
-                    });
-                }
-            } else {
-                evidence.add_source(finding.source().clone())?;
-            }
-
-            let observation = finding.to_observation()?;
-            if let Some(existing) = evidence.observation(finding.id()) {
-                if existing != &observation {
-                    return Err(SearchError::FindingConflict {
-                        finding_id: finding.id().to_owned(),
-                    });
-                }
-            } else {
-                evidence.add_observation(observation)?;
-            }
-            observation_ids.push(finding.id().to_owned());
-        }
-
         let action_status = match feedback.outcome() {
             SearchOutcome::Failed | SearchOutcome::Inconclusive => ActionStatus::Failed,
             SearchOutcome::Useful
@@ -1595,53 +1578,99 @@ impl ExecutionFeedbackAdaptiveOsintSearchEngine {
             | SearchOutcome::Weak
             | SearchOutcome::Duplicate => ActionStatus::Succeeded,
         };
-        let action = Action::new(
-            action_id.clone(),
-            ActionType::Retrieve,
-            format!(
-                "execute {} OSINT search pivot `{}`",
-                pivot.representation(),
-                pivot.id()
-            ),
-            observed_at,
-        )?
-        .targeting(pivot.id().to_owned())
-        .with_status(action_status);
-        evidence.add_action(action)?;
+        // Findings, the retrieval action, and the generated pivots are
+        // validated together inside one store transaction, so a refusal at any
+        // step (a conflicting source or finding, an invalid action, an invalid
+        // seed) leaves the store and the engine unchanged.
+        let Self {
+            evidence,
+            pivots,
+            query_keys,
+            limits,
+            next_sequence,
+            ..
+        } = self;
+        let (observation_ids, generated_pivots, generated_pivot_ids, suppressed_pivots) = evidence
+            .transaction(|store| {
+                let mut observation_ids = Vec::new();
+                for finding in feedback.findings() {
+                    if let Some(existing) = store.source(finding.source().id()) {
+                        if existing != finding.source() {
+                            return Err(SearchError::SourceConflict {
+                                source_id: finding.source().id().to_owned(),
+                            });
+                        }
+                    } else {
+                        store.add_source(finding.source().clone())?;
+                    }
 
-        let mut generated_pivots = Vec::new();
-        let mut generated_pivot_ids = Vec::new();
-        let mut suppressed_pivots = Vec::new();
-        let mut pending_keys = BTreeSet::new();
-        for seed in feedback.next_pivots() {
-            let key = seed.query_key();
-            let query = seed
-                .normalized_query
-                .as_deref()
-                .unwrap_or(&seed.raw_query)
-                .to_owned();
-            if self.query_keys.contains_key(&key) || !pending_keys.insert(key) {
-                suppressed_pivots.push(format!("{}: duplicate query", query));
-                continue;
-            }
-            if self.pivots.len() + generated_pivots.len() >= self.limits.max_pivots {
-                suppressed_pivots.push(format!("{}: pivot limit", query));
-                continue;
-            }
-            let generated_id = format!("{}::pivot-{}", pivot.id(), self.next_sequence);
-            self.next_sequence = self.next_sequence.saturating_add(1);
-            let mut generated = SearchPivot::new(
-                generated_id.clone(),
-                &seed.raw_query,
-                seed.representation,
-                seed.factors,
-            )?;
-            generated.normalized_query = seed.normalized_query.clone();
-            generated.rationale = seed.rationale.clone();
-            generated.parent_id = Some(pivot.id().to_owned());
-            generated_pivot_ids.push(generated_id);
-            generated_pivots.push(generated);
-        }
+                    let observation = finding.to_observation()?;
+                    if let Some(existing) = store.observation(finding.id()) {
+                        if existing != &observation {
+                            return Err(SearchError::FindingConflict {
+                                finding_id: finding.id().to_owned(),
+                            });
+                        }
+                    } else {
+                        store.add_observation(observation)?;
+                    }
+                    observation_ids.push(finding.id().to_owned());
+                }
+
+                let action = Action::new(
+                    action_id.clone(),
+                    ActionType::Retrieve,
+                    format!(
+                        "execute {} OSINT search pivot `{}`",
+                        pivot.representation(),
+                        pivot.id()
+                    ),
+                    observed_at,
+                )?
+                .targeting(pivot.id().to_owned())
+                .with_status(action_status);
+                store.add_action(action)?;
+
+                let mut generated_pivots = Vec::new();
+                let mut generated_pivot_ids = Vec::new();
+                let mut suppressed_pivots = Vec::new();
+                let mut pending_keys = BTreeSet::new();
+                for seed in feedback.next_pivots() {
+                    let key = seed.query_key();
+                    let query = seed
+                        .normalized_query
+                        .as_deref()
+                        .unwrap_or(&seed.raw_query)
+                        .to_owned();
+                    if query_keys.contains_key(&key) || !pending_keys.insert(key) {
+                        suppressed_pivots.push(format!("{}: duplicate query", query));
+                        continue;
+                    }
+                    if pivots.len() + generated_pivots.len() >= limits.max_pivots {
+                        suppressed_pivots.push(format!("{}: pivot limit", query));
+                        continue;
+                    }
+                    let generated_id = format!("{}::pivot-{}", pivot.id(), *next_sequence);
+                    *next_sequence = next_sequence.saturating_add(1);
+                    let mut generated = SearchPivot::new(
+                        generated_id.clone(),
+                        &seed.raw_query,
+                        seed.representation,
+                        seed.factors,
+                    )?;
+                    generated.normalized_query = seed.normalized_query.clone();
+                    generated.rationale = seed.rationale.clone();
+                    generated.parent_id = Some(pivot.id().to_owned());
+                    generated_pivot_ids.push(generated_id);
+                    generated_pivots.push(generated);
+                }
+                Ok((
+                    observation_ids,
+                    generated_pivots,
+                    generated_pivot_ids,
+                    suppressed_pivots,
+                ))
+            })?;
 
         let execution = SearchExecution {
             id: action_id.clone(),
@@ -1666,7 +1695,6 @@ impl ExecutionFeedbackAdaptiveOsintSearchEngine {
             action_id,
         };
 
-        self.evidence = evidence;
         let executed_pivot = self
             .pivots
             .get_mut(pivot.id())

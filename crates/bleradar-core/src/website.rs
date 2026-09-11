@@ -11,8 +11,9 @@ use std::fmt;
 
 use crate::infrastructure::{
     ComparableValue, ObservationSource, ScoreMode, SupportFields, TemporalInterval,
-    TemporalRelation, active_weight, dependency_group, pair_key, temporal_relation, temporal_score,
-    values_match,
+    TemporalRelation, active_weight, corroborated_score, dependency_group, high_base_rate_pairs,
+    matching_pairs, mean_temporal_compatibility, pair_key_cmp, temporal_relation, temporal_score,
+    unique_observation_ids,
 };
 use crate::{
     Confidence, EdgeType, Entity, EntityType, EvidenceStore, EvidenceValue, Observation,
@@ -1585,9 +1586,9 @@ struct Support {
 }
 
 #[derive(Debug, Clone)]
-struct ComparablePair {
-    left: WebsiteObservation,
-    right: WebsiteObservation,
+struct ComparablePair<'a> {
+    left: &'a WebsiteObservation,
+    right: &'a WebsiteObservation,
     temporal_relation: TemporalRelation,
     base_weight: u16,
 }
@@ -1650,6 +1651,15 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         &mut self.evidence
     }
 
+    /// Consumes the engine and returns its canonical evidence store, so a caller composing the website engine with
+    /// the OSINT, infrastructure, and fusion engines can move the store into the
+    /// next stage without cloning it
+    /// (see [`Self::evidence`] to borrow it in place).
+    #[must_use]
+    pub fn into_evidence(self) -> EvidenceStore {
+        self.evidence
+    }
+
     /// Configured resource limits.
     #[must_use]
     pub const fn limits(&self) -> WebsiteLimits {
@@ -1663,68 +1673,66 @@ impl WebsiteLineageEcosystemAnalysisEngine {
     }
 
     /// Registers and transactionally persists one website observation.
+    ///
+    /// A refused observation (limit, duplicate id, conflicting source or
+    /// canonical record, invalid provenance) leaves the engine and its
+    /// evidence store unchanged.
     pub fn observe(&mut self, observation: WebsiteObservation) -> Result<(), WebsiteError> {
-        if self.observations.len() >= self.limits.max_observations {
-            return Err(WebsiteError::ResourceLimit {
-                resource: "observations",
-                limit: self.limits.max_observations,
-            });
-        }
-        let observation_id = observation.id().to_owned();
-        if self.observations.contains_key(&observation_id) {
-            return Err(WebsiteError::DuplicateObservation { observation_id });
-        }
-
-        let mut evidence = self.evidence.clone();
-        if let Some(existing) = evidence.source(observation.source_id()) {
-            if existing != observation.source() {
-                return Err(WebsiteError::SourceConflict {
-                    source_id: observation.source_id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_source(observation.source().clone())?;
-        }
-        if evidence.entity(observation.website_id()).is_none() {
-            evidence.add_entity(
-                Entity::new(observation.website_id(), EntityType::Website)
-                    .map_err(WebsiteError::from)?,
-            )?;
-        }
-        let canonical = observation.canonical_observation()?;
-        if let Some(existing) = evidence.observation(observation.id()) {
-            if existing != &canonical {
-                return Err(WebsiteError::ObservationConflict {
-                    observation_id: observation.id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_observation(canonical)?;
-        }
-
-        self.evidence = evidence;
-        self.website_observations
-            .entry(observation.website_id().to_owned())
-            .or_default()
-            .insert(observation.id().to_owned());
-        self.observations.insert(observation_id, observation);
-        Ok(())
+        let Self {
+            evidence,
+            limits,
+            observations,
+            website_observations,
+            ..
+        } = self;
+        observe_into(
+            evidence,
+            observations,
+            website_observations,
+            *limits,
+            observation,
+        )
     }
 
     /// Extracts and transactionally persists every feature in a snapshot.
+    ///
+    /// The snapshot is all-or-nothing: if any extracted feature is refused,
+    /// the engine and its evidence store are left unchanged.
     pub fn observe_snapshot(
         &mut self,
         snapshot: &WebsiteSnapshot,
     ) -> Result<Vec<String>, WebsiteError> {
-        let observations = snapshot.extract_observations()?;
-        let mut candidate = self.clone();
-        let mut ids = Vec::with_capacity(observations.len());
-        for observation in observations {
-            ids.push(observation.id().to_owned());
-            candidate.observe(observation)?;
+        let extracted = snapshot.extract_observations()?;
+        let Self {
+            evidence,
+            limits,
+            observations,
+            website_observations,
+            ..
+        } = self;
+        let mut ids = Vec::with_capacity(extracted.len());
+        let outcome = evidence.transaction(|store| {
+            for observation in extracted {
+                let id = observation.id().to_owned();
+                observe_into(
+                    store,
+                    observations,
+                    website_observations,
+                    *limits,
+                    observation,
+                )?;
+                ids.push(id);
+            }
+            Ok::<(), WebsiteError>(())
+        });
+        if outcome.is_err() {
+            for id in &ids {
+                if let Some(observation) = observations.remove(id) {
+                    forget_index(website_observations, observation.website_id(), id);
+                }
+            }
         }
-        *self = candidate;
-        Ok(ids)
+        outcome.map(|()| ids)
     }
 
     /// Convenience alias for [`Self::observe`].
@@ -1808,7 +1816,7 @@ impl WebsiteLineageEcosystemAnalysisEngine {
             });
         }
 
-        let correlation_id = format!("website-lineage:{left_website}:{right_website}");
+        let correlation_id = correlation_identifier(&left_website, &right_website);
         if self.correlations.contains_key(&correlation_id) {
             return Err(WebsiteError::DuplicateCorrelation { correlation_id });
         }
@@ -1841,7 +1849,7 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         let leading_explanation = baseline.explanation;
         let operator_assessment = operator_assessment(&baseline);
         let temporal_relation = strongest_temporal_relation(&baseline);
-        let observation_ids = unique_observation_ids(&baseline);
+        let observation_ids = unique_observation_ids(baseline.supporting_observation_ids());
         let predicate = format!("website-lineage:{}", leading_explanation.as_str());
         let relationship_id = format!("{correlation_id}:relationship");
         let edge_type = if falsification.survives {
@@ -1863,15 +1871,12 @@ impl WebsiteLineageEcosystemAnalysisEngine {
             relationship_id: relationship_id.clone(),
         };
 
-        let mut evidence = self.evidence.clone();
-        if let Some(existing) = evidence.source(self.lineage_source.id()) {
-            if existing != &self.lineage_source {
-                return Err(WebsiteError::SourceConflict {
-                    source_id: self.lineage_source.id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_source(self.lineage_source.clone())?;
+        if let Some(existing) = self.evidence.source(self.lineage_source.id())
+            && existing != &self.lineage_source
+        {
+            return Err(WebsiteError::SourceConflict {
+                source_id: self.lineage_source.id().to_owned(),
+            });
         }
         let timestamp = observation_ids
             .iter()
@@ -1894,7 +1899,14 @@ impl WebsiteLineageEcosystemAnalysisEngine {
             provenance,
         )?
         .with_confidence(baseline.confidence);
-        evidence.add_relationship(relationship)?;
+        let lineage_source = &self.lineage_source;
+        self.evidence.transaction(|store| {
+            if store.source(lineage_source.id()).is_none() {
+                store.add_source(lineage_source.clone())?;
+            }
+            store.add_relationship(relationship)?;
+            Ok::<(), WebsiteError>(())
+        })?;
 
         let report = WebsiteLineageReport {
             edge,
@@ -1913,7 +1925,6 @@ impl WebsiteLineageEcosystemAnalysisEngine {
                 WebsitePhase::Recompute,
             ],
         };
-        self.evidence = evidence;
         self.correlations.insert(correlation_id, report.clone());
         Ok(report)
     }
@@ -1927,12 +1938,43 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         self.correlate(left_website, right_website)
     }
 
-    /// Correlates every pair of websites, skipping pairs without matches.
+    /// Correlates every pair of websites not yet correlated in either
+    /// direction, skipping pairs without matches.
+    ///
+    /// The batch is transactional: any other failure (a resource limit, a
+    /// source conflict, a provenance error) leaves the engine and its evidence
+    /// store unchanged. Only the reports persisted by this call are returned,
+    /// in website-identifier order, so repeating the call once every comparable
+    /// pair is covered yields an empty list rather than a duplicate-correlation
+    /// error.
     pub fn correlate_all(&mut self) -> Result<Vec<WebsiteLineageReport>, WebsiteError> {
         let website_ids: Vec<_> = self.website_observations.keys().cloned().collect();
         let mut reports = Vec::new();
+        let outcome = EvidenceStore::transaction_through(
+            self,
+            |engine| &mut engine.evidence,
+            |engine| engine.correlate_pairs(&website_ids, &mut reports),
+        );
+        if outcome.is_err() {
+            for report in &reports {
+                self.correlations.remove(report.edge().id());
+            }
+        }
+        outcome.map(|()| reports)
+    }
+
+    /// Correlates every uncorrelated comparable pair in key order, appending
+    /// each persisted report; the caller provides the transaction.
+    fn correlate_pairs(
+        &mut self,
+        website_ids: &[String],
+        reports: &mut Vec<WebsiteLineageReport>,
+    ) -> Result<(), WebsiteError> {
         for (left_index, left_website) in website_ids.iter().enumerate() {
             for right_website in website_ids.iter().skip(left_index + 1) {
+                if self.is_correlated(left_website, right_website) {
+                    continue;
+                }
                 match self.correlate(left_website, right_website) {
                     Ok(report) => reports.push(report),
                     Err(WebsiteError::NoComparableObservations { .. }) => {}
@@ -1940,7 +1982,16 @@ impl WebsiteLineageEcosystemAnalysisEngine {
                 }
             }
         }
-        Ok(reports)
+        Ok(())
+    }
+
+    /// Whether a pair already has a persisted correlation in either direction.
+    fn is_correlated(&self, left_website: &str, right_website: &str) -> bool {
+        self.correlations
+            .contains_key(&correlation_identifier(left_website, right_website))
+            || self
+                .correlations
+                .contains_key(&correlation_identifier(right_website, left_website))
     }
 
     /// Returns persisted correlations ordered by descending confidence.
@@ -1955,52 +2006,42 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         reports
     }
 
-    fn comparable_pairs(&self, left_website: &str, right_website: &str) -> Vec<ComparablePair> {
-        let left_observations: Vec<_> = self
-            .observations_for_website(left_website)
-            .cloned()
-            .collect();
-        let right_observations: Vec<_> = self
-            .observations_for_website(right_website)
-            .cloned()
-            .collect();
+    fn comparable_pairs(&self, left_website: &str, right_website: &str) -> Vec<ComparablePair<'_>> {
+        let left_observations: Vec<&WebsiteObservation> =
+            self.observations_for_website(left_website).collect();
+        let right_observations: Vec<&WebsiteObservation> =
+            self.observations_for_website(right_website).collect();
         let mut pairs = Vec::new();
-        for left in left_observations {
-            for right in &right_observations {
-                if !values_match(&left, right) {
-                    continue;
-                }
-                let temporal_relation = temporal_relation(
-                    left.timeline(),
-                    right.timeline(),
-                    self.limits.maximum_temporal_gap,
-                );
-                let temporal_score = temporal_score(
-                    temporal_relation,
-                    left.timeline(),
-                    right.timeline(),
-                    self.limits.maximum_temporal_gap,
-                );
-                let factor_weight = (u16::from(left.factors().calibrated_weight())
-                    + u16::from(right.factors().calibrated_weight()))
-                    / 2;
-                let signal_weight = feature_signal_weight(&left, right);
-                let mut base_weight = (factor_weight.saturating_mul(signal_weight) / 100
-                    + u16::from(temporal_score))
-                    / 2;
-                if left.is_high_base_rate() || right.is_high_base_rate() {
-                    base_weight /= 2;
-                }
-                if temporal_relation == TemporalRelation::Disjoint {
-                    base_weight /= 2;
-                }
-                pairs.push(ComparablePair {
-                    left: left.clone(),
-                    right: right.clone(),
-                    temporal_relation,
-                    base_weight,
-                });
+        for (left, right) in matching_pairs(&left_observations, &right_observations) {
+            let temporal_relation = temporal_relation(
+                left.timeline(),
+                right.timeline(),
+                self.limits.maximum_temporal_gap,
+            );
+            let temporal_score = temporal_score(
+                temporal_relation,
+                left.timeline(),
+                right.timeline(),
+                self.limits.maximum_temporal_gap,
+            );
+            let factor_weight = (u16::from(left.factors().calibrated_weight())
+                + u16::from(right.factors().calibrated_weight()))
+                / 2;
+            let signal_weight = feature_signal_weight(left, right);
+            let mut base_weight =
+                (factor_weight.saturating_mul(signal_weight) / 100 + u16::from(temporal_score)) / 2;
+            if left.is_high_base_rate() || right.is_high_base_rate() {
+                base_weight /= 2;
             }
+            if temporal_relation == TemporalRelation::Disjoint {
+                base_weight /= 2;
+            }
+            pairs.push(ComparablePair {
+                left,
+                right,
+                temporal_relation,
+                base_weight,
+            });
         }
         pairs.sort_by(|left, right| {
             left.left
@@ -2011,14 +2052,14 @@ impl WebsiteLineageEcosystemAnalysisEngine {
         pairs
     }
 
-    fn supports(&self, pairs: &[ComparablePair]) -> Vec<Support> {
+    fn supports(&self, pairs: &[ComparablePair<'_>]) -> Vec<Support> {
         let mut supports = Vec::new();
         for pair in pairs {
-            let explanations = explanations_for(&pair.left, &pair.right);
+            let explanations = explanations_for(pair.left, pair.right);
             let group = format!(
                 "{}|{}",
-                dependency_group(&pair.left),
-                dependency_group(&pair.right)
+                dependency_group(pair.left),
+                dependency_group(pair.right)
             );
             let uncertainty = pair
                 .left
@@ -2028,7 +2069,7 @@ impl WebsiteLineageEcosystemAnalysisEngine {
                 .max(pair.right.factors().uncertainty().value());
             for explanation in explanations {
                 let mut weight = pair.base_weight;
-                weight = explanation_weight(explanation, weight, &pair.left, &pair.right);
+                weight = explanation_weight(explanation, weight, pair.left, pair.right);
                 supports.push(Support {
                     explanation,
                     left_observation: pair.left.id().to_owned(),
@@ -2211,14 +2252,91 @@ impl SupportFields for Support {
     }
 }
 
+/// Validates one observation against the registry and the live store, then
+/// persists it inside a (nested) store transaction and indexes it.
+///
+/// Nothing is written unless every check passes, so the caller's registry
+/// and the store agree after both success and refusal.
+fn observe_into(
+    evidence: &mut EvidenceStore,
+    observations: &mut BTreeMap<String, WebsiteObservation>,
+    website_observations: &mut BTreeMap<String, BTreeSet<String>>,
+    limits: WebsiteLimits,
+    observation: WebsiteObservation,
+) -> Result<(), WebsiteError> {
+    if observations.len() >= limits.max_observations() {
+        return Err(WebsiteError::ResourceLimit {
+            resource: "observations",
+            limit: limits.max_observations(),
+        });
+    }
+    let observation_id = observation.id().to_owned();
+    if observations.contains_key(&observation_id) {
+        return Err(WebsiteError::DuplicateObservation { observation_id });
+    }
+    if let Some(existing) = evidence.source(observation.source_id())
+        && existing != observation.source()
+    {
+        return Err(WebsiteError::SourceConflict {
+            source_id: observation.source_id().to_owned(),
+        });
+    }
+    let canonical = observation.canonical_observation()?;
+    if let Some(existing) = evidence.observation(observation.id())
+        && existing != &canonical
+    {
+        return Err(WebsiteError::ObservationConflict { observation_id });
+    }
+    evidence.transaction(|store| {
+        if store.source(observation.source_id()).is_none() {
+            store.add_source(observation.source().clone())?;
+        }
+        if store.entity(observation.website_id()).is_none() {
+            store.add_entity(Entity::new(observation.website_id(), EntityType::Website)?)?;
+        }
+        if store.observation(observation.id()).is_none() {
+            store.add_observation(canonical)?;
+        }
+        Ok::<(), WebsiteError>(())
+    })?;
+    website_observations
+        .entry(observation.website_id().to_owned())
+        .or_default()
+        .insert(observation_id.clone());
+    observations.insert(observation_id, observation);
+    Ok(())
+}
+
+/// Drops one observation id from a website's index, removing the website's
+/// entry when it becomes empty.
+fn forget_index(
+    website_observations: &mut BTreeMap<String, BTreeSet<String>>,
+    website_id: &str,
+    observation_id: &str,
+) {
+    if let Some(ids) = website_observations.get_mut(website_id) {
+        ids.remove(observation_id);
+        if ids.is_empty() {
+            website_observations.remove(website_id);
+        }
+    }
+}
+
+/// Stable identifier of the persisted correlation from `left_website` to
+/// `right_website`.
+fn correlation_identifier(left_website: &str, right_website: &str) -> String {
+    format!("website-lineage:{left_website}:{right_website}")
+}
+
 fn rank_supports(supports: &[Support], mode: ScoreMode<'_>) -> Vec<WebsiteCorrelationRanking> {
+    let flagged = high_base_rate_pairs(supports);
     let mut explanations = BTreeSet::new();
     for support in supports {
         explanations.insert(support.explanation);
     }
     let mut rankings = explanations
         .into_iter()
-        .map(|explanation| rank_explanation(supports, explanation, mode))
+        .map(|explanation| rank_explanation(supports, &flagged, explanation, mode))
         .collect::<Vec<_>>();
     rankings.sort_by(|left, right| {
         right.score.cmp(&left.score).then_with(|| {
@@ -2243,6 +2361,7 @@ fn explanation_order(explanation: WebsiteExplanation) -> u8 {
 
 fn rank_explanation(
     supports: &[Support],
+    flagged: &BTreeSet<(&str, &str)>,
     explanation: WebsiteExplanation,
     mode: ScoreMode<'_>,
 ) -> WebsiteCorrelationRanking {
@@ -2259,8 +2378,7 @@ fn rank_explanation(
         match retained.get(&support.group) {
             Some((previous, previous_weight))
                 if *previous_weight > weight
-                    || (*previous_weight == weight
-                        && pair_key(previous).as_str() <= pair_key(support).as_str()) =>
+                    || (*previous_weight == weight && pair_key_cmp(*previous, support).is_le()) =>
             {
                 collapsed.push(to_pair(support, weight));
             }
@@ -2283,28 +2401,14 @@ fn rank_explanation(
         .map(|pair| pair.weight)
         .max()
         .unwrap_or(0);
-    let corroboration =
-        ((independent_support.saturating_sub(1) as u16) * 10).min(100 - strongest.min(100));
-    let score = strongest.saturating_add(corroboration);
-    let temporal_compatibility = if supporting_pairs.is_empty() {
-        0
-    } else {
-        let total: u16 = supporting_pairs
-            .iter()
-            .map(|pair| match pair.temporal_relation {
-                TemporalRelation::Overlapping => 100,
-                TemporalRelation::Contiguous => 75,
-                TemporalRelation::Disjoint => 0,
-            })
-            .sum();
-        (total / supporting_pairs.len() as u16) as u8
-    };
+    let score = corroborated_score(strongest, independent_support);
+    let temporal_compatibility =
+        mean_temporal_compatibility(supporting_pairs.iter().map(|pair| pair.temporal_relation));
     let high_base_rate_support = supporting_pairs.iter().any(|pair| {
-        supports.iter().any(|support| {
-            support.left_observation == pair.left_observation
-                && support.right_observation == pair.right_observation
-                && support.high_base_rate
-        })
+        flagged.contains(&(
+            pair.left_observation.as_str(),
+            pair.right_observation.as_str(),
+        ))
     });
     WebsiteCorrelationRanking {
         explanation,
@@ -2342,7 +2446,7 @@ fn build_falsification(
         .max_by(|left, right| {
             active_weight(left, ScoreMode::Baseline)
                 .cmp(&active_weight(right, ScoreMode::Baseline))
-                .then_with(|| pair_key(left).cmp(&pair_key(right)))
+                .then_with(|| pair_key_cmp(left, right))
         })
         .map(|support| support.group.clone());
     let without_strongest_support = rank_supports(
@@ -2369,7 +2473,7 @@ fn build_falsification(
             .max_by(|left, right| {
                 active_weight(left, ScoreMode::Baseline)
                     .cmp(&active_weight(right, ScoreMode::Baseline))
-                    .then_with(|| pair_key(left).cmp(&pair_key(right)))
+                    .then_with(|| pair_key_cmp(left, right))
             })
             .map(|support| to_pair(support, active_weight(support, ScoreMode::Baseline)))
     });
@@ -2436,13 +2540,6 @@ fn strongest_temporal_relation(ranking: &WebsiteCorrelationRanking) -> TemporalR
         .map(WebsiteObservationPair::temporal_relation)
         .min()
         .unwrap_or(TemporalRelation::Disjoint)
-}
-
-fn unique_observation_ids(ranking: &WebsiteCorrelationRanking) -> Vec<String> {
-    let mut ids = ranking.supporting_observation_ids();
-    ids.sort();
-    ids.dedup();
-    ids
 }
 
 fn operator_assessment(ranking: &WebsiteCorrelationRanking) -> OperatorAssessment {

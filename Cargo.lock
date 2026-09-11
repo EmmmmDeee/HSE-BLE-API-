@@ -11,11 +11,11 @@ dependencies = [
 
 [[package]]
 name = "bleradar-core"
-version = "0.6.0"
+version = "0.6.10"
 
 [[package]]
 name = "bleradar-jni"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bleradar-core",
 ]

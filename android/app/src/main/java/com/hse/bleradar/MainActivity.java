@@ -93,13 +93,16 @@ public final class MainActivity extends android.app.Activity {
     @Override
     protected void onStart() {
         super.onStart();
-        Intent intent = new Intent(this, RadarScanService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
-        }
-        bindService(intent, connection, Context.BIND_AUTO_CREATE);
+        // Bind only. The service is promoted to the foreground solely by a
+        // scan request (see onToggleClicked / RadarScanService.onStartCommand),
+        // which is the only point where the Bluetooth runtime permissions the
+        // connectedDevice foreground type requires on API 34+ are known to be
+        // granted; promoting here, before any grant, would throw there.
+        bindService(serviceIntent(), connection, Context.BIND_AUTO_CREATE);
+    }
+
+    private Intent serviceIntent() {
+        return new Intent(this, RadarScanService.class);
     }
 
     @Override
@@ -194,13 +197,17 @@ public final class MainActivity extends android.app.Activity {
             return;
         }
         if (!isBluetoothEnabled()) {
-            statusText.setText(R.string.status_bluetooth_off);
+            setStatus(getString(R.string.status_bluetooth_off));
             return;
         }
+        // Permissions are granted here, so the service may now be promoted to
+        // a connectedDevice foreground service; the started state is what lets
+        // a sticky restart resume the scan after process death.
+        startForegroundService(serviceIntent());
         if (boundService.startScanning()) {
             toggleButton.setText(R.string.action_stop);
         } else {
-            statusText.setText(R.string.status_permission_required);
+            setStatus(getString(R.string.status_permission_required));
         }
     }
 
@@ -211,7 +218,24 @@ public final class MainActivity extends android.app.Activity {
     }
 
     private void applyIdleStatus() {
-        statusText.setText(R.string.status_idle);
+        setStatus(getString(R.string.status_idle));
+    }
+
+    /**
+     * Every status line goes through here so a failed native-library load is
+     * always visible: without {@code libbleradar_jni.so} the engine still
+     * records raw RSSI, but every distance, bound, and confidence is
+     * unavailable, and silently presenting that as a normal scan would turn a
+     * failure into apparent success.
+     */
+    private void setStatus(CharSequence status) {
+        if (NativeRadar.isAvailable()) {
+            statusText.setText(status);
+            return;
+        }
+        Throwable error = NativeRadar.loadError();
+        String cause = error == null ? "unknown" : error.getClass().getSimpleName();
+        statusText.setText(status + "\n" + getString(R.string.status_native_unavailable, cause));
     }
 
     private void refreshUiLoop() {
@@ -220,8 +244,13 @@ public final class MainActivity extends android.app.Activity {
             radarView.setBlips(blips);
             deviceListAdapter.replaceAll(blips);
             if (boundService.isScanning()) {
-                statusText.setText(getString(R.string.status_scanning_fmt, blips.size()));
+                setStatus(getString(R.string.status_scanning_fmt, blips.size()));
                 toggleButton.setText(R.string.action_stop);
+            } else if (getString(R.string.action_stop).contentEquals(toggleButton.getText())) {
+                // The scan ended without a toggle (scan failure, or the sticky
+                // service could not resume): reflect the real state.
+                toggleButton.setText(R.string.action_start);
+                applyIdleStatus();
             }
         }
         uiHandler.postDelayed(refreshTicker, UI_REFRESH_INTERVAL_MILLIS);

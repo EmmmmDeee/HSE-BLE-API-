@@ -697,3 +697,154 @@ fn limits_and_repeated_correlations_are_enforced() {
         Err(InfrastructureError::NoComparableObservations { .. })
     ));
 }
+
+#[test]
+fn edge_observation_ids_are_unique_and_sorted() {
+    // One node-a certificate matches two independent node-b certificates, so
+    // the same node-a observation supports two retained pairs. The edge and
+    // its persisted provenance must cite it once, as the website engine
+    // already did.
+    let mut engine = TemporalMetamorphicInfrastructureCorrelationEngine::new(EvidenceStore::new());
+    for (id, node, source_id) in [
+        ("b-cert-2", "node-b", "source-b2"),
+        ("a-cert", "node-a", "source-a"),
+        ("b-cert-1", "node-b", "source-b1"),
+    ] {
+        engine
+            .observe(observation(
+                id,
+                node,
+                InfrastructureKind::Certificate,
+                "sha256:shared",
+                source(source_id, None),
+                100,
+            ))
+            .unwrap();
+    }
+
+    let report = engine.correlate("node-a", "node-b").unwrap();
+    assert_eq!(report.rankings()[0].independent_support(), 2);
+    assert_eq!(
+        report.edge().observation_ids(),
+        &[
+            "a-cert".to_owned(),
+            "b-cert-1".to_owned(),
+            "b-cert-2".to_owned()
+        ]
+    );
+    let relationship = engine
+        .evidence()
+        .relationship(report.edge().relationship_id())
+        .unwrap();
+    assert_eq!(
+        relationship.provenance().observations(),
+        report.edge().observation_ids()
+    );
+}
+
+#[test]
+fn correlate_all_skips_pairs_already_correlated_in_either_direction_and_is_idempotent() {
+    let mut engine = TemporalMetamorphicInfrastructureCorrelationEngine::new(EvidenceStore::new());
+    for (index, node) in ["node-a", "node-b", "node-c"].into_iter().enumerate() {
+        engine
+            .observe(observation(
+                &format!("cert-{node}"),
+                node,
+                InfrastructureKind::Certificate,
+                "sha256:shared",
+                source(&format!("source-{index}"), None),
+                100,
+            ))
+            .unwrap();
+    }
+    engine.correlate("node-b", "node-a").unwrap();
+
+    let reports = engine.correlate_all().unwrap();
+    assert_eq!(
+        reports
+            .iter()
+            .map(|report| report.edge().id())
+            .collect::<Vec<_>>(),
+        [
+            "infrastructure-correlation:node-a:node-c",
+            "infrastructure-correlation:node-b:node-c"
+        ]
+    );
+    assert_eq!(engine.correlation_count(), 3);
+    assert!(
+        engine
+            .correlation("infrastructure-correlation:node-a:node-b")
+            .is_none()
+    );
+
+    assert!(engine.correlate_all().unwrap().is_empty());
+    assert_eq!(engine.correlation_count(), 3);
+    engine.evidence().validate().unwrap();
+}
+
+#[test]
+fn correlate_all_leaves_the_engine_unchanged_when_the_correlation_limit_is_hit() {
+    let limits = InfrastructureLimits::new(10, 2).unwrap();
+    let mut engine = TemporalMetamorphicInfrastructureCorrelationEngine::with_limits(
+        EvidenceStore::new(),
+        limits,
+    );
+    for (index, node) in ["node-a", "node-b", "node-c"].into_iter().enumerate() {
+        engine
+            .observe(observation(
+                &format!("cert-{node}"),
+                node,
+                InfrastructureKind::Certificate,
+                "sha256:shared",
+                source(&format!("source-{index}"), None),
+                100,
+            ))
+            .unwrap();
+    }
+    let evidence_len = engine.evidence().len();
+
+    let error = engine.correlate_all().unwrap_err();
+    assert_eq!(
+        error,
+        InfrastructureError::ResourceLimit {
+            resource: "correlations",
+            limit: 2,
+        }
+    );
+    assert_eq!(engine.correlation_count(), 0);
+    assert_eq!(engine.evidence().len(), evidence_len);
+    assert!(
+        engine
+            .evidence()
+            .relationship("infrastructure-correlation:node-a:node-b:relationship")
+            .is_none()
+    );
+    engine.evidence().validate().unwrap();
+}
+
+#[test]
+fn ranking_arithmetic_survives_hundreds_of_independent_supports() {
+    let mut engine = TemporalMetamorphicInfrastructureCorrelationEngine::new(EvidenceStore::new());
+    for node in ["node-a", "node-b"] {
+        for index in 0..26 {
+            engine
+                .observe(observation(
+                    &format!("{node}-{index}"),
+                    node,
+                    InfrastructureKind::Certificate,
+                    "sha256:shared",
+                    source(&format!("{node}-source-{index}"), None),
+                    100,
+                ))
+                .unwrap();
+        }
+    }
+
+    let report = engine.correlate("node-a", "node-b").unwrap();
+    let leading = &report.rankings()[0];
+    assert_eq!(leading.independent_support(), 676);
+    assert_eq!(leading.temporal_compatibility().value(), 100);
+    assert_eq!(report.confidence().value(), 100);
+    assert_eq!(report.edge().observation_ids().len(), 52);
+    engine.evidence().validate().unwrap();
+}

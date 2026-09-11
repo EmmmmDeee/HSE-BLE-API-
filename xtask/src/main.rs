@@ -20,6 +20,7 @@ mod zip_reader;
 
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -27,6 +28,38 @@ use std::process::{Command, ExitCode};
 /// database `cargo audit` reads directly (no materialization needed: unlike
 /// `cargo deny`, `cargo audit` tolerates a plain, non-git directory).
 const AUDIT_DB_PATH: &str = "vendor/rustsec-advisory-db/advisory-db-3157b0e258782691";
+
+/// The committed migration archive that retains the immutable native oracles.
+const MIGRATION_ZIP_NAME: &str = "BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip";
+/// Zip entry of the immutable v0.3.0 native oracle inside [`MIGRATION_ZIP_NAME`].
+const ORACLE_SO_ZIP_ENTRY: &str = "oracle/libbleradar_core.so";
+/// SHA-256 of that oracle `.so`, pinned so `oracle-differential` refuses to run
+/// against anything but the recorded immutable binary.
+const ORACLE_SO_SHA256: &str = "d14022cd113332312fb1719aafa107155a4c046c056cb9b2bcd3c94eb980b12d";
+/// Committed executed-oracle ground truth `oracle-differential` regenerates and
+/// drift-checks (relative to the repo root).
+const EXECUTED_VECTORS_PATH: &str = "crates/bleradar-compat/tests/oracle/wifi_executed_vectors.tsv";
+/// Committed executed-oracle geodesy ground truth (relative to the repo root).
+const GEODESY_VECTORS_PATH: &str =
+    "crates/bleradar-compat/tests/oracle/geodesy_executed_vectors.tsv";
+/// Committed executed-oracle BLE-signal ground truth (relative to the repo root).
+const SIGNAL_VECTORS_PATH: &str = "crates/bleradar-compat/tests/oracle/signal_executed_vectors.tsv";
+/// Committed executed-oracle wifi_distance ground truth (relative to the repo root).
+const WIFI_DISTANCE_VECTORS_PATH: &str =
+    "crates/bleradar-compat/tests/oracle/wifi_distance_executed_vectors.tsv";
+/// Committed executed-oracle wifi_security/is_enterprise ground truth (relative to the repo root).
+const WIFI_SECURITY_VECTORS_PATH: &str =
+    "crates/bleradar-compat/tests/oracle/wifi_security_executed_vectors.tsv";
+/// The WiFi differential harness source, compiled for aarch64 and run under qemu.
+const ORACLE_HARNESS_C: &str = include_str!("oracle_harness.c");
+/// The geodesy differential harness source, compiled for aarch64 and run under qemu.
+const ORACLE_HARNESS_GEO_C: &str = include_str!("oracle_harness_geo.c");
+/// The BLE-signal differential harness source, compiled for aarch64 and run under qemu.
+const ORACLE_HARNESS_SIGNAL_C: &str = include_str!("oracle_harness_signal.c");
+/// The wifi_distance differential harness source, compiled for aarch64 and run under qemu.
+const ORACLE_HARNESS_WIFI_DISTANCE_C: &str = include_str!("oracle_harness_wifi_distance.c");
+/// The wifi_security/is_enterprise differential harness source, compiled for aarch64 and run under qemu.
+const ORACLE_HARNESS_WIFI_SECURITY_C: &str = include_str!("oracle_harness_wifi_security.c");
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -45,8 +78,10 @@ fn main() -> ExitCode {
         "dex-classes" => cmd_dex_classes(&rest),
         "vendor-advisory-db" => cmd_vendor_advisory_db(),
         "build-apk" => cmd_build_apk(),
+        "check-jni-contract" => cmd_check_jni_contract(&rest),
         "verify-jni-live" => cmd_verify_jni_live(),
         "verify-android-live" => cmd_verify_android_live(),
+        "oracle-differential" => cmd_oracle_differential(),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -83,11 +118,13 @@ fn print_usage() {
          \x20 dex-classes <classes.dex>  print sorted class descriptors\n\
          \x20 vendor-advisory-db         materialize the offline cargo-deny advisory db\n\
          \x20 build-apk                  cross-compile + package + sign the Android radar APK\n\
+         \x20 check-jni-contract [lib]   fail unless NativeRadar.java's static natives and the library's Java_* exports match 1:1\n\
          \x20 verify-jni-live            run a live Java→JNI→Rust verification against NativeRadar.java\n\
          \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
+         \x20 oracle-differential        execute the immutable oracle under qemu-aarch64 and check the committed executed-oracle vectors (see docs/ORACLE_DIFFERENTIAL.md)\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
-         \x20 gates                      run every gate (fmt/clippy/build/test/doc/checks/audit/deny)"
+         \x20 gates                      run every gate (fmt/clippy/build/jni-contract/test/doc/checks/audit/deny)"
     );
 }
 
@@ -723,31 +760,349 @@ const REQUIRED_DEX_CLASSES: &[&str] = &[
     "com/hse/bleradar/BleScanEngine",
 ];
 
-/// Required exported JNI entrypoints the Android build must expose from the
-/// cross-compiled native library.
-const REQUIRED_JNI_EXPORTS: &[&str] = &[
-    "Java_com_hse_bleradar_NativeRadar_abiVersion",
-    "Java_com_hse_bleradar_NativeRadar_bleDistanceM",
-    "Java_com_hse_bleradar_NativeRadar_calibrationProfilePathLossExponent",
-    "Java_com_hse_bleradar_NativeRadar_calibrationProfileRssiAt1mDbm",
-    "Java_com_hse_bleradar_NativeRadar_defaultCalibrationProfile",
-    "Java_com_hse_bleradar_NativeRadar_defaultTrackingProfile",
-    "Java_com_hse_bleradar_NativeRadar_distanceLowerBoundM",
-    "Java_com_hse_bleradar_NativeRadar_distanceUpperBoundM",
-    "Java_com_hse_bleradar_NativeRadar_filteredRssi",
-    "Java_com_hse_bleradar_NativeRadar_proximityLabel",
-    "Java_com_hse_bleradar_NativeRadar_signalConfidencePercent",
-    "Java_com_hse_bleradar_NativeRadar_signalTrend",
-    "Java_com_hse_bleradar_NativeRadar_trackingConfidencePercent",
-    "Java_com_hse_bleradar_NativeRadar_trackingDistanceLowerBoundM",
-    "Java_com_hse_bleradar_NativeRadar_trackingDistanceM",
-    "Java_com_hse_bleradar_NativeRadar_trackingDistanceProximity",
-    "Java_com_hse_bleradar_NativeRadar_trackingDistanceUpperBoundM",
-    "Java_com_hse_bleradar_NativeRadar_trackingFilteredRssi",
-    "Java_com_hse_bleradar_NativeRadar_trackingFreshness",
-    "Java_com_hse_bleradar_NativeRadar_trackingProximity",
-    "Java_com_hse_bleradar_NativeRadar_trackingTrend",
-];
+/// Symbol prefix every JNI export carries; used to select the JNI-facing
+/// subset of a native library's defined symbols for the contract check.
+const JNI_EXPORT_PREFIX: &str = "Java_";
+
+/// The complete JNI export contract derived from one Java façade source.
+///
+/// `NativeRadar.java` is the single authority: every `static native` method
+/// it declares must be backed by exactly one `Java_<package>_<class>_<method>`
+/// export in the built `bleradar-jni` library, and the library must export no
+/// `Java_`-prefixed symbol the façade does not declare. Deriving the expected
+/// set from the Java source (instead of a hand-maintained duplicate list)
+/// means adding, renaming, or removing a native on either side without the
+/// other fails `cargo xtask gates`, `verify-jni-live`, and
+/// `verify-android-live` with the exact drift named — rather than surfacing
+/// only on device as an `UnsatisfiedLinkError` at that method's first call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniExportContract {
+    /// `Java_<mangled package>_<mangled class>`.
+    symbol_prefix: String,
+    /// Sorted, deduplicated `static native` method names.
+    native_methods: Vec<String>,
+    /// Sorted expected export symbols, one per native method.
+    expected_exports: Vec<String>,
+}
+
+impl JniExportContract {
+    /// Parses `java_source` into the export contract it requires.
+    ///
+    /// Fails on: a missing `package`/`class` declaration, a `native` method
+    /// that is not `static` (the façade is a static utility class and the
+    /// live harness invokes natives without an instance), or two natives
+    /// sharing one name (JNI overloads need `__<signature>`-mangled exports,
+    /// which `bleradar-jni` deliberately does not implement).
+    fn from_java_source(java_source: &str) -> Result<Self, String> {
+        let code = strip_java_comments_and_literals(java_source);
+        let (package, class) = java_package_and_class(&code)?;
+        let native_methods = java_static_native_method_names(&code)?;
+        let symbol_prefix = format!(
+            "{JNI_EXPORT_PREFIX}{}_{}",
+            jni_mangle(&package),
+            jni_mangle(&class)
+        );
+        let expected_exports = native_methods
+            .iter()
+            .map(|name| format!("{symbol_prefix}_{}", jni_mangle(name)))
+            .collect();
+        Ok(Self {
+            symbol_prefix,
+            native_methods,
+            expected_exports,
+        })
+    }
+
+    /// Requires the `Java_`-prefixed subset of `defined_symbols` to equal
+    /// [`Self::expected_exports`] exactly: no declared native may lack an
+    /// export, and no export may lack a declaration.
+    fn require_exact_exports(&self, defined_symbols: &[String]) -> Result<(), String> {
+        let actual: Vec<&String> = defined_symbols
+            .iter()
+            .filter(|symbol| symbol.starts_with(JNI_EXPORT_PREFIX))
+            .collect();
+        let missing: Vec<&str> = self
+            .expected_exports
+            .iter()
+            .filter(|expected| !actual.contains(expected))
+            .map(String::as_str)
+            .collect();
+        let orphaned: Vec<&str> = actual
+            .iter()
+            .filter(|symbol| !self.expected_exports.contains(symbol))
+            .map(|symbol| symbol.as_str())
+            .collect();
+        if missing.is_empty() && orphaned.is_empty() {
+            return Ok(());
+        }
+        let mut problems = Vec::new();
+        if !missing.is_empty() {
+            problems.push(format!(
+                "{} native method(s) declared in NativeRadar.java have no export: {}",
+                missing.len(),
+                missing.join(", ")
+            ));
+        }
+        if !orphaned.is_empty() {
+            problems.push(format!(
+                "{} `{JNI_EXPORT_PREFIX}` export(s) have no `static native` declaration in NativeRadar.java: {}",
+                orphaned.len(),
+                orphaned.join(", ")
+            ));
+        }
+        Err(format!(
+            "JNI export contract violated: {}",
+            problems.join("; ")
+        ))
+    }
+}
+
+/// Blanks Java comments and string/char literal contents (keeping line
+/// structure and the quote characters) so declaration scanning cannot be
+/// fooled by the word `native` in Javadoc prose or in a string.
+fn strip_java_comments_and_literals(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '/' if chars.peek() == Some(&'/') => {
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = '\0';
+                for next in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    if next == '\n' {
+                        out.push('\n');
+                    }
+                    previous = next;
+                }
+                out.push(' ');
+            }
+            '"' | '\'' => {
+                out.push(c);
+                let mut escaped = false;
+                for next in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                        continue;
+                    }
+                    match next {
+                        '\\' => escaped = true,
+                        '\n' => {
+                            // Unterminated literal: keep the line break so
+                            // later diagnostics stay line-accurate.
+                            out.push('\n');
+                            break;
+                        }
+                        _ if next == c => break,
+                        _ => {}
+                    }
+                }
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn is_java_identifier_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
+}
+
+fn is_java_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|first| is_java_identifier_char(first) && !first.is_ascii_digit())
+        && chars.all(is_java_identifier_char)
+}
+
+/// Finds every whole-word occurrence of `keyword` in `code`, returning the
+/// byte offset of each match.
+fn whole_word_offsets<'a>(code: &'a str, keyword: &'a str) -> impl Iterator<Item = usize> + 'a {
+    code.match_indices(keyword).filter_map(move |(start, _)| {
+        let end = start + keyword.len();
+        let before_ok = code[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_java_identifier_char(c));
+        let after_ok = code[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_java_identifier_char(c));
+        (before_ok && after_ok).then_some(start)
+    })
+}
+
+/// Reads the `package a.b.c;` and first `class Name` declarations from
+/// comment-stripped Java `code`.
+fn java_package_and_class(code: &str) -> Result<(String, String), String> {
+    let package = whole_word_offsets(code, "package")
+        .find_map(|start| {
+            let rest = &code[start + "package".len()..];
+            let (name, _) = rest.split_once(';')?;
+            let name = name.trim();
+            (!name.is_empty() && name.split('.').all(is_java_identifier)).then(|| name.to_string())
+        })
+        .ok_or_else(|| "missing `package <name>;` declaration in NativeRadar.java".to_string())?;
+    let class = whole_word_offsets(code, "class")
+        .find_map(|start| {
+            let name = code[start + "class".len()..]
+                .split_whitespace()
+                .next()?
+                .trim_end_matches('{');
+            is_java_identifier(name).then(|| name.to_string())
+        })
+        .ok_or_else(|| "missing `class <Name>` declaration in NativeRadar.java".to_string())?;
+    Ok((package, class))
+}
+
+/// Returns the sorted, deduplicated names of every `static native` method
+/// declared in comment-stripped Java `code`.
+fn java_static_native_method_names(code: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for start in whole_word_offsets(code, "native") {
+        let end = start + "native".len();
+        let boundary = code[..start]
+            .rfind([';', '{', '}'])
+            .map_or(0, |index| index + 1);
+        let modifiers = &code[boundary..start];
+        let head_end = code[end..]
+            .find('(')
+            .map(|offset| end + offset)
+            .ok_or_else(|| {
+                format!(
+                    "native declaration without a parameter list: {:?}",
+                    code[boundary..end].trim()
+                )
+            })?;
+        let head = &code[end..head_end];
+        if head.contains([';', '{', '}']) {
+            return Err(format!(
+                "malformed native declaration: {:?}",
+                code[boundary..head_end].trim()
+            ));
+        }
+        let tokens: Vec<&str> = head.split_whitespace().collect();
+        let Some((name, return_type)) = tokens.split_last() else {
+            return Err(format!(
+                "native declaration without a return type and name: {:?}",
+                code[boundary..head_end].trim()
+            ));
+        };
+        if return_type.is_empty() || !is_java_identifier(name) {
+            return Err(format!(
+                "native declaration without a return type and name: {:?}",
+                code[boundary..head_end].trim()
+            ));
+        }
+        if !modifiers.split_whitespace().any(|token| token == "static") {
+            return Err(format!(
+                "non-static native method `{name}` is outside the JNI façade contract (every native must be `static`)"
+            ));
+        }
+        names.push((*name).to_string());
+    }
+    names.sort();
+    if let Some(pair) = names.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(format!(
+            "overloaded native method `{}`: JNI overloads need `__<signature>`-mangled exports, which bleradar-jni does not implement",
+            pair[0]
+        ));
+    }
+    Ok(names)
+}
+
+/// Applies the JNI symbol-name mangling rules (JNI Specification, "Resolving
+/// Native Method Names") to one package, class, or method name: `.`/`/`
+/// become `_`, `_` becomes `_1`, `;` becomes `_2`, `[` becomes `_3`, ASCII
+/// alphanumerics pass through, and anything else becomes `_0` + four
+/// lowercase hex digits of its code unit.
+fn jni_mangle(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            '.' | '/' => out.push('_'),
+            '_' => out.push_str("_1"),
+            ';' => out.push_str("_2"),
+            '[' => out.push_str("_3"),
+            c if c.is_ascii_alphanumeric() => out.push(c),
+            c => {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("_0{unit:04x}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Verifies the JNI export contract of one built native library against the
+/// repository's `NativeRadar.java`, printing the matched surface on success.
+fn verify_jni_export_contract(
+    java_source: &str,
+    library_path: &Path,
+) -> Result<JniExportContract, String> {
+    let contract = JniExportContract::from_java_source(java_source)?;
+    let defined_symbols = elf::defined_func_and_object_symbols(&read_bytes(library_path)?)
+        .map_err(|e| {
+            format!(
+                "parsing {}: {e} (the JNI export-contract check reads ELF64 little-endian libraries: Linux hosts and the Android cross-compile)",
+                library_path.display()
+            )
+        })?;
+    contract.require_exact_exports(&defined_symbols)?;
+    println!(
+        "jni export contract: {} `static native` methods in NativeRadar.java ↔ {} `{}_*` exports in {}: exact match",
+        contract.native_methods.len(),
+        contract.expected_exports.len(),
+        contract.symbol_prefix,
+        library_path.display()
+    );
+    Ok(contract)
+}
+
+/// Builds the host `bleradar-jni` cdylib and returns its path.
+fn build_host_jni_library(root: &Path) -> Result<PathBuf, String> {
+    run_status({
+        let mut c = Command::new("cargo");
+        c.current_dir(root)
+            .args(["build", "-p", "bleradar-jni", "--locked"]);
+        c
+    })?;
+    let host_lib = root
+        .join("target/debug")
+        .join(host_cdylib_file_name("bleradar_jni"));
+    if !host_lib.is_file() {
+        return Err(format!(
+            "expected host-built native library missing: {}",
+            host_lib.display()
+        ));
+    }
+    Ok(host_lib)
+}
+
+fn cmd_check_jni_contract(args: &[String]) -> Result<(), String> {
+    let root = repo_root()?;
+    let library_path = match args {
+        [] => build_host_jni_library(&root)?,
+        [path] => PathBuf::from(path),
+        _ => return Err("usage: cargo xtask check-jni-contract [lib.so]".to_string()),
+    };
+    let java_source = read_to_string(&root.join(NATIVE_RADAR_JAVA_PATH))?;
+    verify_jni_export_contract(&java_source, &library_path).map(|_| ())
+}
 
 /// Rust standard-library target `cargo xtask build-apk` cross-compiles the JNI
 /// bridge for.
@@ -904,7 +1259,13 @@ fn xtask_temp_dir(label: &str) -> PathBuf {
 
 /// Returns the Java source for a tiny live verifier that exercises the real
 /// `NativeRadar.java` façade and the host-built `bleradar-jni` library.
-fn jni_smoke_java_source(expected_abi_version: i32) -> String {
+///
+/// `expected_native_count` is the number of `static native` methods the
+/// xtask parser found in `NativeRadar.java`; the harness re-derives that set
+/// through JVM reflection, invokes every member so the JVM must actually
+/// resolve each export, and fails if the two views disagree — so neither a
+/// parser blind spot nor an unexported native can pass silently.
+fn jni_smoke_java_source(expected_abi_version: i32, expected_native_count: usize) -> String {
     format!(
         r#"import com.hse.bleradar.NativeRadar;
 
@@ -915,11 +1276,77 @@ public final class JniSmoke {{
         }}
     }}
 
+    private static Object defaultArgument(Class<?> type) {{
+        if (type == double.class) {{
+            return 0.0d;
+        }}
+        if (type == float.class) {{
+            return 0.0f;
+        }}
+        if (type == long.class) {{
+            return 0L;
+        }}
+        if (type == int.class) {{
+            return 0;
+        }}
+        if (type == short.class) {{
+            return (short) 0;
+        }}
+        if (type == byte.class) {{
+            return (byte) 0;
+        }}
+        if (type == char.class) {{
+            return '\0';
+        }}
+        if (type == boolean.class) {{
+            return false;
+        }}
+        throw new IllegalStateException("unsupported native parameter type: " + type.getName());
+    }}
+
+    /**
+     * Resolves and invokes every native the façade declares. The JVM links a
+     * native lazily at its first call, so only invoking each one proves the
+     * loaded library exports it; every export is a documented total function
+     * over primitives, so default arguments are safe.
+     */
+    private static void verifyEveryDeclaredNativeLinks() {{
+        java.util.List<String> linked = new java.util.ArrayList<>();
+        for (java.lang.reflect.Method method : NativeRadar.class.getDeclaredMethods()) {{
+            int modifiers = method.getModifiers();
+            if (!java.lang.reflect.Modifier.isNative(modifiers)) {{
+                continue;
+            }}
+            require(
+                    java.lang.reflect.Modifier.isStatic(modifiers),
+                    "non-static native method: " + method.getName());
+            Class<?>[] parameterTypes = method.getParameterTypes();
+            Object[] arguments = new Object[parameterTypes.length];
+            for (int i = 0; i < parameterTypes.length; i++) {{
+                arguments[i] = defaultArgument(parameterTypes[i]);
+            }}
+            try {{
+                method.invoke(null, arguments);
+            }} catch (ReflectiveOperationException error) {{
+                throw new IllegalStateException(
+                        "native method " + method.getName() + " did not link/execute", error);
+            }}
+            linked.add(method.getName());
+        }}
+        java.util.Collections.sort(linked);
+        require(
+                linked.size() == {expected_native_count},
+                "NativeRadar.java parse found {expected_native_count} static native methods but JVM reflection linked "
+                        + linked.size() + ": " + linked);
+        System.out.println("linked-natives=" + linked.size());
+    }}
+
     private static void verifySuccessPath() {{
         require(NativeRadar.isAvailable(), "NativeRadar unavailable: " + NativeRadar.loadError());
         require(
                 NativeRadar.abiVersion() == {expected_abi_version},
                 "abiVersion mismatch: " + NativeRadar.abiVersion());
+        verifyEveryDeclaredNativeLinks();
         double filtered = NativeRadar.filteredRssi(Double.NaN, -59.0, 0.35);
         require(Math.abs(filtered - (-59.0)) < 1e-9, "unexpected filtered RSSI bootstrap: " + filtered);
         double distance = NativeRadar.bleDistanceM(-59.0, -59.0, 2.0);
@@ -1014,6 +1441,68 @@ public final class JniSmoke {{
                         127.0)
                         == distanceWithoutTxPower,
                 "implausible txPowerDbm (TX_POWER_NOT_PRESENT sentinel) was not ignored");
+        verifyUpdateDecisionSurface();
+    }}
+
+    /**
+     * Exercises the automatic-update decision natives (ABI 8+) across the real
+     * JVM->.so boundary, so their argument order, `jboolean`/`jlong` encodings,
+     * and ordinal mappings are proven live rather than only in Rust.
+     */
+    private static void verifyUpdateDecisionSurface() {{
+        require(
+                NativeRadar.updateDecision(41L, 42L, 34, 26) == NativeRadar.UPDATE_AVAILABLE,
+                "unexpected update decision (available)");
+        require(
+                NativeRadar.updateDecision(42L, 42L, 34, 26) == NativeRadar.UPDATE_UP_TO_DATE,
+                "unexpected update decision (up to date)");
+        require(
+                NativeRadar.updateDecision(42L, 41L, 34, 26) == NativeRadar.UPDATE_DOWNGRADE_REFUSED,
+                "unexpected update decision (downgrade refused)");
+        require(
+                NativeRadar.updateDecision(41L, 42L, 24, 26) == NativeRadar.UPDATE_INCOMPATIBLE_OS,
+                "unexpected update decision (incompatible OS)");
+        require(
+                NativeRadar.shouldCheckForUpdate(1000L, 0L, 900L),
+                "update check should be due after the interval");
+        require(
+                !NativeRadar.shouldCheckForUpdate(1000L, 500L, 900L),
+                "update check should not be due before the interval");
+        require(
+                !NativeRadar.shouldCheckForUpdate(400L, 1000L, 900L),
+                "a backwards clock must not force an update check");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_UNMETERED, 80, false, 100000000L, false, 20, 0L, 40000000L)
+                        == NativeRadar.DOWNLOAD_READY,
+                "download should be ready on Wi-Fi with battery and storage");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_METERED, 80, false, 100000000L, false, 20, 0L, 40000000L)
+                        == NativeRadar.DOWNLOAD_METERED_BLOCKED,
+                "metered download should be blocked by the default policy");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_NONE, 80, true, 100000000L, true, 20, 0L, 40000000L)
+                        == NativeRadar.DOWNLOAD_NO_NETWORK,
+                "no network should block the download first");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_UNMETERED, 10, false, 100000000L, false, 20, 0L, 40000000L)
+                        == NativeRadar.DOWNLOAD_LOW_BATTERY,
+                "low battery should block the download");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_UNMETERED, 80, false, 30000000L, false, 20, 20000000L, 40000000L)
+                        == NativeRadar.DOWNLOAD_INSUFFICIENT_STORAGE,
+                "insufficient storage should block the download");
+        require(
+                NativeRadar.retryBackoffDelaySeconds(1, 10L, 60L) == 10L
+                        && NativeRadar.retryBackoffDelaySeconds(2, 10L, 60L) == 20L
+                        && NativeRadar.retryBackoffDelaySeconds(3, 10L, 60L) == 40L
+                        && NativeRadar.retryBackoffDelaySeconds(4, 10L, 60L) == 60L
+                        && NativeRadar.retryBackoffDelaySeconds(9, 10L, 60L) == 60L,
+                "retry backoff should be exponential and capped");
     }}
 
     private static void verifyFailurePath() {{
@@ -1505,22 +1994,11 @@ fn cmd_verify_jni_live() -> Result<(), String> {
     let expected_abi_version = find_java_static_final_int(&java_source, "EXPECTED_ABI_VERSION")?;
 
     println!("== building host bleradar-jni ==");
-    run_status({
-        let mut c = Command::new("cargo");
-        c.current_dir(&root)
-            .args(["build", "-p", "bleradar-jni", "--locked"]);
-        c
-    })?;
+    let host_lib = build_host_jni_library(&root)?;
 
-    let host_lib = root
-        .join("target/debug")
-        .join(host_cdylib_file_name("bleradar_jni"));
-    if !host_lib.is_file() {
-        return Err(format!(
-            "expected host-built native library missing: {}",
-            host_lib.display()
-        ));
-    }
+    println!("== jni export contract (NativeRadar.java ↔ host library) ==");
+    let contract = verify_jni_export_contract(&java_source, &host_lib)?;
+    let expected_native_count = contract.native_methods.len();
 
     let temp_dir = xtask_temp_dir("verify-jni-live");
     let src_dir = temp_dir.join("src");
@@ -1532,7 +2010,7 @@ fn cmd_verify_jni_live() -> Result<(), String> {
         .map_err(|e| format!("copying {} into live verifier: {e}", java_path.display()))?;
     fs::write(
         src_dir.join("JniSmoke.java"),
-        jni_smoke_java_source(expected_abi_version),
+        jni_smoke_java_source(expected_abi_version, expected_native_count),
     )
     .map_err(|e| format!("writing JniSmoke.java: {e}"))?;
 
@@ -1599,15 +2077,357 @@ fn cmd_verify_android_live() -> Result<(), String> {
         .map_err(|e| format!("parsing {}: {e}", dex_path.display()))?;
     require_expected_members(&dex_classes, REQUIRED_DEX_CLASSES, "DEX class set")?;
 
+    println!("== jni export contract (NativeRadar.java ↔ cross-compiled library) ==");
     let native_lib_path = root
         .join("target/aarch64-linux-android/release")
         .join(NATIVE_LIB_FILE_NAME);
-    let native_exports = elf::defined_func_and_object_symbols(&read_bytes(&native_lib_path)?)
-        .map_err(|e| format!("parsing {}: {e}", native_lib_path.display()))?;
-    require_expected_members(&native_exports, REQUIRED_JNI_EXPORTS, "JNI export set")?;
+    let java_source = read_to_string(&root.join(NATIVE_RADAR_JAVA_PATH))?;
+    verify_jni_export_contract(&java_source, &native_lib_path)?;
 
     println!("== verify-android-live complete ==");
     Ok(())
+}
+
+/// Executes the immutable v0.3.0 native oracle under `qemu-aarch64` against a
+/// real Android Bionic runtime and checks that its pure-contract outputs (WiFi
+/// channel<->frequency + band + distance + security/is_enterprise, geodesy, and
+/// BLE signal) still match the committed executed-oracle ground truth. See
+/// `docs/ORACLE_DIFFERENTIAL.md`.
+///
+/// This is a live command (like `verify-android-live`): it needs an NDK,
+/// `qemu-aarch64`, and a Bionic runtime, so it is not part of `gates`. The
+/// committed vectors it drift-checks are what the ordinary CI tests
+/// `oracle_differential.rs`, `oracle_geodesy_differential.rs`,
+/// `oracle_signal_differential.rs`, `oracle_wifi_distance_differential.rs` and
+/// `oracle_wifi_security_differential.rs` replay against the safe-Rust
+/// reconstruction.
+fn cmd_oracle_differential() -> Result<(), String> {
+    let root = repo_root()?;
+    let sdk = discover_sdk_root()?;
+    let ndk = discover_ndk_root(&sdk)?;
+    let clang = ndk_aarch64_clang(&ndk)?;
+    let qemu = locate_qemu_aarch64()?;
+    let sysroot = prepare_bionic_sysroot(&sdk)?;
+
+    let workdir = xtask_temp_dir("oracle-differential");
+    recreate_dirs(&[&workdir])?;
+
+    println!("== extract immutable oracle .so from migration archive ==");
+    let oracle_so = extract_and_pin_oracle_so(&root, &workdir)?;
+    println!("   oracle .so sha256 = {ORACLE_SO_SHA256} (verified)");
+
+    // Place the oracle where the Bionic linker will resolve it at run time.
+    let lib64 = sysroot.join("system/lib64");
+    fs::copy(&oracle_so, lib64.join("libbleradar_core.so"))
+        .map_err(|e| format!("copying oracle into the Bionic sysroot: {e}"))?;
+
+    let ctx = OracleDifferentialContext {
+        root: &root,
+        clang: &clang,
+        qemu: &qemu,
+        sysroot: &sysroot,
+        lib64: &lib64,
+        workdir: &workdir,
+    };
+    drift_check_harness(&ctx, "wifi", ORACLE_HARNESS_C, EXECUTED_VECTORS_PATH)?;
+    drift_check_harness(&ctx, "geodesy", ORACLE_HARNESS_GEO_C, GEODESY_VECTORS_PATH)?;
+    drift_check_harness(&ctx, "signal", ORACLE_HARNESS_SIGNAL_C, SIGNAL_VECTORS_PATH)?;
+    drift_check_harness(
+        &ctx,
+        "wifi_distance",
+        ORACLE_HARNESS_WIFI_DISTANCE_C,
+        WIFI_DISTANCE_VECTORS_PATH,
+    )?;
+    drift_check_harness(
+        &ctx,
+        "wifi_security",
+        ORACLE_HARNESS_WIFI_SECURITY_C,
+        WIFI_SECURITY_VECTORS_PATH,
+    )?;
+    Ok(())
+}
+
+/// Shared inputs for one or more executed-oracle harness drift checks.
+struct OracleDifferentialContext<'a> {
+    root: &'a Path,
+    clang: &'a Path,
+    qemu: &'a Path,
+    sysroot: &'a Path,
+    lib64: &'a Path,
+    workdir: &'a Path,
+}
+
+/// Compiles one committed harness for aarch64, runs it under qemu against the
+/// oracle, and fails if its output differs from the committed vectors at
+/// `vectors_rel_path`.
+fn drift_check_harness(
+    ctx: &OracleDifferentialContext<'_>,
+    label: &str,
+    harness_src: &str,
+    vectors_rel_path: &str,
+) -> Result<(), String> {
+    println!("== [{label}] compile aarch64 differential harness (NDK) ==");
+    let harness_c = ctx.workdir.join(format!("oracle_harness_{label}.c"));
+    fs::write(&harness_c, harness_src)
+        .map_err(|e| format!("writing {}: {e}", harness_c.display()))?;
+    let harness_bin = ctx.workdir.join(format!("oracle_harness_{label}"));
+    run_status({
+        let mut c = Command::new(ctx.clang);
+        c.arg(&harness_c)
+            .arg("-o")
+            .arg(&harness_bin)
+            .arg("-L")
+            .arg(ctx.lib64)
+            .arg("-lbleradar_core")
+            .arg("-Wl,--allow-shlib-undefined");
+        c
+    })?;
+
+    println!("== [{label}] execute the oracle under qemu-aarch64 ==");
+    let produced = run_capture({
+        let mut c = Command::new(ctx.qemu);
+        c.arg("-L")
+            .arg(ctx.sysroot)
+            .arg("-E")
+            .arg("LD_LIBRARY_PATH=/system/lib64")
+            .arg(&harness_bin);
+        c
+    })?;
+
+    println!("== [{label}] drift-check against {vectors_rel_path} ==");
+    let committed = read_to_string(&ctx.root.join(vectors_rel_path))?;
+    let committed_rows: Vec<&str> = committed
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let produced_rows: Vec<&str> = produced
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if produced_rows != committed_rows {
+        let mut detail = String::from("(row counts match but contents differ)");
+        for index in 0..committed_rows.len().max(produced_rows.len()) {
+            let committed_row = committed_rows.get(index).copied().unwrap_or("<missing>");
+            let produced_row = produced_rows.get(index).copied().unwrap_or("<missing>");
+            if committed_row != produced_row {
+                detail = format!(
+                    "first drift at data row {}: committed {committed_row:?} vs executed {produced_row:?}",
+                    index + 1
+                );
+                break;
+            }
+        }
+        return Err(format!(
+            "[{label}] executed-oracle output drifted from {vectors_rel_path} \
+             ({} committed vs {} executed rows); {detail}. If the sweep changed \
+             intentionally, regenerate the committed vectors from this output.",
+            committed_rows.len(),
+            produced_rows.len()
+        ));
+    }
+
+    println!(
+        "oracle-differential [{label}]: {} executed-oracle rows match the committed vectors",
+        produced_rows.len()
+    );
+    Ok(())
+}
+
+/// Finds `qemu-aarch64-static` (preferred) or `qemu-aarch64`, honoring an
+/// explicit `QEMU_AARCH64` override.
+fn locate_qemu_aarch64() -> Result<PathBuf, String> {
+    if let Ok(value) = env::var("QEMU_AARCH64") {
+        let path = PathBuf::from(value);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!("QEMU_AARCH64={} is not a file", path.display()));
+    }
+    which_in_path("qemu-aarch64-static")
+        .or_else(|| which_in_path("qemu-aarch64"))
+        .ok_or_else(|| {
+            "qemu-aarch64 not found: install qemu-user-static, or set QEMU_AARCH64 (see docs/ORACLE_DIFFERENTIAL.md)"
+                .to_string()
+        })
+}
+
+/// The NDK's aarch64 API-24 Clang driver for the current host.
+fn ndk_aarch64_clang(ndk_root: &Path) -> Result<PathBuf, String> {
+    let clang = ndk_root
+        .join("toolchains/llvm/prebuilt")
+        .join(ndk_host_tag())
+        .join("bin")
+        .join("aarch64-linux-android24-clang");
+    if clang.is_file() {
+        Ok(clang)
+    } else {
+        Err(format!(
+            "NDK aarch64 clang not found at {}",
+            clang.display()
+        ))
+    }
+}
+
+/// Extracts `oracle/libbleradar_core.so` from the committed migration archive
+/// into `workdir` (via `jar`, part of the JDK the live tier already needs) and
+/// refuses to proceed unless it matches the pinned immutable-oracle SHA-256.
+fn extract_and_pin_oracle_so(root: &Path, workdir: &Path) -> Result<PathBuf, String> {
+    let zip = root.join(MIGRATION_ZIP_NAME);
+    if !zip.is_file() {
+        return Err(format!("missing migration archive: {}", zip.display()));
+    }
+    let jar = locate_jar()?;
+    run_status({
+        let mut c = Command::new(&jar);
+        c.current_dir(workdir)
+            .arg("xf")
+            .arg(&zip)
+            .arg(ORACLE_SO_ZIP_ENTRY);
+        c
+    })?;
+    let extracted = workdir.join(ORACLE_SO_ZIP_ENTRY);
+    if !extracted.is_file() {
+        return Err(format!(
+            "jar did not extract {ORACLE_SO_ZIP_ENTRY} from {}",
+            zip.display()
+        ));
+    }
+    let actual = sha256::to_hex(&sha256::sha256(&read_bytes(&extracted)?));
+    if actual != ORACLE_SO_SHA256 {
+        return Err(format!(
+            "extracted oracle .so sha256 {actual} != pinned {ORACLE_SO_SHA256}; the immutable oracle must never change"
+        ));
+    }
+    Ok(extracted)
+}
+
+/// Locates `jar` via `JAVA_HOME` or `PATH`.
+fn locate_jar() -> Result<PathBuf, String> {
+    if let Ok(home) = env::var("JAVA_HOME") {
+        let jar = PathBuf::from(home).join("bin").join("jar");
+        if jar.is_file() {
+            return Ok(jar);
+        }
+    }
+    which_in_path("jar")
+        .ok_or_else(|| "jar not found (a JDK is required to unpack the oracle)".to_string())
+}
+
+/// Prepares an aarch64 Bionic sysroot (`system/bin/linker64` +
+/// `system/lib64/lib{c,m,dl,c++}.so`). Uses `BIONIC_SYSROOT` when it points at a
+/// prepared tree, otherwise extracts one from an installed arm64 system image
+/// with `debugfs` (no root or loopback mount needed).
+fn prepare_bionic_sysroot(sdk_root: &Path) -> Result<PathBuf, String> {
+    if let Ok(value) = env::var("BIONIC_SYSROOT") {
+        let root = PathBuf::from(value);
+        if root.join("system/bin/linker64").is_file() && root.join("system/lib64/libc.so").is_file()
+        {
+            return Ok(root);
+        }
+        return Err(format!(
+            "BIONIC_SYSROOT={} lacks system/bin/linker64 and system/lib64/libc.so",
+            root.display()
+        ));
+    }
+
+    let image = discover_arm64_system_image(sdk_root)?;
+    let debugfs = which_in_path("debugfs").ok_or_else(|| {
+        "debugfs not found (install e2fsprogs) and BIONIC_SYSROOT unset; see docs/ORACLE_DIFFERENTIAL.md"
+            .to_string()
+    })?;
+
+    let sysroot = xtask_temp_dir("oracle-bionic-sysroot");
+    let bin = sysroot.join("system/bin");
+    let lib64 = sysroot.join("system/lib64");
+    recreate_dirs(&[&bin, &lib64])?;
+
+    debugfs_dump(&debugfs, &image, "/bin/linker64", &bin.join("linker64"))?;
+    let mut linker = fs::metadata(bin.join("linker64"))
+        .map_err(|e| format!("stat linker64: {e}"))?
+        .permissions();
+    linker.set_mode(0o755);
+    fs::set_permissions(bin.join("linker64"), linker)
+        .map_err(|e| format!("chmod linker64: {e}"))?;
+
+    for lib in ["libc.so", "libm.so", "libdl.so", "libc++.so"] {
+        debugfs_dump(&debugfs, &image, &format!("/lib64/{lib}"), &lib64.join(lib))?;
+    }
+    Ok(sysroot)
+}
+
+/// Finds an installed `system-images/<api>/<tag>/arm64-v8a/system.img`.
+fn discover_arm64_system_image(sdk_root: &Path) -> Result<PathBuf, String> {
+    let base = sdk_root.join("system-images");
+    let apis = fs::read_dir(&base).map_err(|e| {
+        format!(
+            "no arm64 system image under {} ({e}); install one with \
+             sdkmanager \"system-images;android-24;default;arm64-v8a\" or set BIONIC_SYSROOT",
+            base.display()
+        )
+    })?;
+    for api in apis.flatten() {
+        let Ok(tags) = fs::read_dir(api.path()) else {
+            continue;
+        };
+        for tag in tags.flatten() {
+            let image = tag.path().join("arm64-v8a").join("system.img");
+            if image.is_file() {
+                return Ok(image);
+            }
+        }
+    }
+    Err(format!(
+        "no arm64-v8a/system.img under {}; install one with \
+         sdkmanager \"system-images;android-24;default;arm64-v8a\" or set BIONIC_SYSROOT",
+        base.display()
+    ))
+}
+
+/// Extracts one file from an ext4 image with `debugfs` (no mount, no root).
+fn debugfs_dump(debugfs: &Path, image: &Path, source: &str, dest: &Path) -> Result<(), String> {
+    run_status({
+        let mut c = Command::new(debugfs);
+        c.arg("-R")
+            .arg(format!("dump {source} {}", dest.display()))
+            .arg(image);
+        c
+    })?;
+    let extracted = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    if extracted == 0 {
+        return Err(format!(
+            "debugfs could not extract {source} from {}",
+            image.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the first `PATH` entry containing an executable named `name`.
+fn which_in_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Spawns `cmd`, requiring success, and returns its captured stdout.
+fn run_capture(mut cmd: Command) -> Result<String, String> {
+    let program = format!("{cmd:?}");
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to spawn {program}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{program} exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|e| format!("{program} produced non-UTF-8 output: {e}"))
 }
 
 fn run_status(mut cmd: Command) -> Result<(), String> {
@@ -1678,6 +2498,9 @@ fn cmd_gates() -> Result<(), String> {
             .args(["build", "--workspace", "--locked"]);
         c
     })?;
+
+    println!("== jni export contract (NativeRadar.java ↔ host bleradar-jni) ==");
+    cmd_check_jni_contract(&[])?;
 
     println!("== test ==");
     run_status({
@@ -2204,8 +3027,11 @@ mod tests {
 
     #[test]
     fn jni_smoke_java_source_embeds_expected_checks() {
-        let source = jni_smoke_java_source(11);
+        let source = jni_smoke_java_source(11, 21);
         assert!(source.contains("NativeRadar.abiVersion() == 11"));
+        assert!(source.contains("linked.size() == 21"));
+        assert!(source.contains("verifyEveryDeclaredNativeLinks();"));
+        assert!(source.contains("java.lang.reflect.Modifier.isNative(modifiers)"));
         assert!(source.contains(
             "NativeRadar.defaultCalibrationProfile() == NativeRadar.CALIBRATION_BASELINE"
         ));
@@ -2216,6 +3042,165 @@ mod tests {
         assert!(source.contains("Double.isNaN(NativeRadar.calibrationProfileRssiAt1mDbm(99))"));
         assert!(source.contains("Double.isNaN(NativeRadar.bleDistanceM(-70.0, -59.0, 0.0))"));
         assert!(source.contains("expected NativeRadar to be unavailable"));
+    }
+
+    const REAL_NATIVE_RADAR_JAVA: &str =
+        include_str!("../../android/app/src/main/java/com/hse/bleradar/NativeRadar.java");
+
+    #[test]
+    fn strip_java_comments_and_literals_blanks_prose_but_keeps_code() {
+        let source = "// native in a line comment\n\
+                      /* native in a\n block comment */ static native int a(); \
+                      String s = \"native \\\" quoted\"; char c = '\"'; static native long b();";
+        let code = strip_java_comments_and_literals(source);
+        assert_eq!(code.matches("native").count(), 2);
+        assert!(code.contains("static native int a();"));
+        assert!(code.contains("static native long b();"));
+        assert!(code.contains("String s = \"\";"));
+        assert!(code.contains("char c = '';"));
+        // Line structure survives so later diagnostics stay line-accurate.
+        assert_eq!(code.matches('\n').count(), source.matches('\n').count());
+    }
+
+    #[test]
+    fn java_package_and_class_read_the_declarations() {
+        let code = "package com.example.deep;\n\npublic final class Facade {\n}\n";
+        assert_eq!(
+            java_package_and_class(code),
+            Ok(("com.example.deep".to_string(), "Facade".to_string()))
+        );
+        assert!(java_package_and_class("public final class Facade {}").is_err());
+        assert!(java_package_and_class("package com.example;").is_err());
+        // `class` inside an identifier or a string literal is not a declaration.
+        assert!(java_package_and_class("package a; int classCount = 1;").is_err());
+    }
+
+    #[test]
+    fn java_static_native_method_names_are_sorted_and_multi_line_tolerant() {
+        let code = "package a;\npublic final class F {\n\
+                    public static native double zeta(double x);\n\
+                    /* stripped */ public static native int alpha(\n\
+                    int first,\n\
+                    long second);\n\
+                    static native\n    long beta();\n\
+                    public static synchronized void notNative(int nativeCount) {}\n}\n";
+        assert_eq!(
+            java_static_native_method_names(&strip_java_comments_and_literals(code)),
+            Ok(vec![
+                "alpha".to_string(),
+                "beta".to_string(),
+                "zeta".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn java_static_native_method_names_rejects_non_static_and_overloaded_natives() {
+        let non_static = "class F { public native int a(); }";
+        assert!(
+            java_static_native_method_names(non_static)
+                .unwrap_err()
+                .contains("non-static native method `a`")
+        );
+        let overloaded = "class F { static native int a(int x); static native int a(long x); }";
+        assert!(
+            java_static_native_method_names(overloaded)
+                .unwrap_err()
+                .contains("overloaded native method `a`")
+        );
+        let malformed = "class F { static native int ; }";
+        assert!(java_static_native_method_names(malformed).is_err());
+        assert!(java_static_native_method_names("class F { static native int a }").is_err());
+    }
+
+    #[test]
+    fn jni_mangle_applies_the_specification_escapes() {
+        assert_eq!(jni_mangle("com.hse.bleradar"), "com_hse_bleradar");
+        assert_eq!(jni_mangle("snake_case"), "snake_1case");
+        assert_eq!(jni_mangle("Ljava/lang/String;"), "Ljava_lang_String_2");
+        assert_eq!(jni_mangle("[I"), "_3I");
+        assert_eq!(jni_mangle("naïve"), "na_000efve");
+    }
+
+    #[test]
+    fn jni_export_contract_derives_prefix_and_exports_from_the_java_source() {
+        let source = "package com.example.app;\n\
+                      /** Talks about native code. */\n\
+                      public final class Bridge {\n\
+                      public static native int abiVersion();\n\
+                      public static native double snake_case(double x);\n}\n";
+        let contract = JniExportContract::from_java_source(source).unwrap();
+        assert_eq!(contract.symbol_prefix, "Java_com_example_app_Bridge");
+        assert_eq!(
+            contract.native_methods,
+            vec!["abiVersion".to_string(), "snake_case".to_string()]
+        );
+        assert_eq!(
+            contract.expected_exports,
+            vec![
+                "Java_com_example_app_Bridge_abiVersion".to_string(),
+                "Java_com_example_app_Bridge_snake_1case".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn jni_export_contract_requires_an_exact_export_set() {
+        let contract = JniExportContract::from_java_source(
+            "package p; class C { static native int a(); static native int b(); }",
+        )
+        .unwrap();
+        let exact = vec![
+            "Java_p_C_a".to_string(),
+            "Java_p_C_b".to_string(),
+            "rust_eh_personality".to_string(),
+        ];
+        assert_eq!(contract.require_exact_exports(&exact), Ok(()));
+
+        let missing = vec!["Java_p_C_a".to_string()];
+        let error = contract.require_exact_exports(&missing).unwrap_err();
+        assert!(error.contains(
+            "1 native method(s) declared in NativeRadar.java have no export: Java_p_C_b"
+        ));
+        assert!(!error.contains("no `static native` declaration"));
+
+        let orphaned = vec![
+            "Java_p_C_a".to_string(),
+            "Java_p_C_b".to_string(),
+            "Java_p_C_zombie".to_string(),
+        ];
+        let error = contract.require_exact_exports(&orphaned).unwrap_err();
+        assert!(error.contains("1 `Java_` export(s) have no `static native` declaration in NativeRadar.java: Java_p_C_zombie"));
+
+        let both = vec!["Java_p_C_zombie".to_string()];
+        let error = contract.require_exact_exports(&both).unwrap_err();
+        assert!(error.contains("Java_p_C_a, Java_p_C_b"));
+        assert!(error.contains("Java_p_C_zombie"));
+    }
+
+    #[test]
+    fn real_native_radar_facade_parses_into_a_non_empty_contract() {
+        // The real façade is the single authority for the export set; this
+        // pins only what every other proof depends on (package/class prefix
+        // and the abiVersion probe), never a hand-maintained member list.
+        let contract = JniExportContract::from_java_source(REAL_NATIVE_RADAR_JAVA).unwrap();
+        assert_eq!(contract.symbol_prefix, "Java_com_hse_bleradar_NativeRadar");
+        assert!(
+            contract
+                .native_methods
+                .iter()
+                .any(|name| name == "abiVersion")
+        );
+        assert_eq!(
+            contract.native_methods.len(),
+            contract.expected_exports.len()
+        );
+        assert!(
+            contract
+                .expected_exports
+                .iter()
+                .all(|export| export.starts_with("Java_com_hse_bleradar_NativeRadar_"))
+        );
     }
 
     #[test]

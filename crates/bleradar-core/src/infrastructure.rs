@@ -1366,9 +1366,9 @@ struct Support {
 }
 
 #[derive(Debug, Clone)]
-struct ComparablePair {
-    left: InfrastructureObservation,
-    right: InfrastructureObservation,
+struct ComparablePair<'a> {
+    left: &'a InfrastructureObservation,
+    right: &'a InfrastructureObservation,
     temporal_relation: TemporalRelation,
     base_weight: u16,
 }
@@ -1431,6 +1431,15 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         &mut self.evidence
     }
 
+    /// Consumes the engine and returns its canonical evidence store, so a caller composing the infrastructure engine
+    /// with the OSINT, website, and fusion engines can move the store into the
+    /// next stage without cloning it
+    /// (see [`Self::evidence`] to borrow it in place).
+    #[must_use]
+    pub fn into_evidence(self) -> EvidenceStore {
+        self.evidence
+    }
+
     /// Configured limits.
     #[must_use]
     pub const fn limits(&self) -> InfrastructureLimits {
@@ -1458,41 +1467,39 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         if self.observations.contains_key(&observation_id) {
             return Err(InfrastructureError::DuplicateObservation { observation_id });
         }
-
-        let mut evidence = self.evidence.clone();
-        if let Some(existing) = evidence.source(observation.source_id()) {
-            if existing != observation.source() {
-                return Err(InfrastructureError::SourceConflict {
-                    source_id: observation.source_id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_source(observation.source().clone())?;
+        if let Some(existing) = self.evidence.source(observation.source_id())
+            && existing != observation.source()
+        {
+            return Err(InfrastructureError::SourceConflict {
+                source_id: observation.source_id().to_owned(),
+            });
         }
-
-        if evidence.entity(observation.node_id()).is_none() {
-            evidence.add_entity(
-                Entity::new(observation.node_id(), EntityType::Infrastructure)
-                    .map_err(InfrastructureError::from)?,
-            )?;
-        }
-
         let canonical = observation.canonical_observation()?;
-        if let Some(existing) = evidence.observation(observation.id()) {
-            if existing != &canonical {
-                return Err(InfrastructureError::ObservationConflict {
-                    observation_id: observation.id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_observation(canonical)?;
+        if let Some(existing) = self.evidence.observation(observation.id())
+            && existing != &canonical
+        {
+            return Err(InfrastructureError::ObservationConflict { observation_id });
         }
 
-        self.evidence = evidence;
+        self.evidence.transaction(|store| {
+            if store.source(observation.source_id()).is_none() {
+                store.add_source(observation.source().clone())?;
+            }
+            if store.entity(observation.node_id()).is_none() {
+                store.add_entity(Entity::new(
+                    observation.node_id(),
+                    EntityType::Infrastructure,
+                )?)?;
+            }
+            if store.observation(observation.id()).is_none() {
+                store.add_observation(canonical)?;
+            }
+            Ok::<(), InfrastructureError>(())
+        })?;
         self.node_observations
             .entry(observation.node_id().to_owned())
             .or_default()
-            .insert(observation.id().to_owned());
+            .insert(observation_id.clone());
         self.observations.insert(observation_id, observation);
         Ok(())
     }
@@ -1577,7 +1584,7 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
             });
         }
 
-        let correlation_id = format!("infrastructure-correlation:{left_node}:{right_node}");
+        let correlation_id = correlation_identifier(&left_node, &right_node);
         if self.correlations.contains_key(&correlation_id) {
             return Err(InfrastructureError::DuplicateCorrelation { correlation_id });
         }
@@ -1607,7 +1614,7 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         let leading = baseline.explanation;
         let control_assessment = control_assessment(leading);
         let temporal_relation = strongest_temporal_relation(&baseline);
-        let observation_ids = baseline.supporting_observation_ids();
+        let observation_ids = unique_observation_ids(baseline.supporting_observation_ids());
         let relationship_id = format!("{correlation_id}:relationship");
         let edge_type = if falsification.survives {
             EdgeType::Inferred
@@ -1629,15 +1636,12 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
             relationship_id: relationship_id.clone(),
         };
 
-        let mut evidence = self.evidence.clone();
-        if let Some(existing) = evidence.source(self.correlation_source.id()) {
-            if existing != &self.correlation_source {
-                return Err(InfrastructureError::SourceConflict {
-                    source_id: self.correlation_source.id().to_owned(),
-                });
-            }
-        } else {
-            evidence.add_source(self.correlation_source.clone())?;
+        if let Some(existing) = self.evidence.source(self.correlation_source.id())
+            && existing != &self.correlation_source
+        {
+            return Err(InfrastructureError::SourceConflict {
+                source_id: self.correlation_source.id().to_owned(),
+            });
         }
         let timestamp = observation_ids
             .iter()
@@ -1660,7 +1664,14 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
             provenance,
         )?
         .with_confidence(baseline.confidence);
-        evidence.add_relationship(relationship)?;
+        let correlation_source = &self.correlation_source;
+        self.evidence.transaction(|store| {
+            if store.source(correlation_source.id()).is_none() {
+                store.add_source(correlation_source.clone())?;
+            }
+            store.add_relationship(relationship)?;
+            Ok::<(), InfrastructureError>(())
+        })?;
 
         let report = InfrastructureCorrelationReport {
             edge,
@@ -1678,7 +1689,6 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
                 InfrastructurePhase::Recompute,
             ],
         };
-        self.evidence = evidence;
         self.correlations.insert(correlation_id, report.clone());
         Ok(report)
     }
@@ -1692,14 +1702,45 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         self.correlate(left_node, right_node)
     }
 
-    /// Correlates every pair of nodes, skipping pairs with no comparable values.
+    /// Correlates every pair of nodes not yet correlated in either direction,
+    /// skipping pairs with no comparable values.
+    ///
+    /// The batch is transactional: any other failure (a resource limit, a
+    /// source conflict, a provenance error) leaves the engine and its evidence
+    /// store unchanged. Only the reports persisted by this call are returned,
+    /// in node-identifier order, so repeating the call once every comparable
+    /// pair is covered yields an empty list rather than a duplicate-correlation
+    /// error.
     pub fn correlate_all(
         &mut self,
     ) -> Result<Vec<InfrastructureCorrelationReport>, InfrastructureError> {
         let node_ids: Vec<_> = self.node_observations.keys().cloned().collect();
         let mut reports = Vec::new();
+        let outcome = EvidenceStore::transaction_through(
+            self,
+            |engine| &mut engine.evidence,
+            |engine| engine.correlate_pairs(&node_ids, &mut reports),
+        );
+        if outcome.is_err() {
+            for report in &reports {
+                self.correlations.remove(report.edge().id());
+            }
+        }
+        outcome.map(|()| reports)
+    }
+
+    /// Correlates every uncorrelated comparable pair in key order, appending
+    /// each persisted report; the caller provides the transaction.
+    fn correlate_pairs(
+        &mut self,
+        node_ids: &[String],
+        reports: &mut Vec<InfrastructureCorrelationReport>,
+    ) -> Result<(), InfrastructureError> {
         for (left_index, left_node) in node_ids.iter().enumerate() {
             for right_node in node_ids.iter().skip(left_index + 1) {
+                if self.is_correlated(left_node, right_node) {
+                    continue;
+                }
                 match self.correlate(left_node, right_node) {
                     Ok(report) => reports.push(report),
                     Err(InfrastructureError::NoComparableObservations { .. }) => {}
@@ -1707,7 +1748,16 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
                 }
             }
         }
-        Ok(reports)
+        Ok(())
+    }
+
+    /// Whether a pair already has a persisted correlation in either direction.
+    fn is_correlated(&self, left_node: &str, right_node: &str) -> bool {
+        self.correlations
+            .contains_key(&correlation_identifier(left_node, right_node))
+            || self
+                .correlations
+                .contains_key(&correlation_identifier(right_node, left_node))
     }
 
     /// Returns persisted reports ordered by descending leading confidence.
@@ -1722,43 +1772,40 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         reports
     }
 
-    fn comparable_pairs(&self, left_node: &str, right_node: &str) -> Vec<ComparablePair> {
-        let left_observations: Vec<_> = self.observations_for_node(left_node).cloned().collect();
-        let right_observations: Vec<_> = self.observations_for_node(right_node).cloned().collect();
+    fn comparable_pairs(&self, left_node: &str, right_node: &str) -> Vec<ComparablePair<'_>> {
+        let left_observations: Vec<&InfrastructureObservation> =
+            self.observations_for_node(left_node).collect();
+        let right_observations: Vec<&InfrastructureObservation> =
+            self.observations_for_node(right_node).collect();
         let mut pairs = Vec::new();
-        for left in left_observations {
-            for right in &right_observations {
-                if !values_match(&left, right) {
-                    continue;
-                }
-                let temporal_relation = temporal_relation(
-                    left.timeline(),
-                    right.timeline(),
-                    self.limits.maximum_temporal_gap,
-                );
-                let temporal_score = temporal_score(
-                    temporal_relation,
-                    left.timeline(),
-                    right.timeline(),
-                    self.limits.maximum_temporal_gap,
-                );
-                let factor_weight = (u16::from(left.factors().calibrated_weight())
-                    + u16::from(right.factors().calibrated_weight()))
-                    / 2;
-                let mut base_weight = (factor_weight + u16::from(temporal_score)) / 2;
-                if left.is_high_base_rate() || right.is_high_base_rate() {
-                    base_weight /= 2;
-                }
-                if temporal_relation == TemporalRelation::Disjoint {
-                    base_weight /= 2;
-                }
-                pairs.push(ComparablePair {
-                    left: left.clone(),
-                    right: right.clone(),
-                    temporal_relation,
-                    base_weight,
-                });
+        for (left, right) in matching_pairs(&left_observations, &right_observations) {
+            let temporal_relation = temporal_relation(
+                left.timeline(),
+                right.timeline(),
+                self.limits.maximum_temporal_gap,
+            );
+            let temporal_score = temporal_score(
+                temporal_relation,
+                left.timeline(),
+                right.timeline(),
+                self.limits.maximum_temporal_gap,
+            );
+            let factor_weight = (u16::from(left.factors().calibrated_weight())
+                + u16::from(right.factors().calibrated_weight()))
+                / 2;
+            let mut base_weight = (factor_weight + u16::from(temporal_score)) / 2;
+            if left.is_high_base_rate() || right.is_high_base_rate() {
+                base_weight /= 2;
             }
+            if temporal_relation == TemporalRelation::Disjoint {
+                base_weight /= 2;
+            }
+            pairs.push(ComparablePair {
+                left,
+                right,
+                temporal_relation,
+                base_weight,
+            });
         }
         pairs.sort_by(|left, right| {
             left.left
@@ -1769,12 +1816,11 @@ impl TemporalMetamorphicInfrastructureCorrelationEngine {
         pairs
     }
 
-    fn supports(&self, pairs: &[ComparablePair]) -> Vec<Support> {
+    fn supports(&self, pairs: &[ComparablePair<'_>]) -> Vec<Support> {
         let mut supports = Vec::new();
         for pair in pairs {
-            let explanations = explanations_for(&pair.left, &pair.right);
-            let group =
-                dependency_group(&pair.left).to_owned() + "|" + dependency_group(&pair.right);
+            let explanations = explanations_for(pair.left, pair.right);
+            let group = dependency_group(pair.left).to_owned() + "|" + dependency_group(pair.right);
             let uncertainty = pair
                 .left
                 .factors()
@@ -1842,6 +1888,85 @@ pub(crate) fn values_match<O: ComparableValue>(left: &O, right: &O) -> bool {
         (_, Some(right_value)) if left.raw_value() == right_value => true,
         _ => left.raw_value() == right.raw_value(),
     }
+}
+
+/// Orderable projection of an [`EvidenceValue`] used to index observations by
+/// value; `None` for a NaN float, which never matches anything. Signed zeros
+/// share one key so the index never misses a pair that [`values_match`]
+/// would accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ValueKey<'a> {
+    Text(&'a str),
+    Bytes(&'a [u8]),
+    Integer(i128),
+    Float(u64),
+    Boolean(bool),
+    Null,
+}
+
+fn value_key(value: &EvidenceValue) -> Option<ValueKey<'_>> {
+    Some(match value {
+        EvidenceValue::Text(text) => ValueKey::Text(text),
+        EvidenceValue::Bytes(bytes) => ValueKey::Bytes(bytes),
+        EvidenceValue::Integer(integer) => ValueKey::Integer(*integer),
+        EvidenceValue::Float(float) if float.is_nan() => return None,
+        EvidenceValue::Float(float) => {
+            ValueKey::Float(if *float == 0.0 { 0.0f64 } else { *float }.to_bits())
+        }
+        EvidenceValue::Boolean(boolean) => ValueKey::Boolean(*boolean),
+        EvidenceValue::Null => ValueKey::Null,
+    })
+}
+
+/// Every `(left, right)` pair for which [`values_match`] holds, found through
+/// indexes over the right-hand feature keys, normalized values and raw values
+/// instead of a left × right scan. Every candidate the indexes propose is
+/// re-checked with [`values_match`], and the indexes cover each of its
+/// clauses, so the result is exactly the scan's set (in index order).
+pub(crate) fn matching_pairs<'a, O: ComparableValue>(
+    left: &[&'a O],
+    right: &[&'a O],
+) -> Vec<(&'a O, &'a O)> {
+    let mut by_feature: BTreeMap<&'a str, Vec<usize>> = BTreeMap::new();
+    let mut by_normalized: BTreeMap<ValueKey<'a>, Vec<usize>> = BTreeMap::new();
+    let mut by_raw: BTreeMap<ValueKey<'a>, Vec<usize>> = BTreeMap::new();
+    for (index, &observation) in right.iter().enumerate() {
+        if let Some(feature) = observation.feature_key() {
+            by_feature.entry(feature).or_default().push(index);
+        }
+        if let Some(key) = observation.normalized_value().and_then(value_key) {
+            by_normalized.entry(key).or_default().push(index);
+        }
+        if let Some(key) = value_key(observation.raw_value()) {
+            by_raw.entry(key).or_default().push(index);
+        }
+    }
+    let mut pairs = Vec::new();
+    let mut candidates = BTreeSet::new();
+    for &observation in left {
+        candidates.clear();
+        if let Some(indexes) = observation.feature_key().and_then(|f| by_feature.get(f)) {
+            candidates.extend(indexes.iter().copied());
+        }
+        let keys = [
+            observation.normalized_value().and_then(value_key),
+            value_key(observation.raw_value()),
+        ];
+        for key in keys.iter().flatten() {
+            if let Some(indexes) = by_normalized.get(key) {
+                candidates.extend(indexes.iter().copied());
+            }
+            if let Some(indexes) = by_raw.get(key) {
+                candidates.extend(indexes.iter().copied());
+            }
+        }
+        for &index in &candidates {
+            if values_match(observation, right[index]) {
+                pairs.push((observation, right[index]));
+            }
+        }
+    }
+    pairs
 }
 
 pub(crate) fn temporal_relation(
@@ -2089,22 +2214,124 @@ pub(crate) fn active_weight<S: SupportFields>(support: &S, mode: ScoreMode<'_>) 
     }
 }
 
-pub(crate) fn pair_key<S: SupportFields>(support: &S) -> String {
-    format!(
-        "{}:{}",
-        support.left_observation(),
-        support.right_observation()
-    )
+/// Orders two supports by their `"{left}:{right}"` pair key, exactly as the
+/// concatenated strings would compare, without building them: the common
+/// prefix of the left identifiers is compared as slices, and only when one
+/// left identifier is a prefix of the other does the comparison continue
+/// byte by byte across the separator.
+pub(crate) fn pair_key_cmp<S: SupportFields>(left: &S, right: &S) -> std::cmp::Ordering {
+    let (l1, r1) = (
+        left.left_observation().as_bytes(),
+        left.right_observation().as_bytes(),
+    );
+    let (l2, r2) = (
+        right.left_observation().as_bytes(),
+        right.right_observation().as_bytes(),
+    );
+    let shared = l1.len().min(l2.len());
+    match l1[..shared].cmp(&l2[..shared]) {
+        std::cmp::Ordering::Equal if l1.len() == l2.len() => r1.cmp(r2),
+        std::cmp::Ordering::Equal => {
+            let tail = |longer: &[u8], own: &[u8]| -> Vec<u8> {
+                let mut bytes = longer[shared..].to_vec();
+                bytes.push(b':');
+                bytes.extend_from_slice(own);
+                bytes
+            };
+            // One left identifier extends the other: compare the remaining
+            // bytes of each key from the divergence point.
+            if l1.len() < l2.len() {
+                let mut own = vec![b':'];
+                own.extend_from_slice(r1);
+                own.cmp(&tail(l2, r2))
+            } else {
+                let mut other = vec![b':'];
+                other.extend_from_slice(r2);
+                tail(l1, r1).cmp(&other)
+            }
+        }
+        ordering => ordering,
+    }
+}
+
+/// Corroborated score for one explanation: the strongest retained support
+/// plus ten points per additional independent support, with the corroboration
+/// capped at the headroom below 100.
+///
+/// Computed in `usize` so any number of supports representable in memory is
+/// safe; `u16` arithmetic overflowed at 6,555 independent supports.
+pub(crate) fn corroborated_score(strongest: u16, independent_support: usize) -> u16 {
+    let headroom = 100u16.saturating_sub(strongest);
+    let corroboration = independent_support
+        .saturating_sub(1)
+        .saturating_mul(10)
+        .min(usize::from(headroom));
+    strongest.saturating_add(u16::try_from(corroboration).unwrap_or(headroom))
+}
+
+/// Points one temporal relation contributes to temporal compatibility.
+const fn temporal_compatibility_points(relation: TemporalRelation) -> u8 {
+    match relation {
+        TemporalRelation::Overlapping => 100,
+        TemporalRelation::Contiguous => 75,
+        TemporalRelation::Disjoint => 0,
+    }
+}
+
+/// Mean temporal compatibility (0–100) over retained supports, or 0 when there
+/// are none.
+///
+/// Accumulated in `u64` so the sum cannot overflow and the divisor cannot be
+/// truncated; `u16` arithmetic overflowed the sum at 656 overlapping supports
+/// (panicking in debug builds and silently reporting a wrong mean in release
+/// builds) and truncated the divisor to zero at 65,536 supports.
+pub(crate) fn mean_temporal_compatibility(relations: impl Iterator<Item = TemporalRelation>) -> u8 {
+    let (total, count) = relations.fold((0u64, 0u64), |(total, count), relation| {
+        (
+            total.saturating_add(u64::from(temporal_compatibility_points(relation))),
+            count.saturating_add(1),
+        )
+    });
+    if count == 0 {
+        return 0;
+    }
+    // The mean of values in 0..=100 is itself in 0..=100.
+    u8::try_from(total / count).unwrap_or(100)
+}
+
+/// Observation pairs carrying at least one high-base-rate support under any
+/// explanation, so each retained pair is checked with one lookup instead of a
+/// scan over every support.
+pub(crate) fn high_base_rate_pairs<S: SupportFields>(supports: &[S]) -> BTreeSet<(&str, &str)> {
+    supports
+        .iter()
+        .filter(|support| support.high_base_rate())
+        .map(|support| (support.left_observation(), support.right_observation()))
+        .collect()
+}
+
+/// Sorted, de-duplicated observation identifiers cited by a canonical edge.
+pub(crate) fn unique_observation_ids(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Stable identifier of the persisted correlation from `left_node` to
+/// `right_node`.
+fn correlation_identifier(left_node: &str, right_node: &str) -> String {
+    format!("infrastructure-correlation:{left_node}:{right_node}")
 }
 
 fn rank_supports(supports: &[Support], mode: ScoreMode<'_>) -> Vec<CorrelationRanking> {
+    let flagged = high_base_rate_pairs(supports);
     let mut explanations = BTreeSet::new();
     for support in supports {
         explanations.insert(support.explanation);
     }
     let mut rankings = explanations
         .into_iter()
-        .map(|explanation| rank_explanation(supports, explanation, mode))
+        .map(|explanation| rank_explanation(supports, &flagged, explanation, mode))
         .collect::<Vec<_>>();
     rankings.sort_by(|left, right| {
         right.score.cmp(&left.score).then_with(|| {
@@ -2130,6 +2357,7 @@ fn explanation_order(explanation: InfrastructureExplanation) -> u8 {
 
 fn rank_explanation(
     supports: &[Support],
+    flagged: &BTreeSet<(&str, &str)>,
     explanation: InfrastructureExplanation,
     mode: ScoreMode<'_>,
 ) -> CorrelationRanking {
@@ -2146,8 +2374,7 @@ fn rank_explanation(
         match retained.get(&support.group) {
             Some((previous, previous_weight))
                 if *previous_weight > weight
-                    || (*previous_weight == weight
-                        && pair_key(previous).as_str() <= pair_key(support).as_str()) =>
+                    || (*previous_weight == weight && pair_key_cmp(*previous, support).is_le()) =>
             {
                 collapsed.push(to_pair(support, weight));
             }
@@ -2170,34 +2397,21 @@ fn rank_explanation(
         .map(|pair| pair.weight)
         .max()
         .unwrap_or(0);
-    let corroboration =
-        ((independent_support.saturating_sub(1) as u16) * 10).min(100 - strongest.min(100));
-    let score = strongest.saturating_add(corroboration);
-    let temporal_compatibility = if supporting_pairs.is_empty() {
-        0
-    } else {
-        let total: u16 = supporting_pairs
-            .iter()
-            .map(|pair| match pair.temporal_relation {
-                TemporalRelation::Overlapping => 100,
-                TemporalRelation::Contiguous => 75,
-                TemporalRelation::Disjoint => 0,
-            })
-            .sum();
-        (total / supporting_pairs.len() as u16) as u8
-    };
+    let score = corroborated_score(strongest, independent_support);
+    let temporal_compatibility =
+        mean_temporal_compatibility(supporting_pairs.iter().map(|pair| pair.temporal_relation));
+    let high_base_rate_support = supporting_pairs.iter().any(|pair| {
+        flagged.contains(&(
+            pair.left_observation.as_str(),
+            pair.right_observation.as_str(),
+        ))
+    });
     CorrelationRanking {
         explanation,
         score,
         confidence: Confidence::new(score.min(100) as u8),
         independent_support,
-        high_base_rate_support: supporting_pairs.iter().any(|pair| {
-            supports.iter().any(|support| {
-                support.left_observation == pair.left_observation
-                    && support.right_observation == pair.right_observation
-                    && support.high_base_rate
-            })
-        }),
+        high_base_rate_support,
         supporting_pairs,
         collapsed_pairs: collapsed,
         temporal_compatibility: Confidence::new(temporal_compatibility),
@@ -2228,7 +2442,7 @@ fn build_falsification(
         .max_by(|left, right| {
             active_weight(left, ScoreMode::Baseline)
                 .cmp(&active_weight(right, ScoreMode::Baseline))
-                .then_with(|| pair_key(left).cmp(&pair_key(right)))
+                .then_with(|| pair_key_cmp(left, right))
         })
         .map(|support| support.group.clone());
     let without_strongest_support = rank_supports(
@@ -2374,3 +2588,126 @@ pub type CorrelationReport = InfrastructureCorrelationReport;
 
 /// Alias for adversarial correlation falsification.
 pub type InfrastructureFalsificationReport = CorrelationFalsification;
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        InfrastructureKind, InfrastructureObservation, TemporalRelation, corroborated_score,
+        matching_pairs, mean_temporal_compatibility, values_match,
+    };
+    use crate::{EvidenceValue, RetrievalMethod, Source, SourceType};
+
+    #[test]
+    fn matching_pairs_equals_the_full_scan_on_random_observations() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let source = Source::new("s", SourceType::Api, RetrievalMethod::Direct).unwrap();
+        let values = [
+            EvidenceValue::Text("a".to_owned()),
+            EvidenceValue::Text("b".to_owned()),
+            EvidenceValue::Bytes(vec![1, 2]),
+            EvidenceValue::Integer(7),
+            EvidenceValue::Float(0.0),
+            EvidenceValue::Float(-0.0),
+            EvidenceValue::Float(f64::NAN),
+            EvidenceValue::Float(2.5),
+            EvidenceValue::Boolean(true),
+            EvidenceValue::Null,
+        ];
+        let observation = |id: usize, next: &mut dyn FnMut() -> u64| {
+            let raw = values[(next() % values.len() as u64) as usize].clone();
+            let mut item = InfrastructureObservation::new(
+                format!("o{id}"),
+                "node",
+                InfrastructureKind::Domain,
+                raw,
+                source.clone(),
+                1,
+            )
+            .unwrap();
+            if next().is_multiple_of(2) {
+                item = item
+                    .with_normalized_value(values[(next() % values.len() as u64) as usize].clone());
+            }
+            if next().is_multiple_of(3) {
+                item = item.with_feature(format!("f{}", next() % 3)).unwrap();
+            }
+            item
+        };
+        for round in 0..300 {
+            let left: Vec<InfrastructureObservation> = (0..(round % 7))
+                .map(|i| observation(i, &mut next))
+                .collect();
+            let right: Vec<InfrastructureObservation> = (0..(round % 5))
+                .map(|i| observation(100 + i, &mut next))
+                .collect();
+            let left_refs: Vec<&InfrastructureObservation> = left.iter().collect();
+            let right_refs: Vec<&InfrastructureObservation> = right.iter().collect();
+            let mut indexed: Vec<(&str, &str)> = matching_pairs(&left_refs, &right_refs)
+                .into_iter()
+                .map(|(l, r)| (l.id(), r.id()))
+                .collect();
+            let mut scanned: Vec<(&str, &str)> = left
+                .iter()
+                .flat_map(|l| {
+                    right
+                        .iter()
+                        .filter(move |r| values_match(l, *r))
+                        .map(move |r| (l.id(), r.id()))
+                })
+                .collect();
+            indexed.sort_unstable();
+            scanned.sort_unstable();
+            assert_eq!(indexed, scanned, "round {round}");
+        }
+    }
+
+    #[test]
+    fn corroborated_score_caps_corroboration_at_the_headroom_below_100() {
+        assert_eq!(corroborated_score(0, 0), 0);
+        assert_eq!(corroborated_score(40, 1), 40);
+        assert_eq!(corroborated_score(40, 3), 60);
+        assert_eq!(corroborated_score(40, 7), 100);
+        // `(n - 1) * 10` overflowed a `u16` from here on.
+        assert_eq!(corroborated_score(40, 6_555), 100);
+        assert_eq!(corroborated_score(130, 2), 130);
+        assert_eq!(corroborated_score(u16::MAX, usize::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn mean_temporal_compatibility_is_exact_beyond_u16_accumulation() {
+        assert_eq!(mean_temporal_compatibility(std::iter::empty()), 0);
+        assert_eq!(
+            mean_temporal_compatibility(
+                [TemporalRelation::Overlapping, TemporalRelation::Disjoint].into_iter()
+            ),
+            50
+        );
+        assert_eq!(
+            mean_temporal_compatibility(
+                [
+                    TemporalRelation::Overlapping,
+                    TemporalRelation::Contiguous,
+                    TemporalRelation::Contiguous
+                ]
+                .into_iter()
+            ),
+            83
+        );
+        // A `u16` sum overflowed at 656 overlapping supports.
+        assert_eq!(
+            mean_temporal_compatibility(std::iter::repeat_n(TemporalRelation::Overlapping, 656)),
+            100
+        );
+        // A `u16` divisor truncated to zero at 65,536 supports.
+        assert_eq!(
+            mean_temporal_compatibility(std::iter::repeat_n(TemporalRelation::Contiguous, 65_536)),
+            75
+        );
+    }
+}

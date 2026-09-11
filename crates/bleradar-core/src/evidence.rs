@@ -507,17 +507,21 @@ fn require_ref<T>(
 
 fn insert_unique<T>(
     collection: &mut BTreeMap<String, T>,
-    collection_name: &'static str,
+    journal: &mut Option<Vec<Undo>>,
+    kind: RecordKind,
     id: &str,
     value: T,
 ) -> Result<(), ProvenanceError> {
     match collection.entry(id.to_owned()) {
         Entry::Vacant(entry) => {
             entry.insert(value);
+            if let Some(journal) = journal.as_mut() {
+                journal.push(Undo::Remove(kind, id.to_owned()));
+            }
             Ok(())
         }
         Entry::Occupied(_) => Err(ProvenanceError::DuplicateId {
-            collection: collection_name,
+            collection: kind.collection_name(),
             id: id.to_owned(),
         }),
     }
@@ -2326,6 +2330,78 @@ pub struct TransformationTrace<'a> {
     pub verification_tests: Vec<&'a Test>,
 }
 
+/// Record collections of the store, used to journal insertions so a failed
+/// transaction can remove exactly what it inserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordKind {
+    Source,
+    Entity,
+    Artifact,
+    Observation,
+    Feature,
+    Representation,
+    Test,
+    Transformation,
+    Event,
+    Hypothesis,
+    Claim,
+    Evidence,
+    Relationship,
+    Action,
+    ConfidenceUpdate,
+}
+
+impl RecordKind {
+    /// Collection name used in [`ProvenanceError::DuplicateId`].
+    const fn collection_name(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Entity => "entity",
+            Self::Artifact => "artifact",
+            Self::Observation => "observation",
+            Self::Feature => "feature",
+            Self::Representation => "representation",
+            Self::Test => "test",
+            Self::Transformation => "transformation",
+            Self::Event => "event",
+            Self::Hypothesis => "hypothesis",
+            Self::Claim => "claim",
+            Self::Evidence => "evidence",
+            Self::Relationship => "relationship",
+            Self::Action => "action",
+            Self::ConfidenceUpdate => "confidence update",
+        }
+    }
+}
+
+/// One reversible change recorded while a transaction is open.
+#[derive(Debug, Clone)]
+enum Undo {
+    /// Remove the record inserted under `1` from collection `0`.
+    Remove(RecordKind, String),
+    /// Put back an observation that was replaced in place.
+    RestoreObservation(Observation),
+    /// Put back an artifact whose representation links were extended.
+    RestoreArtifact(Artifact),
+}
+
+/// Rolls back and closes a transaction unless it was committed, so a panic
+/// inside the closure leaves the store exactly as it was.
+struct TransactionGuard<'a> {
+    store: &'a mut EvidenceStore,
+    mark: usize,
+    committed: bool,
+}
+
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.store.rollback_to(self.mark);
+        }
+        self.store.end_transaction();
+    }
+}
+
 /// The authoritative in-memory evidence and provenance state.
 #[derive(Debug, Clone, Default)]
 pub struct EvidenceStore {
@@ -2344,6 +2420,10 @@ pub struct EvidenceStore {
     tests: BTreeMap<TestId, Test>,
     actions: BTreeMap<ActionId, Action>,
     confidence_updates: BTreeMap<ConfidenceUpdateId, ConfidenceUpdate>,
+    /// Undo log, present only while at least one transaction is open.
+    journal: Option<Vec<Undo>>,
+    /// Number of nested open transactions.
+    open_transactions: usize,
 }
 
 /// Alias emphasizing the core's canonical role.
@@ -2372,19 +2452,154 @@ impl EvidenceStore {
             tests: BTreeMap::new(),
             actions: BTreeMap::new(),
             confidence_updates: BTreeMap::new(),
+            journal: None,
+            open_transactions: 0,
+        }
+    }
+
+    /// Runs `operation` against the store and keeps its changes only if it
+    /// returns `Ok`; on `Err` (or a panic) every insertion and in-place update
+    /// the operation made is undone, in reverse order, before the error is
+    /// returned.
+    ///
+    /// This is the store's single all-or-nothing mechanism: it journals each
+    /// change while a transaction is open (an `O(1)` note per change) instead
+    /// of requiring callers to clone the whole store, so a multi-record
+    /// operation costs the same whether the store holds ten records or ten
+    /// million. Transactions nest: an inner failure undoes only the inner
+    /// changes, and an outer failure undoes everything since it began. The
+    /// error type is the caller's; `?` on store operations converts
+    /// [`ProvenanceError`] into it as usual.
+    ///
+    /// # Examples
+    /// ```
+    /// use bleradar_core::{Entity, EntityType, EvidenceStore, ProvenanceError};
+    /// let mut store = EvidenceStore::new();
+    /// let outcome: Result<(), ProvenanceError> = store.transaction(|store| {
+    ///     store.add_entity(Entity::new("device-1", EntityType::Device)?)?;
+    ///     // The duplicate fails the transaction, which also removes device-1.
+    ///     store.add_entity(Entity::new("device-1", EntityType::Device)?)
+    /// });
+    /// assert!(outcome.is_err());
+    /// assert!(store.entity("device-1").is_none());
+    /// assert!(store.is_empty());
+    /// ```
+    pub fn transaction<T, E>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mark = self.begin_transaction();
+        let mut guard = TransactionGuard {
+            store: self,
+            mark,
+            committed: false,
+        };
+        let result = operation(&mut *guard.store);
+        guard.committed = result.is_ok();
+        drop(guard);
+        result
+    }
+
+    /// [`Self::transaction`] for an owner that holds the store as a field and
+    /// whose operation needs the whole owner (an engine correlating through
+    /// its own methods): `evidence` locates the store inside the owner.
+    ///
+    /// A panic inside `operation` is not part of the contract; every engine
+    /// path returns a `Result`, so no unwind guard is used here.
+    pub(crate) fn transaction_through<S, T, E>(
+        owner: &mut S,
+        evidence: impl Fn(&mut S) -> &mut Self,
+        operation: impl FnOnce(&mut S) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mark = evidence(owner).begin_transaction();
+        let result = operation(owner);
+        if result.is_err() {
+            evidence(owner).rollback_to(mark);
+        }
+        evidence(owner).end_transaction();
+        result
+    }
+
+    /// Opens a (possibly nested) transaction and returns the journal position
+    /// that [`Self::rollback_to`] undoes back to.
+    pub(crate) fn begin_transaction(&mut self) -> usize {
+        self.open_transactions += 1;
+        self.journal.get_or_insert_with(Vec::new).len()
+    }
+
+    /// Closes the innermost open transaction, keeping its changes; when the
+    /// last one closes the journal is released.
+    pub(crate) fn end_transaction(&mut self) {
+        self.open_transactions = self.open_transactions.saturating_sub(1);
+        if self.open_transactions == 0 {
+            self.journal = None;
+        }
+    }
+
+    /// Undoes every journaled change made since `mark`, most recent first.
+    pub(crate) fn rollback_to(&mut self, mark: usize) {
+        let undo: Vec<Undo> = match self.journal.as_mut() {
+            Some(journal) if journal.len() > mark => journal.drain(mark..).collect(),
+            _ => return,
+        };
+        for entry in undo.into_iter().rev() {
+            self.apply_undo(entry);
+        }
+    }
+
+    fn apply_undo(&mut self, entry: Undo) {
+        match entry {
+            Undo::Remove(kind, id) => {
+                match kind {
+                    RecordKind::Entity => self.entities.remove(&id).is_some(),
+                    RecordKind::Artifact => self.artifacts.remove(&id).is_some(),
+                    RecordKind::Observation => self.observations.remove(&id).is_some(),
+                    RecordKind::Feature => self.features.remove(&id).is_some(),
+                    RecordKind::Representation => self.representations.remove(&id).is_some(),
+                    RecordKind::Transformation => self.transformations.remove(&id).is_some(),
+                    RecordKind::Source => self.sources.remove(&id).is_some(),
+                    RecordKind::Event => self.events.remove(&id).is_some(),
+                    RecordKind::Relationship => self.relationships.remove(&id).is_some(),
+                    RecordKind::Hypothesis => self.hypotheses.remove(&id).is_some(),
+                    RecordKind::Claim => self.claims.remove(&id).is_some(),
+                    RecordKind::Evidence => self.evidence.remove(&id).is_some(),
+                    RecordKind::Test => self.tests.remove(&id).is_some(),
+                    RecordKind::Action => self.actions.remove(&id).is_some(),
+                    RecordKind::ConfidenceUpdate => self.confidence_updates.remove(&id).is_some(),
+                };
+            }
+            Undo::RestoreObservation(observation) => {
+                self.observations
+                    .insert(observation.id().to_owned(), observation);
+            }
+            Undo::RestoreArtifact(artifact) => {
+                self.artifacts.insert(artifact.id().to_owned(), artifact);
+            }
         }
     }
 
     /// Inserts a source.
     pub fn insert_source(&mut self, source: Source) -> Result<(), ProvenanceError> {
         let id = source.id().to_owned();
-        insert_unique(&mut self.sources, "source", &id, source)
+        insert_unique(
+            &mut self.sources,
+            &mut self.journal,
+            RecordKind::Source,
+            &id,
+            source,
+        )
     }
 
     /// Inserts an entity.
     pub fn insert_entity(&mut self, entity: Entity) -> Result<(), ProvenanceError> {
         let id = entity.id().to_owned();
-        insert_unique(&mut self.entities, "entity", &id, entity)
+        insert_unique(
+            &mut self.entities,
+            &mut self.journal,
+            RecordKind::Entity,
+            &id,
+            entity,
+        )
     }
 
     /// Inserts an artifact and checks its optional references.
@@ -2408,7 +2623,13 @@ impl EvidenceStore {
             )?;
         }
         let id = artifact.id().to_owned();
-        insert_unique(&mut self.artifacts, "artifact", &id, artifact)
+        insert_unique(
+            &mut self.artifacts,
+            &mut self.journal,
+            RecordKind::Artifact,
+            &id,
+            artifact,
+        )
     }
 
     /// Inserts an observation and verifies that its source metadata is copied
@@ -2440,7 +2661,13 @@ impl EvidenceStore {
             )?;
         }
         let id = observation.id().to_owned();
-        insert_unique(&mut self.observations, "observation", &id, observation)
+        insert_unique(
+            &mut self.observations,
+            &mut self.journal,
+            RecordKind::Observation,
+            &id,
+            observation,
+        )
     }
 
     /// Extends a stored observation's last-seen time without replacing its evidence.
@@ -2454,16 +2681,18 @@ impl EvidenceStore {
         observation_id: &str,
         timestamp: Timestamp,
     ) -> Result<(), ProvenanceError> {
-        let updated = self
-            .observations
-            .get(observation_id)
-            .ok_or_else(|| ProvenanceError::MissingReference {
+        let current = self.observations.get(observation_id).ok_or_else(|| {
+            ProvenanceError::MissingReference {
                 record: "observation update",
                 record_id: observation_id.to_owned(),
                 field: "observation",
                 reference: observation_id.to_owned(),
-            })?
-            .seen_at(timestamp)?;
+            }
+        })?;
+        let updated = current.seen_at(timestamp)?;
+        if let Some(journal) = self.journal.as_mut() {
+            journal.push(Undo::RestoreObservation(current.clone()));
+        }
         self.observations.insert(observation_id.to_owned(), updated);
         Ok(())
     }
@@ -2517,7 +2746,13 @@ impl EvidenceStore {
             }
         }
         let id = feature.id().to_owned();
-        insert_unique(&mut self.features, "feature", &id, feature)
+        insert_unique(
+            &mut self.features,
+            &mut self.journal,
+            RecordKind::Feature,
+            &id,
+            feature,
+        )
     }
 
     /// Inserts a representation and verifies its artifact, source, and feature links.
@@ -2554,7 +2789,8 @@ impl EvidenceStore {
         let artifact_id = representation.artifact().to_owned();
         insert_unique(
             &mut self.representations,
-            "representation",
+            &mut self.journal,
+            RecordKind::Representation,
             &id,
             representation,
         )?;
@@ -2563,6 +2799,9 @@ impl EvidenceStore {
             .get_mut(&artifact_id)
             .expect("artifact reference was validated above");
         if !artifact.representation_ids.contains(&id) {
+            if let Some(journal) = self.journal.as_mut() {
+                journal.push(Undo::RestoreArtifact(artifact.clone()));
+            }
             artifact.representation_ids.push(id);
         }
         Ok(())
@@ -2589,7 +2828,13 @@ impl EvidenceStore {
             )?;
         }
         let id = test.id().to_owned();
-        insert_unique(&mut self.tests, "test", &id, test)
+        insert_unique(
+            &mut self.tests,
+            &mut self.journal,
+            RecordKind::Test,
+            &id,
+            test,
+        )
     }
 
     /// Inserts a transformation and verifies its complete transformation path.
@@ -2643,7 +2888,8 @@ impl EvidenceStore {
         let id = transformation.id().to_owned();
         insert_unique(
             &mut self.transformations,
-            "transformation",
+            &mut self.journal,
+            RecordKind::Transformation,
             &id,
             transformation,
         )
@@ -2658,13 +2904,25 @@ impl EvidenceStore {
             require_ref(&self.sources, "event", event.id(), "source", source_id)?;
         }
         let id = event.id().to_owned();
-        insert_unique(&mut self.events, "event", &id, event)
+        insert_unique(
+            &mut self.events,
+            &mut self.journal,
+            RecordKind::Event,
+            &id,
+            event,
+        )
     }
 
     /// Inserts a hypothesis.
     pub fn insert_hypothesis(&mut self, hypothesis: Hypothesis) -> Result<(), ProvenanceError> {
         let id = hypothesis.id().to_owned();
-        insert_unique(&mut self.hypotheses, "hypothesis", &id, hypothesis)
+        insert_unique(
+            &mut self.hypotheses,
+            &mut self.journal,
+            RecordKind::Hypothesis,
+            &id,
+            hypothesis,
+        )
     }
 
     /// Inserts a claim after verifying its hypothesis.
@@ -2677,7 +2935,13 @@ impl EvidenceStore {
             claim.hypothesis(),
         )?;
         let id = claim.id().to_owned();
-        insert_unique(&mut self.claims, "claim", &id, claim)
+        insert_unique(
+            &mut self.claims,
+            &mut self.journal,
+            RecordKind::Claim,
+            &id,
+            claim,
+        )
     }
 
     /// Inserts evidence after verifying its hypothesis and direct observation.
@@ -2697,7 +2961,13 @@ impl EvidenceStore {
             evidence.observation(),
         )?;
         let id = evidence.id().to_owned();
-        insert_unique(&mut self.evidence, "evidence", &id, evidence)
+        insert_unique(
+            &mut self.evidence,
+            &mut self.journal,
+            RecordKind::Evidence,
+            &id,
+            evidence,
+        )
     }
 
     /// Inserts a relationship after verifying all explicit evidence provenance.
@@ -2752,7 +3022,13 @@ impl EvidenceStore {
             )?;
         }
         let id = relationship.id().to_owned();
-        insert_unique(&mut self.relationships, "relationship", &id, relationship)
+        insert_unique(
+            &mut self.relationships,
+            &mut self.journal,
+            RecordKind::Relationship,
+            &id,
+            relationship,
+        )
     }
 
     /// Inserts an action after verifying its motivating evidence.
@@ -2767,7 +3043,13 @@ impl EvidenceStore {
             )?;
         }
         let id = action.id().to_owned();
-        insert_unique(&mut self.actions, "action", &id, action)
+        insert_unique(
+            &mut self.actions,
+            &mut self.journal,
+            RecordKind::Action,
+            &id,
+            action,
+        )
     }
 
     /// Inserts a confidence update after verifying its target and evidence.
@@ -2788,7 +3070,8 @@ impl EvidenceStore {
         let id = update.id().to_owned();
         insert_unique(
             &mut self.confidence_updates,
-            "confidence update",
+            &mut self.journal,
+            RecordKind::ConfidenceUpdate,
             &id,
             update,
         )

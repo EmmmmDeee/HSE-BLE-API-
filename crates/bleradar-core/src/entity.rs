@@ -1692,8 +1692,16 @@ impl fmt::Write for HashWrite<'_> {
 /// case-insensitively): a value like `?v=AbC123` on YouTube is
 /// case-significant and must never be folded.
 fn normalise_url_query(query: &str) -> String {
-    let mut kept: Vec<&str> = query
+    // Keys and values are trimmed: whitespace is never valid inside a query,
+    // and untrimmed whitespace at the end of the last parameter would survive
+    // one pass (inside the query) and be removed by the next (now the end of
+    // the whole string) — one value, two UIDs. Invisible for any valid URL.
+    let mut kept: Vec<String> = query
         .split('&')
+        .map(|seg| match seg.split_once('=') {
+            Some((key, value)) => format!("{}={}", key.trim(), value.trim()),
+            None => seg.trim().to_string(),
+        })
         .filter(|seg| !seg.is_empty())
         .filter(|seg| {
             let key = seg.split('=').next().unwrap_or(seg);
@@ -1805,16 +1813,23 @@ pub fn normalise(kind: &HseEntityKind, value: &str) -> String {
                 .trim_end_matches(|c: char| c == '.' || c.is_whitespace())
                 .len();
             s.truncate(len);
-            // Peel repeated `www.` prefixes (`www.www.example.com`), but never
-            // to an empty host.
+            // Peel repeated `www.` prefixes (`www.www.example.com`) together
+            // with any whitespace a peel exposes (`www. www.example.com`), but
+            // never to an empty host. Trimming inside the loop keeps the result
+            // a fixed point: a `www.` uncovered by the trim is peeled in the
+            // same pass instead of surviving to fork the host onto a second
+            // UID when it is normalised again.
             let mut host = s.as_str();
-            while let Some(rest) = host.strip_prefix("www.") {
-                if rest.is_empty() {
-                    break;
+            loop {
+                let trimmed = host.trim_start();
+                match trimmed.strip_prefix("www.") {
+                    Some(rest) if !rest.trim_start().is_empty() => host = rest,
+                    _ => {
+                        host = trimmed;
+                        break;
+                    }
                 }
-                host = rest;
             }
-            let host = host.trim_start();
             if host.len() != s.len() {
                 s = host.to_string();
             }
@@ -1876,14 +1891,17 @@ pub fn normalise(kind: &HseEntityKind, value: &str) -> String {
         }
         HseEntityKind::Coordinates => {
             let trimmed = value.trim();
-            // Fast path: a bare `"lat, lon"` decimal pair.
+            // Fast path: a bare `"lat, lon"` decimal pair. It must pass the
+            // same validity gate as every `coords::parse` notation
+            // (`LatLon::new`: finite AND in range), or an impossible pair such
+            // as `100,2000` — which `coords::parse` rejects — would be minted
+            // into a canonical-looking coordinate string.
             if let Some((lat_s, lon_s)) = trimmed.split_once(',')
                 && let (Ok(lat), Ok(lon)) =
                     (lat_s.trim().parse::<f64>(), lon_s.trim().parse::<f64>())
-                && lat.is_finite()
-                && lon.is_finite()
+                && let Ok(point) = crate::geo::LatLon::new(lat, lon)
             {
-                return fmt_coord_6dp(lat, lon);
+                return fmt_coord_6dp(point.lat(), point.lon());
             }
             // Rich notations: DMS/DDM, geo: URI, Plus Code, Maidenhead.
             if let Some(p) = coords::parse(trimmed) {
@@ -1907,8 +1925,20 @@ pub fn normalise(kind: &HseEntityKind, value: &str) -> String {
                 None => (no_frag, None),
             };
             let (host, path) = host_and_path.split_once('/').unwrap_or((host_and_path, ""));
-            let host_lower: String = host.chars().flat_map(char::to_lowercase).collect();
-            let path_trimmed = path.trim_end_matches('/');
+            // Whitespace is never valid inside a URL, but the canonical form
+            // must still be a fixed point: strip it from the host and from
+            // both ends of the path before the trailing-slash removal, or a
+            // `\t/` tail survives one pass (the slash is stripped, the tab is
+            // kept) and is trimmed away by the next — one value, two UIDs.
+            let host_lower: String = host.trim().chars().flat_map(char::to_lowercase).collect();
+            let mut path_trimmed = path.trim();
+            loop {
+                let next = path_trimmed.trim_end_matches('/').trim_end();
+                if next == path_trimmed {
+                    break;
+                }
+                path_trimmed = next;
+            }
             let mut out = if path_trimmed.is_empty() {
                 format!("{scheme}://{host_lower}")
             } else {

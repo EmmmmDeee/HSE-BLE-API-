@@ -29,7 +29,10 @@ fn registry_does_not_confuse_observed_with_reconstructed() {
 fn all_status_buckets_are_exercised() {
     let (source_analog, verified, oracle_only, blocked) = coverage_counts();
     assert!(source_analog > 0);
-    assert_eq!(verified, 0);
+    // The WiFi channel<->frequency contracts became DifferentiallyVerified once
+    // the immutable oracle was executed under qemu-aarch64 (oracle_differential.rs),
+    // so the verified bucket is now genuinely exercised.
+    assert!(verified > 0);
     assert!(oracle_only > 0);
     assert!(blocked > 0);
 }

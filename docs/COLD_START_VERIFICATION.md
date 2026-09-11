@@ -38,6 +38,16 @@ workspace's `Cargo.lock` contains zero third-party crates, so the advisory
 surface is empty, and both tools confirm it rather than leaving the command
 unrun. See `docs/AUTONOMOUS_DECISIONS.md` #28.
 
+Since 2026-09-10 (`docs/AUTONOMOUS_DECISIONS.md` #54–#55) `cargo xtask gates`
+also runs the JNI export-contract check (`cargo xtask check-jni-contract`:
+every `static native` in `NativeRadar.java` ↔ exactly one `Java_*` export in
+the host-built `libbleradar_jni.so`, no orphans; observed 21 ↔ 21, exact
+match), and CI additionally runs `cargo xtask verify-jni-live` on a pinned
+Temurin 21 JDK with `cargo-audit` 0.22.2 / `cargo-deny` 0.20.2 pinned and
+cached. Observed on this host (rustc 1.98.0, OpenJDK 21.0.10): `gates` exit 0
+in 11 s with warm caches; `verify-jni-live` failure path
+`UnsatisfiedLinkError`, success path `linked-natives=25`, `abi=8`.
+
 ## Layer 3 — reconstructed Android APK live build (executed 2026-09-09)
 
 The hand-built radar app under `android/app/src/main` is packaged without
@@ -48,8 +58,11 @@ cargo xtask build-apk
 cargo xtask verify-android-live   # JNI dual-path + build-apk + entry/DEX/JNI gates
 ```
 
-Live results on this host (Android SDK at `/usr/local/lib/android/sdk`,
-build-tools 37.0.0, NDK 27.3.13750724, platform android-36):
+Live results, first on the 2026-09-09 host (Android SDK at
+`/usr/local/lib/android/sdk`) and re-executed 2026-09-10 on a fresh host
+(SDK installed to `/opt/android-sdk` from `commandlinetools-linux-11076708`,
+build-tools 37.0.0, NDK 27.3.13750724, platform android-36, OpenJDK 21.0.10;
+`verify-android-live` exit 0 in 23 s cold, 5 s warm):
 
 | Check | Outcome |
 |---|---|
@@ -58,8 +71,8 @@ build-tools 37.0.0, NDK 27.3.13750724, platform android-36):
 | Output `HSE-BLE-Radar-arm64-v1.0.0.apk` | **Validated** (installable package artifact) |
 | Required APK entries (manifest, classes.dex, arm64 `.so`, resources.arsc) | **Validated** |
 | Required DEX classes (MainActivity, NativeRadar, RadarScanService, BleScanEngine) | **Validated** |
-| Required JNI exports (20 `Java_com_hse_bleradar_NativeRadar_*`) match `NativeRadar.java` natives 1:1 | **Validated** |
-| `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=6) |
+| JNI export contract derived from `NativeRadar.java` (`check-jni-contract`: 25 `static native` ↔ 25 `Java_com_hse_bleradar_NativeRadar_*` exports, no orphans) | **Validated** (2026-09-11, against the committed APK's `lib/arm64-v8a/libbleradar_jni.so`, SHA-256 `29d89f14…e8de02`) |
+| `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=8, `linked-natives=25`, 2026-09-11; now also run by CI) |
 | On-device install / BLE scan / original-oracle differential | **Unverified** — no emulator, physical device, or original signing key (MIG-003) |
 
 Package identity from live `aapt dump badging`:
@@ -74,6 +87,45 @@ because the APK Signature Block embeds a wall-clock signing time that
 `apksigner` does not fully pin even under `SOURCE_DATE_EPOCH`. Treat
 per-entry content hashes (or `cargo xtask verify-android-live`) as the
 authoritative completeness proof, not a single whole-file digest.
+
+**Cross-host reproducibility (live 2026-09-10):** rebuilding the then-committed
+APK on a different host reproduced `libbleradar_jni.so`
+(SHA-256 `20e49084…d3aeb5`), the manifest, `resources.arsc`, and both icon
+resources byte-for-byte; `classes.dex` differed only by JDK-version metadata
+(JDK 21 `javac` emits `MethodParameters` attributes; identical class/method
+inventory and instruction stream under `dexdump -d`). The DEX is reproducible
+per JDK major version, so the JDK is pinned to 21 in CI and recorded in
+`docs/ANDROID_APP.md`. The committed APK was then regenerated from the
+COR-017/018/019 sources (decision #57): `classes.dex` 37,704 bytes,
+`resources.arsc` 3,084 bytes, native library unchanged, whole file 360,898
+bytes, signed with a fresh ephemeral debug identity as every rebuild is.
+Regenerated again for `bleradar-core` 0.6.1 (decision #58): only the
+`lib/arm64-v8a/libbleradar_jni.so` entry changed (318,536 → 318,504 bytes);
+`classes.dex`, `resources.arsc`, the manifest, and both icons are byte-identical
+to the previous build, and `verify-android-live` re-ran green. Rebuilt once more
+from the `bleradar-core` 0.6.2 sources (decision #64, COR-024..026): every
+entry, the native library included (SHA-256 `86103a9b…`, 318,504 bytes), is
+byte-identical to the committed APK, because the JNI library does not link the
+website or infrastructure engines and LTO strips them; the committed APK was
+therefore left unchanged rather than re-signed for no content change.
+Rebuilt again from the `bleradar-core` 0.6.3 sources (decision #66, COR-027):
+this time the `lib/arm64-v8a/libbleradar_jni.so` entry differed (SHA-256
+`e48ac57d…`, still 318,504 bytes) by 151 bytes confined to `.dynsym`,
+`.dynstr`, `.rela.dyn` and the ELF headers — the address-normalized
+disassembly (56,740 lines), the section sizes, the 21 `Java_*` exports and
+the 47 imports are identical, so the change is symbol-table layout, not
+code — and `verify-android-live` re-ran green. The committed APK was
+regenerated so that a rebuild from the integrated sources reproduces its
+native library byte-for-byte; `classes.dex`, `resources.arsc`, the manifest,
+and both icons are byte-identical to the previous build. Rebuilt once more
+after decision #69 (indexed pair matching in the correlation engines, which
+the JNI library does not call): the native library grew by 32 bytes to
+318,536 (SHA-256 `b6225924…`) with 73 of 56,739 address-normalized
+disassembly lines differing — the size-optimising LTO build inlined shared
+standard-library code slightly differently — while the 21 exports, the
+manifest, `classes.dex` and `resources.arsc` are unchanged and
+`verify-android-live` re-ran green; the committed APK was regenerated again
+for the same reproducibility reason.
 
 This layer proves the **reconstructed** APK builds and packages correctly. It
 does **not** claim differential parity with

@@ -564,3 +564,158 @@ fn artifact_referencing_an_unregistered_entity_is_rejected() {
         })
     ));
 }
+
+#[test]
+fn transaction_keeps_every_change_on_success_and_undoes_every_change_on_error() {
+    let source = source();
+    let mut store = EvidenceStore::new();
+    let kept: Result<(), ProvenanceError> = store.transaction(|store| {
+        store.add_source(source.clone())?;
+        store.add_entity(bleradar_core::Entity::new(
+            "device-1",
+            bleradar_core::EntityType::Device,
+        )?)?;
+        store.add_observation(observation(&source))
+    });
+    kept.unwrap();
+    assert_eq!(store.len(), 3);
+
+    let before = store.len();
+    let undone: Result<(), ProvenanceError> = store.transaction(|store| {
+        store.add_entity(bleradar_core::Entity::new(
+            "device-2",
+            bleradar_core::EntityType::Device,
+        )?)?;
+        store.add_artifact(Artifact::new("artifact-1", ArtifactType::Digital)?)?;
+        // Duplicate observation id: the whole transaction fails.
+        store.add_observation(observation(&source))
+    });
+    assert!(matches!(
+        undone,
+        Err(ProvenanceError::DuplicateId {
+            collection: "observation",
+            ..
+        })
+    ));
+    assert_eq!(store.len(), before);
+    assert!(store.entity("device-2").is_none());
+    assert!(store.artifact("artifact-1").is_none());
+    assert!(store.entity("device-1").is_some());
+    store.validate().unwrap();
+}
+
+#[test]
+fn nested_transaction_failure_undoes_only_the_inner_changes() {
+    let source = source();
+    let mut store = EvidenceStore::new();
+    let outcome: Result<(), ProvenanceError> = store.transaction(|store| {
+        store.add_source(source.clone())?;
+        let inner: Result<(), ProvenanceError> = store.transaction(|store| {
+            store.add_observation(observation(&source))?;
+            Err(ProvenanceError::MissingReference {
+                record: "test",
+                record_id: "inner".to_owned(),
+                field: "field",
+                reference: "reference".to_owned(),
+            })
+        });
+        assert!(inner.is_err());
+        assert!(store.observation("observation-1").is_none());
+        assert!(store.source("source-1").is_some());
+        store.add_entity(bleradar_core::Entity::new(
+            "device-1",
+            bleradar_core::EntityType::Device,
+        )?)
+    });
+    outcome.unwrap();
+    assert!(store.source("source-1").is_some());
+    assert!(store.entity("device-1").is_some());
+    assert!(store.observation("observation-1").is_none());
+    assert_eq!(store.len(), 2);
+    store.validate().unwrap();
+
+    // An outer failure undoes the surviving outer changes too.
+    let outcome: Result<(), ProvenanceError> = store.transaction(|store| {
+        store.add_observation(observation(&source))?;
+        let inner: Result<(), ProvenanceError> = store.transaction(|store| {
+            store.add_artifact(Artifact::new("artifact-1", ArtifactType::Digital)?)
+        });
+        inner?;
+        Err(ProvenanceError::MissingReference {
+            record: "test",
+            record_id: "outer".to_owned(),
+            field: "field",
+            reference: "reference".to_owned(),
+        })
+    });
+    assert!(outcome.is_err());
+    assert!(store.observation("observation-1").is_none());
+    assert!(store.artifact("artifact-1").is_none());
+    assert_eq!(store.len(), 2);
+}
+
+#[test]
+fn transaction_rollback_restores_in_place_updates() {
+    let source = source();
+    let mut store = EvidenceStore::new();
+    store.add_source(source.clone()).unwrap();
+    store.add_observation(observation(&source)).unwrap();
+    store
+        .add_artifact(Artifact::new("artifact-1", ArtifactType::Digital).unwrap())
+        .unwrap();
+
+    let outcome: Result<(), ProvenanceError> = store.transaction(|store| {
+        store.record_observation_seen_at("observation-1", 500)?;
+        store.add_representation(Representation::new(
+            "representation-1",
+            "artifact-1",
+            RepresentationType::Raw,
+        )?)?;
+        assert_eq!(store.observation("observation-1").unwrap().last_seen(), 500);
+        assert_eq!(
+            store.artifact("artifact-1").unwrap().representation_ids(),
+            &["representation-1".to_owned()]
+        );
+        Err(ProvenanceError::MissingReference {
+            record: "test",
+            record_id: "abort".to_owned(),
+            field: "field",
+            reference: "reference".to_owned(),
+        })
+    });
+    assert!(outcome.is_err());
+    assert_eq!(store.observation("observation-1").unwrap().last_seen(), 100);
+    assert!(store.representation("representation-1").is_none());
+    assert!(
+        store
+            .artifact("artifact-1")
+            .unwrap()
+            .representation_ids()
+            .is_empty()
+    );
+    assert_eq!(store.len(), 3);
+    store.validate().unwrap();
+}
+
+#[test]
+fn panic_inside_a_transaction_rolls_back_and_leaves_the_store_usable() {
+    let source = source();
+    let mut store = EvidenceStore::new();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(), ProvenanceError> = store.transaction(|store| {
+            store.add_source(source.clone())?;
+            panic!("adapter failure inside the transaction");
+        });
+    }));
+    assert!(outcome.is_err());
+    assert!(store.is_empty());
+
+    // The journal is closed again: later refusals and successes behave normally.
+    store.add_source(source.clone()).unwrap();
+    assert!(store.add_source(source.clone()).is_err());
+    let outcome: Result<(), ProvenanceError> =
+        store.transaction(|store| store.add_observation(observation(&source)));
+    outcome.unwrap();
+    assert_eq!(store.len(), 2);
+    store.validate().unwrap();
+}
