@@ -1,5 +1,35 @@
 # Autonomous Decision Log
 
+## Foundational Methodology: Empirical Verification and Iterative Improvement
+
+Every decision in this log follows this evidence-driven methodology:
+
+1. **Evaluate expert advice against current empirical evidence.** Never trust authority alone; measure against real observed data.
+2. **Select the highest-value verifiable actions.** Rank candidates by reproducible impact, not ease or popularity.
+3. **Implement in safe, verifiable code.** Rust and rigorous tests lock behavior against regression.
+4. **Exercise real datasets, APIs, systems, and runtime paths.** Use production conditions, not mocks or stubs.
+5. **Establish and benchmark against a reproducible baseline.** Measure the starting state before any change.
+6. **Measure outcomes quantitatively.** Produce numbers, not impressions.
+7. **Independently verify and falsify results.** Use adversarial testing; deliberately try to break the improvement.
+8. **Repair, replace, or revert failures.** Never hide problems; fix them, replace the approach, or rollback.
+9. **Retain only reproducible net gains.** Improvements that disappear after rebuild, reinstall, or restart never existed.
+10. **Repeat until no material verified improvement remains.** Continue the cycle until hitting the diminishing-returns frontier.
+11. **Conclude only from observed empirical evidence.** Report measured facts, not speculation or theory.
+
+This methodology is not negotiable. It is how this codebase maintains its verifiability guarantee and how decisions are made.
+
+## Ground Rule: Real Code and Verified Results Only
+
+Every entry in this log represents work that is **code-complete, tested, and merged into `origin/main`**. Planning, design, and intent are never recorded as completed work. A decision is closed only when:
+
+1. **Source-Authoritative**: The behavior is implemented in committed source code (Rust, Java, or documentation).
+2. **Tested**: Regression tests lock the behavior or a campaign verifies it; a single passing run is not proof.
+3. **Integrated**: The change is merged into the `main` branch, not sitting in a feature branch or a local worktree.
+4. **Remotely Verified**: CI gates have run against the merged commit and passed green.
+5. **Operationally Exercised**: The feature has been run and observed to work (or explicitly noted as blocked by environment constraints like MIG-003).
+
+Dormant code, stubs awaiting future implementation, and incomplete features are recorded as **deferred** with their exact blockers named, never claimed as done. This log is a record of what actually exists and works, not what was attempted or intended.
+
 ## Recovery points
 
 - `recovery/apk-oracle` — original binary/oracle preservation point.

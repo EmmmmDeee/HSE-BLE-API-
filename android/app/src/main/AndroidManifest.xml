@@ -75,6 +75,5 @@
             android:name="com.hse.bleradar.UpdateRetryReceiver"
             android:exported="false" />
 
-
     </application>
 </manifest>
