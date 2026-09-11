@@ -52,21 +52,34 @@ public final class RadarView extends View {
     private static final double RANGE_EXPAND_THRESHOLD = 1.15;
     private static final double RANGE_CONTRACT_THRESHOLD = 0.70;
 
+    private static final int COLOUR_ACCENT = 0xFF39D98A;
+    private static final int COLOUR_TEXT_PRIMARY = 0xFFE7F3ED;
+    private static final int COLOUR_TEXT_SECONDARY = 0xFF7E9C90;
+    private static final int COLOUR_BACKGROUND_PRIMARY = 0xFF0F1419;
+    private static final int COLOUR_BACKGROUND_SECONDARY = 0xFF162026;
+    private static final int COLOUR_BORDER_LIGHT = 0xB3E7F3ED;
+    private static final int COLOUR_VIGNETTE_OUTER = 0xFF17232B;
+    private static final int COLOUR_VIGNETTE_INNER = 0xFF0F1419;
+    private static final int COLOUR_SWEEP_TRAILING = 0x0039D98A;
+    private static final int COLOUR_SWEEP_LEADING = 0xA039D98A;
+
+    private static final int VIGNETTE_NOT_YET_COMPUTED = -1;
+
     private double maxRangeMetres = 40.0;
     private List<Blip> blips = new ArrayList<>();
     private final long animationStartUptimeMillis = SystemClock.uptimeMillis();
 
-    private final Paint spokePaint = strokePaint(Color.parseColor("#39D98A"));
-    private final Paint ringPaint = strokePaint(Color.parseColor("#39D98A"));
-    private final Paint rimPaint = strokePaint(Color.parseColor("#39D98A"));
-    private final Paint centrePaint = solidPaint(Color.parseColor("#39D98A"));
-    private final Paint uncertaintyPaint = strokePaint(Color.parseColor("#B3E7F3ED"));
-    private final Paint ringLabelPaint = textPaint(Color.parseColor("#7E9C90"), 11f);
-    private final Paint ringLabelBackgroundPaint = solidPaint(Color.parseColor("#CC0F1419"));
-    private final Paint blipLabelPaint = textPaint(Color.parseColor("#E7F3ED"), 12f);
-    private final Paint blipLabelBackgroundPaint = solidPaint(Color.parseColor("#CC162026"));
+    private final Paint spokePaint = strokePaint(COLOUR_ACCENT);
+    private final Paint ringPaint = strokePaint(COLOUR_ACCENT);
+    private final Paint rimPaint = strokePaint(COLOUR_ACCENT);
+    private final Paint centrePaint = solidPaint(COLOUR_ACCENT);
+    private final Paint uncertaintyPaint = strokePaint(COLOUR_BORDER_LIGHT);
+    private final Paint ringLabelPaint = textPaint(COLOUR_TEXT_SECONDARY, 11f);
+    private final Paint ringLabelBackgroundPaint = solidPaint(0xCC0F1419);
+    private final Paint blipLabelPaint = textPaint(COLOUR_TEXT_PRIMARY, 12f);
+    private final Paint blipLabelBackgroundPaint = solidPaint(0xCC162026);
     private final Paint sweepPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint needlePaint = strokePaint(Color.parseColor("#EAFFF4"));
+    private final Paint needlePaint = strokePaint(0xFFEAFFF4);
     private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint corePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF sweepBounds = new RectF();
@@ -74,8 +87,8 @@ public final class RadarView extends View {
     private final Shader[] unitGlowShaders = buildUnitGlowShaders();
 
     private Paint backgroundVignettePaint;
-    private int vignetteWidth = -1;
-    private int vignetteHeight = -1;
+    private int vignetteWidth = VIGNETTE_NOT_YET_COMPUTED;
+    private int vignetteHeight = VIGNETTE_NOT_YET_COMPUTED;
 
     public RadarView(Context context) {
         super(context);
@@ -92,7 +105,11 @@ public final class RadarView extends View {
         }
     }
 
-    /** Replaces the rendered device snapshot. Safe to call from the main thread only. */
+    /**
+     * Replaces the rendered device snapshot. Safe to call from the main thread only.
+     *
+     * @param blips the device snapshot, or null (treated as an empty list)
+     */
     public void setBlips(List<Blip> blips) {
         this.blips = blips == null ? new ArrayList<>() : new ArrayList<>(blips);
         updateAutoRange(autoRangeMetres(this.blips));
@@ -193,15 +210,11 @@ public final class RadarView extends View {
         if (backgroundVignettePaint == null || width != vignetteWidth || height != vignetteHeight) {
             vignetteWidth = width;
             vignetteHeight = height;
-            // Anchored to the radar disc's own radius (not the raw view
-            // width/height) so the fade completes just past the outer rim
-            // regardless of the container's aspect ratio; everything
-            // beyond simply clamps to the flat original background colour.
             float shaderRadius = Math.max(1f, radius * 1.15f);
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
             paint.setShader(new RadialGradient(
                     cx, cy, shaderRadius,
-                    Color.parseColor("#FF17232B"), Color.parseColor("#FF0F1419"),
+                    COLOUR_VIGNETTE_OUTER, COLOUR_VIGNETTE_INNER,
                     Shader.TileMode.CLAMP));
             backgroundVignettePaint = paint;
         }
@@ -252,11 +265,9 @@ public final class RadarView extends View {
         float sweepAngle = (elapsed % SWEEP_PERIOD_MILLIS) / (float) SWEEP_PERIOD_MILLIS * 360f;
 
         sweepBounds.set(cx - radius, cy - radius, cx + radius, cy + radius);
-        int trailing = Color.argb(0, 0x39, 0xD9, 0x8A);
-        int leading = Color.argb(160, 0x39, 0xD9, 0x8A);
         SweepGradient shader = new SweepGradient(
                 cx, cy,
-                new int[] {trailing, trailing, leading},
+                new int[] {COLOUR_SWEEP_TRAILING, COLOUR_SWEEP_TRAILING, COLOUR_SWEEP_LEADING},
                 new float[] {0f, 1f - (SWEEP_ARC_DEGREES / 360f), 1f});
         sweepPaint.setShader(shader);
         sweepPaint.setStyle(Paint.Style.FILL);
@@ -265,9 +276,6 @@ public final class RadarView extends View {
         canvas.drawArc(sweepBounds, 0f, 360f, true, sweepPaint);
         canvas.restore();
 
-        // Crisp leading-edge needle, mirroring the extracted oracle icon's
-        // own solid sweep-needle path, layered on top of the soft trailing
-        // wedge above for a sharper, more analogous leading edge.
         needlePaint.setStrokeWidth(Math.max(2f, radius * 0.018f));
         needlePaint.setAlpha(235);
         double needleAngle = Math.toRadians(sweepAngle - 90.0);
