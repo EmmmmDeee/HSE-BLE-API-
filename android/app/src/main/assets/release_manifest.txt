@@ -1,0 +1,8 @@
+version_code = 1
+version_name = 1.0.0
+url = https://example.com/ble-radar-release.apk
+size_bytes = 52428800
+sha256 = 0000000000000000000000000000000000000000000000000000000000000000
+min_sdk = 26
+mandatory = false
+notes = Bundled offline default; no update is currently available

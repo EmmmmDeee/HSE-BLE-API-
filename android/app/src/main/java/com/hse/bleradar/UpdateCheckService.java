@@ -113,12 +113,22 @@ public final class UpdateCheckService extends Service {
     }
 
     /**
-     * Loads the release manifest. Currently a placeholder returning null;
-     * future implementations can load from assets, a bundled resource, or a remote URL.
+     * Loads the release manifest from the bundled assets.
+     *
+     * <p>The offline-first approach loads from {@code release_manifest.txt} in the app's assets.
+     * On failure, returns null, allowing the service to retry later. Future implementations
+     * can extend this to fetch a live manifest from a remote URL or combine bundled + remote sources.
+     *
+     * @return the parsed manifest, or null if loading or parsing fails
      */
     private ReleaseManifest loadReleaseManifest() {
-        // TODO: load from assets, hardcoded URL, or bundled source
-        return null;
+        try {
+            String manifestText = new String(getAssets().open("release_manifest.txt").readAllBytes());
+            return ReleaseManifest.parse(manifestText);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to load release manifest from assets", e);
+            return null;
+        }
     }
 
     @Override
