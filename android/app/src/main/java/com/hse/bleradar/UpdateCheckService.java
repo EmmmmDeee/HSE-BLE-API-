@@ -6,6 +6,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
@@ -52,8 +53,12 @@ public final class UpdateCheckService extends Service {
     private static final int MIN_BATTERY_PERCENT = 20;
     private static final long STORAGE_HEADROOM_BYTES = 100 * 1024 * 1024; // 100 MiB
 
+    private static final String PREFS_NAME = "UpdateCheckService";
+    private static final String PREFS_DOWNLOAD_ID = "activeDownloadId";
+
     private UpdateManager updateManager;
     private DownloadManager downloadManager;
+    private SharedPreferences prefs;
     private long activeDownloadId = -1;
 
     @Override
@@ -61,7 +66,67 @@ public final class UpdateCheckService extends Service {
         super.onCreate();
         updateManager = new UpdateManager(this);
         downloadManager = getSystemService(DownloadManager.class);
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+
+        // Restore any pending download from a prior session
+        restorePendingDownload();
+
         Log.d(TAG, "UpdateCheckService created");
+    }
+
+    /**
+     * Restores a pending download from SharedPreferences if one was interrupted.
+     * Re-registers the broadcast receiver to monitor for completion.
+     */
+    private void restorePendingDownload() {
+        activeDownloadId = prefs.getLong(PREFS_DOWNLOAD_ID, -1);
+        if (activeDownloadId != -1 && downloadManager != null) {
+            Log.d(TAG, "Restoring pending download " + activeDownloadId);
+            // Check if the download still exists
+            DownloadManager.Query query = new DownloadManager.Query().setFilterById(activeDownloadId);
+            android.database.Cursor cursor = downloadManager.query(query);
+            if (cursor != null && cursor.moveToFirst()) {
+                int status = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS));
+                if (status == DownloadManager.STATUS_SUCCESSFUL || status == DownloadManager.STATUS_FAILED) {
+                    // Download is already complete; clear the saved ID
+                    clearDownloadId();
+                    activeDownloadId = -1;
+                } else {
+                    // Download is still in progress; re-register the receiver
+                    try {
+                        BroadcastReceiver receiver = new DownloadCompletionReceiver(null, 0);
+                        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+                        } else {
+                            registerReceiver(receiver, filter);
+                        }
+                        Log.d(TAG, "Re-registered broadcast receiver for pending download");
+                    } catch (Exception e) {
+                        Log.w(TAG, "Failed to re-register download receiver", e);
+                    }
+                }
+                cursor.close();
+            } else if (cursor != null) {
+                cursor.close();
+                clearDownloadId();
+                activeDownloadId = -1;
+            }
+        }
+    }
+
+    /**
+     * Persists the download ID to SharedPreferences so it survives process termination.
+     */
+    private void saveDownloadId(long downloadId) {
+        prefs.edit().putLong(PREFS_DOWNLOAD_ID, downloadId).apply();
+    }
+
+    /**
+     * Clears the persisted download ID from SharedPreferences.
+     */
+    private void clearDownloadId() {
+        prefs.edit().remove(PREFS_DOWNLOAD_ID).apply();
     }
 
     /**
@@ -173,6 +238,7 @@ public final class UpdateCheckService extends Service {
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
 
             activeDownloadId = downloadManager.enqueue(request);
+            saveDownloadId(activeDownloadId);
             Log.d(TAG, "Enqueued download with ID " + activeDownloadId);
 
             // Register broadcast receiver for download completion
@@ -291,10 +357,12 @@ public final class UpdateCheckService extends Service {
                     Log.e(TAG, "Downloaded file missing or size mismatch");
                 }
 
+                clearDownloadId();
                 unregisterReceiver(this);
                 stopSelf(startId);
             } catch (Exception e) {
                 Log.e(TAG, "Error handling download completion", e);
+                clearDownloadId();
                 try {
                     unregisterReceiver(this);
                 } catch (IllegalArgumentException ignored) {
