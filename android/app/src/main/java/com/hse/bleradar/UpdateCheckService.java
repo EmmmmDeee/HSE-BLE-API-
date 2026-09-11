@@ -249,9 +249,7 @@ public final class UpdateCheckService extends Service {
             return START_NOT_STICKY;
         }
 
-        // Download is ready; reset retry count and proceed
-        clearRetryCount();
-
+        // Download is ready; do NOT clear retry count yet (only clear on successful verification)
         // Download and verify the APK
         Log.d(TAG, "Downloading update from: " + manifest.getUrl());
         downloadAndInstallUpdate(manifest, startId, isRetry);
@@ -406,7 +404,7 @@ public final class UpdateCheckService extends Service {
                     int reason = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_REASON));
                     Log.w(TAG, "Download failed with reason " + reason);
                     cursor.close();
-                    clearRetryCount();
+                    scheduleRetry();
                     unregisterReceiver(this);
                     if (isRetry) {
                         stopForeground(Service.STOP_FOREGROUND_REMOVE);
@@ -423,6 +421,7 @@ public final class UpdateCheckService extends Service {
                 File apkFile = new File(fileUri.getPath());
 
                 // Verify SHA-256
+                boolean verificationFailed = false;
                 if (apkFile.exists() && apkFile.length() == manifest.getSizeBytes()) {
                     String actualSha = computeSha256(apkFile);
                     if (actualSha.equalsIgnoreCase(manifest.getSha256())) {
@@ -432,9 +431,15 @@ public final class UpdateCheckService extends Service {
                     } else {
                         Log.e(TAG, "SHA-256 mismatch: expected " + manifest.getSha256()
                                 + ", got " + actualSha);
+                        verificationFailed = true;
                     }
                 } else {
                     Log.e(TAG, "Downloaded file missing or size mismatch");
+                    verificationFailed = true;
+                }
+
+                if (verificationFailed) {
+                    scheduleRetry();
                 }
 
                 clearDownloadId();
