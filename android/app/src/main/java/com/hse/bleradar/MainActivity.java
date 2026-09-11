@@ -99,10 +99,33 @@ public final class MainActivity extends android.app.Activity {
         // connectedDevice foreground type requires on API 34+ are known to be
         // granted; promoting here, before any grant, would throw there.
         bindService(serviceIntent(), connection, Context.BIND_AUTO_CREATE);
+
+        // Check for app updates on each activity start, respecting the daily throttle.
+        // UpdateManager uses shouldCheckForUpdate to gate the check (returns quickly
+        // if not yet time), and UpdateCheckService uses its own START_NOT_STICKY logic
+        // to self-exit when not needed, so this is a safe call on every resume.
+        tryCheckForUpdates();
     }
 
     private Intent serviceIntent() {
         return new Intent(this, RadarScanService.class);
+    }
+
+    /**
+     * Initiates an update check if enough time has passed since the last check.
+     *
+     * <p>This is called on every app resume, but UpdateManager.shouldCheckForUpdate respects
+     * the configured throttle interval (daily by default), so the check service only
+     * runs once per day. Any failures or deferred checks are logged but do not interrupt
+     * the app's normal operation.
+     */
+    private void tryCheckForUpdates() {
+        UpdateManager updateManager = new UpdateManager(this);
+        // The check is guarded by shouldCheckForUpdate, which respects the daily throttle,
+        // so this call returns quickly on most app launches.
+        if (updateManager.shouldCheckForUpdate(86400)) { // 86400 = 1 day in seconds
+            startService(new Intent(this, UpdateCheckService.class));
+        }
     }
 
     @Override

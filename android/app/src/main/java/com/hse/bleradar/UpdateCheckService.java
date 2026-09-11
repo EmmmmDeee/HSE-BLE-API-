@@ -1,0 +1,221 @@
+package com.hse.bleradar;
+
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
+import android.os.BatteryManager;
+import android.os.IBinder;
+import android.os.StatFs;
+import android.util.Log;
+
+/**
+ * Background service that periodically checks for app updates using the
+ * automatic-update decision core from {@code bleradar-core}.
+ *
+ * <p>This service orchestrates the update check lifecycle:
+ * <ul>
+ *   <li>On each check cycle, evaluates whether enough time has passed since the
+ *       last check (using {@link UpdateManager#shouldCheckForUpdate}).</li>
+ *   <li>If a check is due, fetches or loads the release manifest.</li>
+ *   <li>Calls {@link UpdateManager#assessUpdate} to determine if the release is
+ *       a safe upgrade.</li>
+ *   <li>If an update is available, gates the download on network/battery/storage
+ *       using {@link UpdateManager#checkDownloadReadiness}.</li>
+ *   <li>On transient failures, uses {@link UpdateManager#computeRetryBackoff} to
+ *       schedule the next retry with exponential backoff.</li>
+ * </ul>
+ *
+ * <p>Network fetch and OS package installation are the platform boundary —
+ * see {@code docs/AUTO_UPDATE.md}.
+ */
+public final class UpdateCheckService extends Service {
+
+    private static final String TAG = "UpdateCheckService";
+    private static final long CHECK_INTERVAL_SECONDS = 86400; // Daily
+    private static final long BASE_BACKOFF_SECONDS = 300; // 5 minutes
+    private static final long MAX_BACKOFF_SECONDS = 86400; // 24 hours
+    private static final int MIN_BATTERY_PERCENT = 20;
+    private static final long STORAGE_HEADROOM_BYTES = 100 * 1024 * 1024; // 100 MiB
+
+    private UpdateManager updateManager;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        updateManager = new UpdateManager(this);
+        Log.d(TAG, "UpdateCheckService created");
+    }
+
+    /**
+     * Triggered by an explicit action or alarm to perform an update check.
+     * Subclasses should typically run this on a background thread, not on the
+     * main thread.
+     */
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (updateManager == null) {
+            return START_NOT_STICKY;
+        }
+        // Check if enough time has passed since the last check
+        if (!updateManager.shouldCheckForUpdate(CHECK_INTERVAL_SECONDS)) {
+            Log.d(TAG, "Not yet time for an update check; skipping");
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+
+        // Record the check time (regardless of outcome)
+        updateManager.recordCheckTime();
+
+        // Fetch or load the release manifest
+        ReleaseManifest manifest = loadReleaseManifest();
+        if (manifest == null) {
+            Log.w(TAG, "Could not load release manifest; skipping update check");
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+
+        // Assess whether the release is a safe upgrade
+        int decision = updateManager.assessUpdate(manifest.getVersionCode(), manifest.getMinSdk());
+        Log.d(TAG, "Update decision: " + decision + " (available=" + NativeRadar.UPDATE_AVAILABLE + ")");
+
+        if (decision != NativeRadar.UPDATE_AVAILABLE) {
+            Log.d(TAG, "No safe update available (decision=" + decision + ")");
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+
+        // Check download readiness: network, battery, storage
+        // Detect actual device state for download gating
+        int network = detectNetworkType();
+        int battery = detectBatteryLevel();
+        boolean charging = isCharging();
+        long freeStorage = detectFreeStorage();
+        boolean allowMetered = false;
+
+        int readiness = updateManager.checkDownloadReadiness(
+                network, battery, charging, freeStorage, allowMetered,
+                MIN_BATTERY_PERCENT, STORAGE_HEADROOM_BYTES, manifest.getSizeBytes());
+
+        if (readiness != NativeRadar.DOWNLOAD_READY) {
+            Log.d(TAG, "Download not ready (readiness=" + readiness + "); will retry later");
+            // Compute backoff for retry
+            long backoffSeconds = updateManager.computeRetryBackoff(1, BASE_BACKOFF_SECONDS, MAX_BACKOFF_SECONDS);
+            Log.d(TAG, "Scheduled retry in " + backoffSeconds + " seconds");
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+
+        // Download and verify the APK
+        Log.d(TAG, "Downloading update from: " + manifest.getUrl());
+        // TODO: implement DownloadManager integration
+        // TODO: verify SHA-256 on download complete
+        // TODO: hand to PackageInstaller
+
+        stopSelf(startId);
+        return START_NOT_STICKY;
+    }
+
+    /**
+     * Loads the release manifest from the bundled assets.
+     *
+     * <p>The offline-first approach loads from {@code release_manifest.txt} in the app's assets.
+     * On failure, returns null, allowing the service to retry later. Future implementations
+     * can extend this to fetch a live manifest from a remote URL or combine bundled + remote sources.
+     *
+     * @return the parsed manifest, or null if loading or parsing fails
+     */
+    private ReleaseManifest loadReleaseManifest() {
+        try {
+            String manifestText = new String(getAssets().open("release_manifest.txt").readAllBytes());
+            return ReleaseManifest.parse(manifestText);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to load release manifest from assets", e);
+            return null;
+        }
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        // Not bound; this is a started service only
+        return null;
+    }
+
+    @Override
+    public void onDestroy() {
+        Log.d(TAG, "UpdateCheckService destroyed");
+        super.onDestroy();
+    }
+
+    /**
+     * Detects the current network type (unmetered, metered, or none).
+     *
+     * @return one of {@link NativeRadar#NETWORK_NONE}, {@link NativeRadar#NETWORK_METERED},
+     *         or {@link NativeRadar#NETWORK_UNMETERED}
+     */
+    private int detectNetworkType() {
+        ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+        if (cm == null) {
+            return NativeRadar.NETWORK_NONE;
+        }
+        android.net.Network network = cm.getActiveNetwork();
+        if (network == null) {
+            return NativeRadar.NETWORK_NONE;
+        }
+        NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+        if (caps == null) {
+            return NativeRadar.NETWORK_NONE;
+        }
+        boolean isMetered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+        return isMetered ? NativeRadar.NETWORK_METERED : NativeRadar.NETWORK_UNMETERED;
+    }
+
+    /**
+     * Detects the current battery level as a percentage (0–100).
+     *
+     * @return battery level in percent, or 0 on error
+     */
+    private int detectBatteryLevel() {
+        IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+        Intent batteryStatus = registerReceiver(null, filter);
+        if (batteryStatus == null) {
+            return 0;
+        }
+        int level = batteryStatus.getIntExtra(BatteryManager.EXTRA_LEVEL, 0);
+        int scale = batteryStatus.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+        return (level * 100) / Math.max(1, scale);
+    }
+
+    /**
+     * Detects whether the device is currently charging.
+     *
+     * @return true if charging, false otherwise
+     */
+    private boolean isCharging() {
+        IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+        Intent batteryStatus = registerReceiver(null, filter);
+        if (batteryStatus == null) {
+            return false;
+        }
+        int status = batteryStatus.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+        return status == BatteryManager.BATTERY_STATUS_CHARGING
+                || status == BatteryManager.BATTERY_STATUS_FULL;
+    }
+
+    /**
+     * Detects the free storage space in the app's cache directory.
+     *
+     * @return free space in bytes, or 0 on error
+     */
+    private long detectFreeStorage() {
+        try {
+            StatFs stat = new StatFs(getCacheDir().getAbsolutePath());
+            return stat.getAvailableBytes();
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to detect free storage", e);
+            return 0;
+        }
+    }
+}
