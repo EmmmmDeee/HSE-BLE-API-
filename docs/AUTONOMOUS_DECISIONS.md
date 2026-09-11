@@ -1,5 +1,17 @@
 # Autonomous Decision Log
 
+## Ground Rule: Real Code and Verified Results Only
+
+Every entry in this log represents work that is **code-complete, tested, and merged into `origin/main`**. Planning, design, and intent are never recorded as completed work. A decision is closed only when:
+
+1. **Source-Authoritative**: The behavior is implemented in committed source code (Rust, Java, or documentation).
+2. **Tested**: Regression tests lock the behavior or a campaign verifies it; a single passing run is not proof.
+3. **Integrated**: The change is merged into the `main` branch, not sitting in a feature branch or a local worktree.
+4. **Remotely Verified**: CI gates have run against the merged commit and passed green.
+5. **Operationally Exercised**: The feature has been run and observed to work (or explicitly noted as blocked by environment constraints like MIG-003).
+
+Dormant code, stubs awaiting future implementation, and incomplete features are recorded as **deferred** with their exact blockers named, never claimed as done. This log is a record of what actually exists and works, not what was attempted or intended.
+
 ## Recovery points
 
 - `recovery/apk-oracle` — original binary/oracle preservation point.

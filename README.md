@@ -4,6 +4,16 @@ Huntsman's Radar (API)
 
 An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK. It preserves the original executable artifacts as immutable behavioral oracles and makes parity gaps explicit instead of guessing missing source behavior.
 
+## Core Principle: Real Code and Verified Results Only
+
+This repository accepts **only real, executed code and verified results as work product**. Planning documents, design proposals, and intent are never deliverables. A feature is complete only when:
+- Code is written and committed to the repository
+- Tests pass and CI is green on the committed code
+- The change is merged into the `main` branch
+- Execution is verified on that exact merged commit
+
+Code that works in principle but was never executed is incomplete. Features that pass tests locally but fail remotely are not done. Improvements that disappear after rebuild, reinstall, or restart were never permanent. Every claim of completion must have real, observable evidence: green test runs, passing CI gates, and merged commits on `origin/main`.
+
 ## Repository layout
 
 - `crates/bleradar-core` — safe Rust geometry, identity, RSSI, proximity and device-tracking domain.
