@@ -40,7 +40,12 @@ An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK
   cost the user is never started. Verified by a 200,000-op
   differential campaign (offer/download/verify/install/retry/rollback) and a
   50,000-trial integrity oracle; the network fetch and OS installer are the
-  documented platform boundary. See `docs/AUTO_UPDATE.md`.
+  documented platform boundary. Its pure decision core (update decision,
+  re-check throttle, pre-download gating, retry backoff) is reachable from the
+  Android app through the JNI façade (`NativeRadar.updateDecision` /
+  `shouldCheckForUpdate` / `downloadReadiness` / `retryBackoffDelaySeconds`),
+  so the app makes those safety decisions in verified Rust. See
+  `docs/AUTO_UPDATE.md`.
 - `crates/bleradar-compat` — complete native ABI runtime/reachability census plus a separate source-replacement parity registry.
 - `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, executed-oracle differential verification under `qemu-aarch64` (`oracle-differential`, see `docs/ORACLE_DIFFERENTIAL.md`), and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
 - `android/app/src/main` — the hand-built Android radar app that consumes `bleradar-core` through `crates/bleradar-jni`; its design record is `docs/ANDROID_APP.md`.

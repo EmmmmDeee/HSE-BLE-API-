@@ -6,9 +6,18 @@ package com.hse.bleradar;
  * {@code bleradar-core} ({@code filtered_rssi}, {@code ble_distance_m},
  * {@code ble_distance_range_m}, {@code proximity_label},
  * {@code signal_confidence_percent}, {@code signal_trend},
- * {@code tracking_snapshot}). Keeping every native declaration and ordinal
- * mapping in one file makes the Java/Rust ABI contract easy to audit against
- * {@code crates/bleradar-jni/src/lib.rs}.
+ * {@code tracking_snapshot}), plus the app's automatic-update <em>decision</em>
+ * core ({@code update_decision}, {@code should_check_for_update},
+ * {@code download_readiness}, {@code RetryPolicy::backoff_delay_secs}). Keeping
+ * every native declaration and ordinal mapping in one file makes the Java/Rust
+ * ABI contract easy to audit against {@code crates/bleradar-jni/src/lib.rs}.
+ *
+ * <p>The update natives let the app decide <em>when</em> to check, <em>whether</em>
+ * a release is a safe upgrade, <em>whether</em> conditions permit a download, and
+ * how long to back off between retries, all using the exact verified Rust rather
+ * than a Java re-implementation. Fetching the bytes and handing the verified APK
+ * to the OS {@code PackageInstaller} remain the platform boundary — see
+ * {@code docs/AUTO_UPDATE.md}.
  */
 public final class NativeRadar {
 
@@ -47,8 +56,35 @@ public final class NativeRadar {
     /** {@link #defaultTrackingProfile()} / tracking-profile selector: more responsive, less stable. */
     public static final int TRACKING_RESPONSIVE = 1;
 
+    /** {@link #updateDecision(long, long, int, int)} result: the installed build is current. */
+    public static final int UPDATE_UP_TO_DATE = 0;
+    /** {@link #updateDecision(long, long, int, int)} result: a strictly newer, OS-compatible build is available. */
+    public static final int UPDATE_AVAILABLE = 1;
+    /** {@link #updateDecision(long, long, int, int)} result: the offered build is older; refuse (no silent downgrade). */
+    public static final int UPDATE_DOWNGRADE_REFUSED = 2;
+    /** {@link #updateDecision(long, long, int, int)} result: newer, but this device's OS is below the build minimum. */
+    public static final int UPDATE_INCOMPATIBLE_OS = 3;
+
+    /** {@link #downloadReadiness(int, int, boolean, long, boolean, int, long, long)} {@code network} argument: no usable connection. */
+    public static final int NETWORK_NONE = 0;
+    /** {@code network} argument: a metered connection (mobile data / hotspot) — downloading costs the user. */
+    public static final int NETWORK_METERED = 1;
+    /** {@code network} argument: an unmetered connection (Wi-Fi / Ethernet). */
+    public static final int NETWORK_UNMETERED = 2;
+
+    /** {@link #downloadReadiness(int, int, boolean, long, boolean, int, long, long)} result: all preconditions met; may download. */
+    public static final int DOWNLOAD_READY = 0;
+    /** Download-readiness result: no usable network connection. */
+    public static final int DOWNLOAD_NO_NETWORK = 1;
+    /** Download-readiness result: a network is present but metered and the policy forbids metered downloads. */
+    public static final int DOWNLOAD_METERED_BLOCKED = 2;
+    /** Download-readiness result: battery is below the policy minimum and the device is not charging. */
+    public static final int DOWNLOAD_LOW_BATTERY = 3;
+    /** Download-readiness result: not enough free storage for the artifact plus the required headroom. */
+    public static final int DOWNLOAD_INSUFFICIENT_STORAGE = 4;
+
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 7;
+    public static final int EXPECTED_ABI_VERSION = 8;
 
     private static volatile boolean loaded;
     private static volatile Throwable loadError;
@@ -269,6 +305,62 @@ public final class NativeRadar {
             int trackingProfile,
             long ageMs,
             double txPowerDbm);
+
+    /**
+     * The authoritative automatic-update decision from raw {@code versionCode}s
+     * and OS levels: one of the {@code UPDATE_*} constants above. {@code Available}
+     * ({@link #UPDATE_AVAILABLE}) only when the offered build is <em>strictly
+     * newer</em> by {@code versionCode} <em>and</em> {@code deviceSdkInt >= minSdkInt};
+     * {@link #UPDATE_UP_TO_DATE} when equal, {@link #UPDATE_DOWNGRADE_REFUSED}
+     * when older, {@link #UPDATE_INCOMPATIBLE_OS} when newer but unsupported.
+     * Never performs I/O.
+     */
+    public static native int updateDecision(
+            long installedVersionCode,
+            long availableVersionCode,
+            int deviceSdkInt,
+            int minSdkInt);
+
+    /**
+     * Whether enough time has elapsed since the last update check to poll again,
+     * given the current time, the last-check time (any monotonic unit; seconds
+     * recommended), and the minimum interval. Robust against a clock that went
+     * backwards (a backwards jump never forces an early check).
+     */
+    public static native boolean shouldCheckForUpdate(
+            long nowSeconds,
+            long lastCheckSeconds,
+            long minIntervalSeconds);
+
+    /**
+     * Whether an automatic download of an {@code artifactSizeBytes}-byte artifact
+     * may start now: one of the {@code DOWNLOAD_*} constants, returning the first
+     * unmet precondition in a fixed precedence (no network → metered blocked →
+     * low battery → insufficient storage → ready). {@code network} is one of the
+     * {@code NETWORK_*} constants; a charging device is never "low battery".
+     * Keeps the app from starting a download that would fail or cost the user.
+     */
+    public static native int downloadReadiness(
+            int network,
+            int batteryPercent,
+            boolean charging,
+            long freeStorageBytes,
+            boolean allowMetered,
+            int minBatteryPercent,
+            long storageHeadroomBytes,
+            long artifactSizeBytes);
+
+    /**
+     * The bounded exponential backoff to wait before the given retry attempt
+     * ({@code attempt >= 1}): {@code baseDelaySeconds * 2^(attempt-1)}, saturating
+     * and capped at {@code maxDelaySeconds}. Drives retry pacing after a transient
+     * download/verify fault; the retry <em>budget</em> (how many attempts) is the
+     * caller's, this only computes the delay.
+     */
+    public static native long retryBackoffDelaySeconds(
+            int attempt,
+            long baseDelaySeconds,
+            long maxDelaySeconds);
 
     /** Build-time sanity check; should equal {@link #EXPECTED_ABI_VERSION}. */
     public static native int abiVersion();

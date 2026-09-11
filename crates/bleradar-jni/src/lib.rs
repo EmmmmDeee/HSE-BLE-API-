@@ -9,9 +9,17 @@
 //! that math in Java would silently fork it from the workspace's single,
 //! tested implementation (`crates/bleradar-core/tests/core.rs`,
 //! `crates/bleradar-core/tests/properties.rs`); this crate instead compiles
-//! `bleradar-core` itself for `aarch64-linux-android` and re-exports three of
-//! its pure functions through the JNI calling convention, so the on-device
-//! calculation is the exact code already covered by the workspace's gates.
+//! `bleradar-core` itself for `aarch64-linux-android` and re-exports its pure
+//! functions through the JNI calling convention, so the on-device calculation
+//! is the exact code already covered by the workspace's gates.
+//!
+//! The same principle extends past the signal/tracking math to the app's
+//! automatic-update *decision* core: `updateDecision`, `shouldCheckForUpdate`,
+//! `downloadReadiness`, and `retryBackoffDelaySeconds` bridge
+//! [`bleradar_core::update`] so the self-update safety decisions (version/OS
+//! policy, re-check throttle, pre-download gating, backoff schedule) run the
+//! verified Rust rather than a Java re-implementation. The network fetch and
+//! the OS `PackageInstaller` remain the platform boundary (docs/AUTO_UPDATE.md).
 //!
 //! # Why `unsafe_code` is allowed here (and nowhere else in the workspace)
 //!
@@ -35,10 +43,12 @@
 //! them in lockstep.
 
 use bleradar_core::{
-    CalibrationProfile, FreshnessClass, ProximityBand, SignalTrend, TrackingProfile,
-    TrackingSnapshot, TrackingSnapshotInput, ble_distance_m, ble_distance_range_m,
-    calibration_profile, calibration_profile_from_ordinal, filtered_rssi, proximity_label,
-    signal_confidence_percent, signal_trend, tracking_profile_from_ordinal, tracking_snapshot,
+    CalibrationProfile, DownloadConditions, DownloadPolicy, DownloadReadiness, FreshnessClass,
+    NetworkType, ProximityBand, RetryPolicy, SignalTrend, TrackingProfile, TrackingSnapshot,
+    TrackingSnapshotInput, ble_distance_m, ble_distance_range_m, calibration_profile,
+    calibration_profile_from_ordinal, download_readiness, filtered_rssi, proximity_label,
+    should_check_for_update, signal_confidence_percent, signal_trend,
+    tracking_profile_from_ordinal, tracking_snapshot, update_decision,
 };
 
 /// Opaque, never-dereferenced pointer type standing in for the JNI `JNIEnv*`
@@ -292,6 +302,166 @@ pub fn tracking_freshness_ordinal(input: TrackingSnapshotJniInput) -> i32 {
         FreshnessClass::Recent => 1,
         FreshnessClass::Stale => 2,
     })
+}
+
+// ===== Automatic-update decision surface =====
+//
+// These bridge `bleradar_core`'s pure, exhaustively-tested update *decision*
+// core — version/OS policy, the re-check throttle, pre-download gating, and the
+// retry backoff schedule — to `NativeRadar.java`, so the Android app makes those
+// self-update safety decisions with the exact verified Rust code (`update.rs`,
+// `tests/update.rs`, `tests/update_campaign.rs`) instead of re-deriving them in
+// Java. The network fetch and the OS `PackageInstaller` remain the documented
+// platform boundary (see docs/AUTO_UPDATE.md). The stateful streaming
+// `ArtifactVerifier` and `UpdateSession` are deliberately not bridged here: an
+// owned-native-state JNI handle is a larger, separate surface, and every
+// function below is a total function over primitives — exactly what the live
+// JVM proof and the JNI differential campaign can exercise.
+
+/// Saturating `i64 -> u64` for a JNI-supplied quantity that is non-negative by
+/// contract (a `versionCode`, a timestamp, a byte count): a negative value is
+/// nonsensical, so it is clamped to `0` rather than wrapping to a huge `u64`.
+const fn jni_nonneg_u64(value: i64) -> u64 {
+    if value < 0 { 0 } else { value as u64 }
+}
+
+/// Saturating `i32 -> u32` for a JNI-supplied non-negative field (an SDK level).
+const fn jni_nonneg_u32(value: i32) -> u32 {
+    if value < 0 { 0 } else { value as u32 }
+}
+
+/// Clamps a JNI-supplied battery reading to the documented `0..=100` domain.
+const fn jni_percent_u8(value: i32) -> u8 {
+    if value < 0 {
+        0
+    } else if value > 100 {
+        100
+    } else {
+        value as u8
+    }
+}
+
+/// Pure, unit-testable core of `NativeRadar.updateDecision(...)`.
+///
+/// Returns the [`UpdateDecision`](bleradar_core::UpdateDecision) ordinal
+/// (`0` = UpToDate, `1` = Available, `2` = DowngradeRefused,
+/// `3` = IncompatibleOs); `NativeRadar.java` mirrors these as its `UPDATE_*`
+/// constants. Version codes and SDK levels are
+/// non-negative by contract; a negative input is clamped to `0`.
+#[must_use]
+pub fn update_decision_ordinal(
+    installed_version_code: i64,
+    available_version_code: i64,
+    device_sdk_int: i32,
+    min_sdk_int: i32,
+) -> i32 {
+    update_decision(
+        jni_nonneg_u64(installed_version_code),
+        jni_nonneg_u64(available_version_code),
+        jni_nonneg_u32(device_sdk_int),
+        jni_nonneg_u32(min_sdk_int),
+    )
+    .ordinal()
+}
+
+/// Pure, unit-testable core of `NativeRadar.shouldCheckForUpdate(...)`.
+///
+/// Whether enough time has elapsed since the last check to poll again, robust
+/// against a clock that went backwards. Timestamps are any monotonic unit
+/// (seconds recommended); a negative value is clamped to `0`.
+#[must_use]
+pub fn should_check_for_update_flag(now: i64, last_check: i64, min_interval: i64) -> bool {
+    should_check_for_update(
+        jni_nonneg_u64(now),
+        jni_nonneg_u64(last_check),
+        jni_nonneg_u64(min_interval),
+    )
+}
+
+/// Maps a `NativeRadar.NETWORK_*` ordinal to a [`NetworkType`]. Anything
+/// outside `0..=2` becomes [`NetworkType::None`] — the most conservative choice
+/// (it blocks the download), so an unknown encoding can never be misread as "a
+/// usable network is present".
+const fn network_from_ordinal(network: i32) -> NetworkType {
+    match network {
+        1 => NetworkType::Metered,
+        2 => NetworkType::Unmetered,
+        _ => NetworkType::None,
+    }
+}
+
+/// Maps a [`DownloadReadiness`] to a stable JNI ordinal (`0` = Ready,
+/// `1` = NoNetwork, `2` = MeteredBlocked, `3` = LowBattery,
+/// `4` = InsufficientStorage); `NativeRadar.java` mirrors these as its
+/// `DOWNLOAD_*` constants. The `InsufficientStorage { needed, free }` payload is
+/// not carried across JNI — the caller already sampled both quantities.
+const fn download_readiness_ordinal_of(readiness: DownloadReadiness) -> i32 {
+    match readiness {
+        DownloadReadiness::Ready => 0,
+        DownloadReadiness::NoNetwork => 1,
+        DownloadReadiness::MeteredBlocked => 2,
+        DownloadReadiness::LowBattery => 3,
+        DownloadReadiness::InsufficientStorage { .. } => 4,
+    }
+}
+
+/// Pure, unit-testable core of `NativeRadar.downloadReadiness(...)`.
+///
+/// Returns the [`DownloadReadiness`] ordinal for the first unmet precondition in
+/// the engine's fixed precedence (no network → metered blocked → low battery →
+/// insufficient storage → ready). Non-negative byte counts are clamped to `0`;
+/// battery readings are clamped to `0..=100`.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn download_readiness_ordinal(
+    network: i32,
+    battery_percent: i32,
+    charging: bool,
+    free_storage_bytes: i64,
+    allow_metered: bool,
+    min_battery_percent: i32,
+    storage_headroom_bytes: i64,
+    artifact_size_bytes: i64,
+) -> i32 {
+    let conditions = DownloadConditions {
+        network: network_from_ordinal(network),
+        battery_percent: jni_percent_u8(battery_percent),
+        charging,
+        free_storage_bytes: jni_nonneg_u64(free_storage_bytes),
+    };
+    let policy = DownloadPolicy {
+        allow_metered,
+        min_battery_percent: jni_percent_u8(min_battery_percent),
+        storage_headroom_bytes: jni_nonneg_u64(storage_headroom_bytes),
+    };
+    download_readiness_ordinal_of(download_readiness(
+        &conditions,
+        &policy,
+        jni_nonneg_u64(artifact_size_bytes),
+    ))
+}
+
+/// Pure, unit-testable core of `NativeRadar.retryBackoffDelaySeconds(...)`.
+///
+/// The backoff delay before the given attempt (`base * 2^(attempt-1)`,
+/// saturating and capped at `max_delay_secs`), from the authoritative
+/// [`RetryPolicy::backoff_delay_secs`]. `max_attempts` is not a parameter — it
+/// bounds *how many* retries happen, not the delay computed here. Negative
+/// inputs are clamped to `0`, and the `u64` result is saturated into the
+/// `i64`/`jlong` range.
+#[must_use]
+pub fn retry_backoff_delay_secs(attempt: i32, base_delay_secs: i64, max_delay_secs: i64) -> i64 {
+    let policy = RetryPolicy {
+        max_attempts: 1,
+        base_delay_secs: jni_nonneg_u64(base_delay_secs),
+        max_delay_secs: jni_nonneg_u64(max_delay_secs),
+    };
+    let delay = policy.backoff_delay_secs(jni_nonneg_u32(attempt));
+    if delay > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        delay as i64
+    }
 }
 
 /// `NativeRadar.filteredRssi(double, double, double): double` — see
@@ -668,13 +838,105 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_trackingFreshness(
     })
 }
 
+/// `NativeRadar.updateDecision(long, long, int, int): int` — see
+/// [`update_decision_ordinal`].
+///
+/// # Safety note
+/// Ignores `_env`/`_class`; never dereferences them. See the module docs for
+/// why `#[unsafe(no_mangle)]` is nonetheless required.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_updateDecision(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    installed_version_code: i64,
+    available_version_code: i64,
+    device_sdk_int: i32,
+    min_sdk_int: i32,
+) -> i32 {
+    update_decision_ordinal(
+        installed_version_code,
+        available_version_code,
+        device_sdk_int,
+        min_sdk_int,
+    )
+}
+
+/// `NativeRadar.shouldCheckForUpdate(long, long, long): boolean` — see
+/// [`should_check_for_update_flag`]. Returns the JNI `jboolean` encoding
+/// (`1` = true, `0` = false).
+///
+/// # Safety note
+/// Ignores `_env`/`_class`; never dereferences them.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_shouldCheckForUpdate(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    now: i64,
+    last_check: i64,
+    min_interval: i64,
+) -> u8 {
+    should_check_for_update_flag(now, last_check, min_interval) as u8
+}
+
+/// `NativeRadar.downloadReadiness(int, int, boolean, long, boolean, int, long, long): int`
+/// — see [`download_readiness_ordinal`]. The two `boolean` parameters use the
+/// JNI `jboolean` encoding (non-zero = true).
+///
+/// # Safety note
+/// Ignores `_env`/`_class`; never dereferences them.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_downloadReadiness(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    network: i32,
+    battery_percent: i32,
+    charging: u8,
+    free_storage_bytes: i64,
+    allow_metered: u8,
+    min_battery_percent: i32,
+    storage_headroom_bytes: i64,
+    artifact_size_bytes: i64,
+) -> i32 {
+    download_readiness_ordinal(
+        network,
+        battery_percent,
+        charging != 0,
+        free_storage_bytes,
+        allow_metered != 0,
+        min_battery_percent,
+        storage_headroom_bytes,
+        artifact_size_bytes,
+    )
+}
+
+/// `NativeRadar.retryBackoffDelaySeconds(int, long, long): long` — see
+/// [`retry_backoff_delay_secs`].
+///
+/// # Safety note
+/// Ignores `_env`/`_class`; never dereferences them.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_retryBackoffDelaySeconds(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    attempt: i32,
+    base_delay_secs: i64,
+    max_delay_secs: i64,
+) -> i64 {
+    retry_backoff_delay_secs(attempt, base_delay_secs, max_delay_secs)
+}
+
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side
 /// calls once at startup to confirm the loaded `.so` matches the ABI this
 /// file documents, independent of the app's own version number.
+///
+/// Bumped to `8` when the automatic-update decision surface
+/// (`updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
+/// `retryBackoffDelaySeconds`) was added to the ABI.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    7
+    8
 }

@@ -1,9 +1,12 @@
 //! Differential campaign over every exported JNI symbol
 //! (`docs/AUTONOMOUS_DECISIONS.md` #65).
 //!
-//! The Android app calls the 21 `Java_com_hse_bleradar_NativeRadar_*` exports
-//! on every scan result, and the release profile they ship with aborts the
-//! process on any panic. Each export ignores its `JNIEnv`/`jclass` arguments,
+//! The Android app calls the 25 `Java_com_hse_bleradar_NativeRadar_*` exports
+//! (the signal/tracking surface plus the four automatic-update decision
+//! bridges — `updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
+//! `retryBackoffDelaySeconds`) on every scan result or update check, and the
+//! release profile they ship with aborts the process on any panic. Each export
+//! ignores its `JNIEnv`/`jclass` arguments,
 //! so this test calls the exported functions themselves with null pointers
 //! and checks, over random and adversarial inputs (NaN, infinities, signed
 //! zeros, subnormals, `f64::MAX`, arbitrary bit patterns, `i32`/`i64`
@@ -29,11 +32,12 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use bleradar_core::{
-    CalibrationProfile, FreshnessClass, ProximityBand, SignalTrend, TrackingProfile,
-    TrackingSnapshotInput, ble_distance_m, ble_distance_range_m, calibration_profile,
-    calibration_profile_from_ordinal, filtered_rssi, proximity_label,
-    proximity_label_from_distance_m, signal_confidence_percent, signal_trend, tracking_profile,
-    tracking_profile_from_ordinal, tracking_snapshot,
+    CalibrationProfile, DownloadConditions, DownloadPolicy, DownloadReadiness, FreshnessClass,
+    NetworkType, ProximityBand, RetryPolicy, SignalTrend, TrackingProfile, TrackingSnapshotInput,
+    ble_distance_m, ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
+    download_readiness, filtered_rssi, proximity_label, proximity_label_from_distance_m,
+    should_check_for_update, signal_confidence_percent, signal_trend, tracking_profile,
+    tracking_profile_from_ordinal, tracking_snapshot, update_decision,
 };
 use bleradar_jni::{
     Java_com_hse_bleradar_NativeRadar_abiVersion, Java_com_hse_bleradar_NativeRadar_bleDistanceM,
@@ -43,8 +47,11 @@ use bleradar_jni::{
     Java_com_hse_bleradar_NativeRadar_defaultTrackingProfile,
     Java_com_hse_bleradar_NativeRadar_distanceLowerBoundM,
     Java_com_hse_bleradar_NativeRadar_distanceUpperBoundM,
+    Java_com_hse_bleradar_NativeRadar_downloadReadiness,
     Java_com_hse_bleradar_NativeRadar_filteredRssi,
     Java_com_hse_bleradar_NativeRadar_proximityLabel,
+    Java_com_hse_bleradar_NativeRadar_retryBackoffDelaySeconds,
+    Java_com_hse_bleradar_NativeRadar_shouldCheckForUpdate,
     Java_com_hse_bleradar_NativeRadar_signalConfidencePercent,
     Java_com_hse_bleradar_NativeRadar_signalTrend,
     Java_com_hse_bleradar_NativeRadar_trackingConfidencePercent,
@@ -55,16 +62,18 @@ use bleradar_jni::{
     Java_com_hse_bleradar_NativeRadar_trackingFilteredRssi,
     Java_com_hse_bleradar_NativeRadar_trackingFreshness,
     Java_com_hse_bleradar_NativeRadar_trackingProximity,
-    Java_com_hse_bleradar_NativeRadar_trackingTrend, TrackingSnapshotJniInput,
+    Java_com_hse_bleradar_NativeRadar_trackingTrend,
+    Java_com_hse_bleradar_NativeRadar_updateDecision, TrackingSnapshotJniInput,
     ble_distance_m_or_nan, calibration_profile_path_loss_exponent_or_nan,
     calibration_profile_rssi_at_1m_dbm_or_nan, default_calibration_profile_ordinal,
     default_tracking_profile_ordinal, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
-    filtered_rssi_or_nan, proximity_label_ordinal, signal_confidence_percent_or_negative,
+    download_readiness_ordinal, filtered_rssi_or_nan, proximity_label_ordinal,
+    retry_backoff_delay_secs, should_check_for_update_flag, signal_confidence_percent_or_negative,
     signal_trend_ordinal, tracking_confidence_percent_or_negative,
     tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
     tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
     tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
-    tracking_trend_ordinal,
+    tracking_trend_ordinal, update_decision_ordinal,
 };
 
 const DEFAULT_ITERATIONS: u64 = 20_000;
@@ -777,6 +786,211 @@ fn check_tracking(rng: &mut Rng) -> Result<(), String> {
     Ok(())
 }
 
+/// Independent reference for the bridge's `i64 -> u64` clamp (negatives to 0).
+fn nonneg_u64(value: i64) -> u64 {
+    if value < 0 { 0 } else { value as u64 }
+}
+
+/// Independent reference for the bridge's `i32 -> u32` clamp (negatives to 0).
+fn nonneg_u32(value: i32) -> u32 {
+    if value < 0 { 0 } else { value as u32 }
+}
+
+/// Independent reference for the bridge's battery clamp to `0..=100`.
+fn clamp_percent(value: i32) -> u8 {
+    value.clamp(0, 100) as u8
+}
+
+/// A non-negative-by-contract `i64` (version code, timestamp, byte count),
+/// reusing the adversarial [`age`] generator so update scalars also hit the
+/// `i64` extremes and the storage/threshold special values.
+fn scalar(rng: &mut Rng) -> i64 {
+    age(rng)
+}
+
+/// Independent reference for the bridge's [`DownloadReadiness`] -> ordinal map.
+fn readiness_ordinal(readiness: DownloadReadiness) -> i32 {
+    match readiness {
+        DownloadReadiness::Ready => 0,
+        DownloadReadiness::NoNetwork => 1,
+        DownloadReadiness::MeteredBlocked => 2,
+        DownloadReadiness::LowBattery => 3,
+        DownloadReadiness::InsufficientStorage { .. } => 4,
+    }
+}
+
+/// Independent reference for the bridge's ordinal -> [`NetworkType`] map.
+fn net_from_ordinal(network: i32) -> NetworkType {
+    match network {
+        1 => NetworkType::Metered,
+        2 => NetworkType::Unmetered,
+        _ => NetworkType::None,
+    }
+}
+
+/// Differential check over the four automatic-update decision exports: each is
+/// called directly (null `JNIEnv`/`jclass`) with random and adversarial inputs
+/// and must return bit-for-bit what its pure core returns and what an
+/// independent reconstruction of the underlying `bleradar_core::update`
+/// contract returns; every ordinal stays in range, no downgrade is ever
+/// offered, and the backoff never exceeds its cap.
+fn check_update(rng: &mut Rng) -> Result<(), String> {
+    // --- Version / OS decision ---
+    let installed = scalar(rng);
+    let available = scalar(rng);
+    let device_sdk = int(rng);
+    let min_sdk = int(rng);
+    let decision = Java_com_hse_bleradar_NativeRadar_updateDecision(
+        null(),
+        null(),
+        installed,
+        available,
+        device_sdk,
+        min_sdk,
+    );
+    let expected = update_decision(
+        nonneg_u64(installed),
+        nonneg_u64(available),
+        nonneg_u32(device_sdk),
+        nonneg_u32(min_sdk),
+    )
+    .ordinal();
+    if decision != update_decision_ordinal(installed, available, device_sdk, min_sdk)
+        || decision != expected
+    {
+        return Err(format!(
+            "updateDecision export/core/bleradar-core disagree \
+             [installed={installed} available={available} device_sdk={device_sdk} min_sdk={min_sdk}]"
+        ));
+    }
+    if !(0..=3).contains(&decision) {
+        return Err(format!("updateDecision ordinal {decision} out of range"));
+    }
+    if nonneg_u64(available) < nonneg_u64(installed) && decision == 1 {
+        return Err("a downgrade was offered as Available".into());
+    }
+    if nonneg_u64(available) == nonneg_u64(installed) && decision != 0 {
+        return Err("equal versionCode was not reported as UpToDate".into());
+    }
+
+    // --- Re-check throttle ---
+    let now = scalar(rng);
+    let last = scalar(rng);
+    let interval = scalar(rng);
+    let flag =
+        Java_com_hse_bleradar_NativeRadar_shouldCheckForUpdate(null(), null(), now, last, interval)
+            != 0;
+    let expected_flag =
+        should_check_for_update(nonneg_u64(now), nonneg_u64(last), nonneg_u64(interval));
+    if flag != should_check_for_update_flag(now, last, interval) || flag != expected_flag {
+        return Err(format!(
+            "shouldCheckForUpdate export/core/bleradar-core disagree \
+             [now={now} last={last} interval={interval}]"
+        ));
+    }
+
+    // --- Pre-download gating ---
+    let network = int(rng);
+    let battery = int(rng);
+    let charging = rng.below(2) == 0;
+    let free = scalar(rng);
+    let allow_metered = rng.below(2) == 0;
+    let min_battery = int(rng);
+    let headroom = scalar(rng);
+    let size = scalar(rng);
+    let readiness = Java_com_hse_bleradar_NativeRadar_downloadReadiness(
+        null(),
+        null(),
+        network,
+        battery,
+        charging as u8,
+        free,
+        allow_metered as u8,
+        min_battery,
+        headroom,
+        size,
+    );
+    let conditions = DownloadConditions {
+        network: net_from_ordinal(network),
+        battery_percent: clamp_percent(battery),
+        charging,
+        free_storage_bytes: nonneg_u64(free),
+    };
+    let policy = DownloadPolicy {
+        allow_metered,
+        min_battery_percent: clamp_percent(min_battery),
+        storage_headroom_bytes: nonneg_u64(headroom),
+    };
+    let expected_readiness =
+        readiness_ordinal(download_readiness(&conditions, &policy, nonneg_u64(size)));
+    let core_readiness = download_readiness_ordinal(
+        network,
+        battery,
+        charging,
+        free,
+        allow_metered,
+        min_battery,
+        headroom,
+        size,
+    );
+    if readiness != core_readiness || readiness != expected_readiness {
+        return Err(format!(
+            "downloadReadiness export/core/bleradar-core disagree \
+             [network={network} battery={battery} charging={charging} free={free} \
+              allow_metered={allow_metered} min_battery={min_battery} headroom={headroom} size={size}]"
+        ));
+    }
+    if !(0..=4).contains(&readiness) {
+        return Err(format!(
+            "downloadReadiness ordinal {readiness} out of range"
+        ));
+    }
+    if net_from_ordinal(network) == NetworkType::None && readiness != 1 {
+        return Err("no-network condition not reported as NoNetwork".into());
+    }
+
+    // --- Retry backoff ---
+    let attempt = int(rng);
+    let base = scalar(rng);
+    let cap = scalar(rng);
+    let delay = Java_com_hse_bleradar_NativeRadar_retryBackoffDelaySeconds(
+        null(),
+        null(),
+        attempt,
+        base,
+        cap,
+    );
+    let backoff_policy = RetryPolicy {
+        max_attempts: 1,
+        base_delay_secs: nonneg_u64(base),
+        max_delay_secs: nonneg_u64(cap),
+    };
+    let raw = backoff_policy.backoff_delay_secs(nonneg_u32(attempt));
+    let expected_delay = if raw > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        raw as i64
+    };
+    if delay != retry_backoff_delay_secs(attempt, base, cap) || delay != expected_delay {
+        return Err(format!(
+            "retryBackoffDelaySeconds export/core/bleradar-core disagree \
+             [attempt={attempt} base={base} cap={cap}]"
+        ));
+    }
+    if delay < 0 {
+        return Err(format!(
+            "retryBackoffDelaySeconds returned negative {delay}"
+        ));
+    }
+    if delay as u64 > nonneg_u64(cap) {
+        return Err(format!(
+            "retryBackoffDelaySeconds {delay} exceeds the cap {}",
+            nonneg_u64(cap)
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn every_export_agrees_with_its_core_and_never_panics() {
     let iterations = env_u64("BLERADAR_JNI_CAMPAIGN_ITERATIONS", DEFAULT_ITERATIONS);
@@ -785,7 +999,8 @@ fn every_export_agrees_with_its_core_and_never_panics() {
     for iteration in 0..iterations {
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             check_stateless(&mut rng)?;
-            check_tracking(&mut rng)
+            check_tracking(&mut rng)?;
+            check_update(&mut rng)
         }));
         match outcome {
             Err(_) => panic!("seed={seed} iteration={iteration}: a JNI export panicked"),

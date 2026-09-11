@@ -185,7 +185,8 @@ authority.
 `HSE-BLE-Radar-arm64-v1.0.0.apk` is the output of `build-apk` at the commit
 that last changed the Android sources or the JNI crate; the export contract
 of its `lib/arm64-v8a/libbleradar_jni.so` was re-verified against
-`NativeRadar.java` on 2026-09-10 (21 natives ↔ 21 exports).
+`NativeRadar.java` on 2026-09-11 (25 natives ↔ 25 exports, after the
+automatic-update decision surface was added — decision #81).
 
 Reproducibility, observed 2026-09-10 by rebuilding the then-committed APK on
 a different host (build-tools 37.0.0, NDK 27.3.13750724, platform

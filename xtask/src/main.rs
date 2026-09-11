@@ -1441,6 +1441,68 @@ public final class JniSmoke {{
                         127.0)
                         == distanceWithoutTxPower,
                 "implausible txPowerDbm (TX_POWER_NOT_PRESENT sentinel) was not ignored");
+        verifyUpdateDecisionSurface();
+    }}
+
+    /**
+     * Exercises the automatic-update decision natives (ABI 8+) across the real
+     * JVM->.so boundary, so their argument order, `jboolean`/`jlong` encodings,
+     * and ordinal mappings are proven live rather than only in Rust.
+     */
+    private static void verifyUpdateDecisionSurface() {{
+        require(
+                NativeRadar.updateDecision(41L, 42L, 34, 26) == NativeRadar.UPDATE_AVAILABLE,
+                "unexpected update decision (available)");
+        require(
+                NativeRadar.updateDecision(42L, 42L, 34, 26) == NativeRadar.UPDATE_UP_TO_DATE,
+                "unexpected update decision (up to date)");
+        require(
+                NativeRadar.updateDecision(42L, 41L, 34, 26) == NativeRadar.UPDATE_DOWNGRADE_REFUSED,
+                "unexpected update decision (downgrade refused)");
+        require(
+                NativeRadar.updateDecision(41L, 42L, 24, 26) == NativeRadar.UPDATE_INCOMPATIBLE_OS,
+                "unexpected update decision (incompatible OS)");
+        require(
+                NativeRadar.shouldCheckForUpdate(1000L, 0L, 900L),
+                "update check should be due after the interval");
+        require(
+                !NativeRadar.shouldCheckForUpdate(1000L, 500L, 900L),
+                "update check should not be due before the interval");
+        require(
+                !NativeRadar.shouldCheckForUpdate(400L, 1000L, 900L),
+                "a backwards clock must not force an update check");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_UNMETERED, 80, false, 100000000L, false, 20, 0L, 40000000L)
+                        == NativeRadar.DOWNLOAD_READY,
+                "download should be ready on Wi-Fi with battery and storage");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_METERED, 80, false, 100000000L, false, 20, 0L, 40000000L)
+                        == NativeRadar.DOWNLOAD_METERED_BLOCKED,
+                "metered download should be blocked by the default policy");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_NONE, 80, true, 100000000L, true, 20, 0L, 40000000L)
+                        == NativeRadar.DOWNLOAD_NO_NETWORK,
+                "no network should block the download first");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_UNMETERED, 10, false, 100000000L, false, 20, 0L, 40000000L)
+                        == NativeRadar.DOWNLOAD_LOW_BATTERY,
+                "low battery should block the download");
+        require(
+                NativeRadar.downloadReadiness(
+                        NativeRadar.NETWORK_UNMETERED, 80, false, 30000000L, false, 20, 20000000L, 40000000L)
+                        == NativeRadar.DOWNLOAD_INSUFFICIENT_STORAGE,
+                "insufficient storage should block the download");
+        require(
+                NativeRadar.retryBackoffDelaySeconds(1, 10L, 60L) == 10L
+                        && NativeRadar.retryBackoffDelaySeconds(2, 10L, 60L) == 20L
+                        && NativeRadar.retryBackoffDelaySeconds(3, 10L, 60L) == 40L
+                        && NativeRadar.retryBackoffDelaySeconds(4, 10L, 60L) == 60L
+                        && NativeRadar.retryBackoffDelaySeconds(9, 10L, 60L) == 60L,
+                "retry backoff should be exponential and capped");
     }}
 
     private static void verifyFailurePath() {{
