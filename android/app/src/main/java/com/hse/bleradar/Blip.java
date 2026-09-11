@@ -7,6 +7,14 @@ package com.hse.bleradar;
  * but never bearing — placing devices at a fixed, distinct angle avoids the
  * misleading impression of a real compass-bearing reading, while still
  * giving each device a consistent, recognizable position across redraws.
+ *
+ * <p><strong>Thread-safety:</strong> The public-facing fields ({@code name},
+ * {@code lastRssiDbm}, {@code distanceMetres}, etc.) are volatile for visibility
+ * across threads. The RSSI buffer ({@code recentRssiDbm}) and its counters are
+ * accessed from both the BLE scan thread (via {@link BleScanEngine#recordResult})
+ * and the UI thread (via {@link BleScanEngine#snapshot}). Access to the buffer
+ * is synchronized via {@link #recordFilteredRssi}, {@link #sampleCount}, and
+ * {@link #recentRssiSpreadDb} to prevent data races on the array and counters.
  */
 final class Blip {
     private static final int RECENT_SIGNAL_WINDOW = 8;
@@ -54,7 +62,7 @@ final class Blip {
         return nowUptimeMillis - lastSeenUptimeMillis <= freshnessWindowMillis;
     }
 
-    void recordFilteredRssi(double filteredRssiDbm) {
+    synchronized void recordFilteredRssi(double filteredRssiDbm) {
         if (!Double.isFinite(filteredRssiDbm)) {
             return;
         }
@@ -66,11 +74,11 @@ final class Blip {
         totalSampleCount++;
     }
 
-    int sampleCount() {
+    synchronized int sampleCount() {
         return totalSampleCount;
     }
 
-    double recentRssiSpreadDb() {
+    synchronized double recentRssiSpreadDb() {
         if (recentSampleCount < 2) {
             return 0.0;
         }
