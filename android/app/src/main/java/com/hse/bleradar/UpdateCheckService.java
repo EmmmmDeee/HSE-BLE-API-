@@ -1,12 +1,18 @@
 package com.hse.bleradar;
 
+import android.app.AlarmManager;
 import android.app.DownloadManager;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
@@ -15,8 +21,6 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.StatFs;
 import android.util.Log;
-
-import androidx.core.content.FileProvider;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -55,6 +59,12 @@ public final class UpdateCheckService extends Service {
 
     private static final String PREFS_NAME = "UpdateCheckService";
     private static final String PREFS_DOWNLOAD_ID = "activeDownloadId";
+    private static final String PREFS_RETRY_COUNT = "retryCount";
+    private static final String PREFS_LAST_RETRY_TIME = "lastRetryTime";
+    private static final String PREFS_PENDING_MANIFEST = "pendingManifest";
+
+    private static final String CHANNEL_ID = "update_check";
+    private static final int NOTIFICATION_ID = 2;
 
     private UpdateManager updateManager;
     private DownloadManager downloadManager;
@@ -67,6 +77,7 @@ public final class UpdateCheckService extends Service {
         updateManager = new UpdateManager(this);
         downloadManager = getSystemService(DownloadManager.class);
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        createNotificationChannel();
 
         // Restore any pending download from a prior session
         restorePendingDownload();
@@ -76,7 +87,7 @@ public final class UpdateCheckService extends Service {
 
     /**
      * Restores a pending download from SharedPreferences if one was interrupted.
-     * Re-registers the broadcast receiver to monitor for completion.
+     * Re-registers the broadcast receiver to monitor for completion, using the stored manifest.
      */
     private void restorePendingDownload() {
         activeDownloadId = prefs.getLong(PREFS_DOWNLOAD_ID, -1);
@@ -88,22 +99,30 @@ public final class UpdateCheckService extends Service {
             if (cursor != null && cursor.moveToFirst()) {
                 int status = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS));
                 if (status == DownloadManager.STATUS_SUCCESSFUL || status == DownloadManager.STATUS_FAILED) {
-                    // Download is already complete; clear the saved ID
+                    // Download is already complete; clear the saved state
                     clearDownloadId();
                     activeDownloadId = -1;
                 } else {
-                    // Download is still in progress; re-register the receiver
-                    try {
-                        BroadcastReceiver receiver = new DownloadCompletionReceiver(null, 0);
-                        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
-                        } else {
-                            registerReceiver(receiver, filter);
+                    // Download is still in progress; restore manifest and re-register the receiver
+                    ReleaseManifest manifest = restoreDownloadManifest();
+                    if (manifest != null) {
+                        try {
+                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, 0);
+                            IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+                            } else {
+                                registerReceiver(receiver, filter);
+                            }
+                            Log.d(TAG, "Re-registered broadcast receiver for pending download with restored manifest");
+                        } catch (Exception e) {
+                            Log.w(TAG, "Failed to re-register download receiver", e);
+                            clearDownloadId();
                         }
-                        Log.d(TAG, "Re-registered broadcast receiver for pending download");
-                    } catch (Exception e) {
-                        Log.w(TAG, "Failed to re-register download receiver", e);
+                    } else {
+                        Log.w(TAG, "Could not restore manifest for pending download; clearing");
+                        clearDownloadId();
+                        activeDownloadId = -1;
                     }
                 }
                 cursor.close();
@@ -116,32 +135,66 @@ public final class UpdateCheckService extends Service {
     }
 
     /**
-     * Persists the download ID to SharedPreferences so it survives process termination.
+     * Persists the download ID and manifest to SharedPreferences so they survive process termination.
      */
-    private void saveDownloadId(long downloadId) {
-        prefs.edit().putLong(PREFS_DOWNLOAD_ID, downloadId).apply();
+    private void saveDownloadState(long downloadId, ReleaseManifest manifest) {
+        prefs.edit()
+                .putLong(PREFS_DOWNLOAD_ID, downloadId)
+                .putString(PREFS_PENDING_MANIFEST, manifest.serialize())
+                .apply();
     }
 
     /**
-     * Clears the persisted download ID from SharedPreferences.
+     * Clears the persisted download ID and manifest from SharedPreferences.
      */
     private void clearDownloadId() {
-        prefs.edit().remove(PREFS_DOWNLOAD_ID).apply();
+        prefs.edit()
+                .remove(PREFS_DOWNLOAD_ID)
+                .remove(PREFS_PENDING_MANIFEST)
+                .apply();
+    }
+
+    /**
+     * Restores the manifest for a pending download from SharedPreferences.
+     */
+    private ReleaseManifest restoreDownloadManifest() {
+        String manifestText = prefs.getString(PREFS_PENDING_MANIFEST, null);
+        if (manifestText == null) {
+            return null;
+        }
+        return ReleaseManifest.parse(manifestText);
+    }
+
+    /**
+     * Clears the retry count when a download succeeds or a check completes.
+     */
+    private void clearRetryCount() {
+        prefs.edit().remove(PREFS_RETRY_COUNT).remove(PREFS_LAST_RETRY_TIME).apply();
     }
 
     /**
      * Triggered by an explicit action or alarm to perform an update check.
-     * Subclasses should typically run this on a background thread, not on the
-     * main thread.
+     * Handles both normal periodic checks and retry invocations via AlarmManager.
+     * When started via startForegroundService() from a retry, promotes to foreground
+     * to satisfy the Android 8+ contract and bypass the daily check throttle.
      */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (updateManager == null) {
             return START_NOT_STICKY;
         }
-        // Check if enough time has passed since the last check
-        if (!updateManager.shouldCheckForUpdate(CHECK_INTERVAL_SECONDS)) {
+
+        boolean isRetry = intent != null && intent.getBooleanExtra("is_retry", false);
+        if (isRetry) {
+            promoteToForeground();
+        }
+
+        // Check if enough time has passed since the last check (skip for retries)
+        if (!isRetry && !updateManager.shouldCheckForUpdate(CHECK_INTERVAL_SECONDS)) {
             Log.d(TAG, "Not yet time for an update check; skipping");
+            if (isRetry) {
+                stopForeground(Service.STOP_FOREGROUND_REMOVE);
+            }
             stopSelf(startId);
             return START_NOT_STICKY;
         }
@@ -153,6 +206,9 @@ public final class UpdateCheckService extends Service {
         ReleaseManifest manifest = loadReleaseManifest();
         if (manifest == null) {
             Log.w(TAG, "Could not load release manifest; skipping update check");
+            if (isRetry) {
+                stopForeground(Service.STOP_FOREGROUND_REMOVE);
+            }
             stopSelf(startId);
             return START_NOT_STICKY;
         }
@@ -163,6 +219,10 @@ public final class UpdateCheckService extends Service {
 
         if (decision != NativeRadar.UPDATE_AVAILABLE) {
             Log.d(TAG, "No safe update available (decision=" + decision + ")");
+            clearRetryCount();
+            if (isRetry) {
+                stopForeground(Service.STOP_FOREGROUND_REMOVE);
+            }
             stopSelf(startId);
             return START_NOT_STICKY;
         }
@@ -181,16 +241,18 @@ public final class UpdateCheckService extends Service {
 
         if (readiness != NativeRadar.DOWNLOAD_READY) {
             Log.d(TAG, "Download not ready (readiness=" + readiness + "); will retry later");
-            // Compute backoff for retry
-            long backoffSeconds = updateManager.computeRetryBackoff(1, BASE_BACKOFF_SECONDS, MAX_BACKOFF_SECONDS);
-            Log.d(TAG, "Scheduled retry in " + backoffSeconds + " seconds");
+            scheduleRetry();
+            if (isRetry) {
+                stopForeground(Service.STOP_FOREGROUND_REMOVE);
+            }
             stopSelf(startId);
             return START_NOT_STICKY;
         }
 
+        // Download is ready; do NOT clear retry count yet (only clear on successful verification)
         // Download and verify the APK
         Log.d(TAG, "Downloading update from: " + manifest.getUrl());
-        downloadAndInstallUpdate(manifest, startId);
+        downloadAndInstallUpdate(manifest, startId, isRetry);
         return START_NOT_STICKY;
     }
 
@@ -223,9 +285,12 @@ public final class UpdateCheckService extends Service {
      * Initiates a download of the update APK via DownloadManager, then verifies
      * and installs it when complete.
      */
-    private void downloadAndInstallUpdate(ReleaseManifest manifest, int startId) {
+    private void downloadAndInstallUpdate(ReleaseManifest manifest, int startId, boolean isRetry) {
         if (downloadManager == null) {
             Log.w(TAG, "DownloadManager unavailable");
+            if (isRetry) {
+                stopForeground(Service.STOP_FOREGROUND_REMOVE);
+            }
             stopSelf(startId);
             return;
         }
@@ -238,11 +303,11 @@ public final class UpdateCheckService extends Service {
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
 
             activeDownloadId = downloadManager.enqueue(request);
-            saveDownloadId(activeDownloadId);
+            saveDownloadState(activeDownloadId, manifest);
             Log.d(TAG, "Enqueued download with ID " + activeDownloadId);
 
             // Register broadcast receiver for download completion
-            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, startId);
+            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, startId, isRetry);
             IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
@@ -251,6 +316,9 @@ public final class UpdateCheckService extends Service {
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to start download", e);
+            if (isRetry) {
+                stopForeground(Service.STOP_FOREGROUND_REMOVE);
+            }
             stopSelf(startId);
         }
     }
@@ -276,18 +344,18 @@ public final class UpdateCheckService extends Service {
     }
 
     /**
-     * Installs the verified APK using PackageInstaller via FileProvider.
-     * FileProvider is used instead of Uri.fromFile() to avoid FileUriExposedException
-     * on Android 7+ and to comply with file URI exposure protection on Android 10+.
+     * Installs the verified APK by handing it to the system via ACTION_VIEW.
+     * This uses Uri.fromFile() which is deprecated but available on all API levels.
+     * The system package installer handles the installation directly.
      */
     private void installApk(File apkFile) {
         try {
-            Uri apkUri = FileProvider.getUriForFile(this, "com.hse.bleradar.fileprovider", apkFile);
+            @SuppressWarnings("deprecation")
+            Uri apkUri = Uri.fromFile(apkFile);
             Intent install = new Intent(Intent.ACTION_VIEW);
             install.setData(apkUri);
             install.setType("application/vnd.android.package-archive");
             install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(install);
             Log.d(TAG, "Handed APK to system installer");
         } catch (Exception e) {
@@ -301,10 +369,12 @@ public final class UpdateCheckService extends Service {
     private class DownloadCompletionReceiver extends BroadcastReceiver {
         private final ReleaseManifest manifest;
         private final int startId;
+        private final boolean isRetry;
 
-        DownloadCompletionReceiver(ReleaseManifest manifest, int startId) {
+        DownloadCompletionReceiver(ReleaseManifest manifest, int startId, boolean isRetry) {
             this.manifest = manifest;
             this.startId = startId;
+            this.isRetry = isRetry;
         }
 
         @Override
@@ -322,6 +392,9 @@ public final class UpdateCheckService extends Service {
                     Log.e(TAG, "Download not found");
                     cursor.close();
                     unregisterReceiver(this);
+                    if (isRetry) {
+                        stopForeground(Service.STOP_FOREGROUND_REMOVE);
+                    }
                     stopSelf(startId);
                     return;
                 }
@@ -331,7 +404,11 @@ public final class UpdateCheckService extends Service {
                     int reason = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_REASON));
                     Log.w(TAG, "Download failed with reason " + reason);
                     cursor.close();
+                    scheduleRetry();
                     unregisterReceiver(this);
+                    if (isRetry) {
+                        stopForeground(Service.STOP_FOREGROUND_REMOVE);
+                    }
                     stopSelf(startId);
                     return;
                 }
@@ -344,21 +421,32 @@ public final class UpdateCheckService extends Service {
                 File apkFile = new File(fileUri.getPath());
 
                 // Verify SHA-256
+                boolean verificationFailed = false;
                 if (apkFile.exists() && apkFile.length() == manifest.getSizeBytes()) {
                     String actualSha = computeSha256(apkFile);
                     if (actualSha.equalsIgnoreCase(manifest.getSha256())) {
                         Log.d(TAG, "SHA-256 verification passed");
+                        clearRetryCount();
                         installApk(apkFile);
                     } else {
                         Log.e(TAG, "SHA-256 mismatch: expected " + manifest.getSha256()
                                 + ", got " + actualSha);
+                        verificationFailed = true;
                     }
                 } else {
                     Log.e(TAG, "Downloaded file missing or size mismatch");
+                    verificationFailed = true;
+                }
+
+                if (verificationFailed) {
+                    scheduleRetry();
                 }
 
                 clearDownloadId();
                 unregisterReceiver(this);
+                if (isRetry) {
+                    stopForeground(Service.STOP_FOREGROUND_REMOVE);
+                }
                 stopSelf(startId);
             } catch (Exception e) {
                 Log.e(TAG, "Error handling download completion", e);
@@ -367,6 +455,9 @@ public final class UpdateCheckService extends Service {
                     unregisterReceiver(this);
                 } catch (IllegalArgumentException ignored) {
                     // Already unregistered
+                }
+                if (isRetry) {
+                    stopForeground(Service.STOP_FOREGROUND_REMOVE);
                 }
                 stopSelf(startId);
             }
@@ -377,6 +468,47 @@ public final class UpdateCheckService extends Service {
     public void onDestroy() {
         Log.d(TAG, "UpdateCheckService destroyed");
         super.onDestroy();
+    }
+
+    /**
+     * Promotes the service to foreground when started via startForegroundService().
+     * This satisfies the Android 8+ requirement to call startForeground() within 5 seconds.
+     */
+    private void promoteToForeground() {
+        Notification notification = buildUpdateNotification();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPT);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
+    }
+
+    /**
+     * Creates the notification channel for update check notifications.
+     * Called once during onCreate().
+     */
+    private void createNotificationChannel() {
+        NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
+                "App Updates",
+                NotificationManager.IMPORTANCE_LOW);
+        channel.setDescription("Notifications about app update checks and downloads");
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.createNotificationChannel(channel);
+        }
+    }
+
+    /**
+     * Builds a minimal notification for the update check foreground service.
+     */
+    private Notification buildUpdateNotification() {
+        return new Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("Checking for updates...")
+                .setContentText("")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setProgress(0, 0, true)
+                .build();
     }
 
     /**
@@ -446,6 +578,53 @@ public final class UpdateCheckService extends Service {
         } catch (Exception e) {
             Log.w(TAG, "Failed to detect free storage", e);
             return 0;
+        }
+    }
+
+    /**
+     * Schedules a retry of the update check using exponential backoff.
+     * Increments the retry count and computes the next backoff interval.
+     */
+    private void scheduleRetry() {
+        int retryCount = prefs.getInt(PREFS_RETRY_COUNT, 0);
+        retryCount++;
+
+        long backoffSeconds = updateManager.computeRetryBackoff(
+                retryCount, BASE_BACKOFF_SECONDS, MAX_BACKOFF_SECONDS);
+
+        Log.d(TAG, "Scheduling retry #" + retryCount + " in " + backoffSeconds + " seconds");
+
+        prefs.edit()
+                .putInt(PREFS_RETRY_COUNT, retryCount)
+                .putLong(PREFS_LAST_RETRY_TIME, System.currentTimeMillis())
+                .apply();
+
+        AlarmManager alarmManager = getSystemService(AlarmManager.class);
+        if (alarmManager == null) {
+            Log.w(TAG, "AlarmManager unavailable; cannot schedule retry");
+            return;
+        }
+
+        Intent retryIntent = new Intent(this, UpdateRetryReceiver.class);
+        retryIntent.setAction(UpdateRetryReceiver.ACTION_UPDATE_RETRY);
+        PendingIntent pendingIntent = PendingIntent.getBroadcast(
+                this, 0, retryIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        long triggerAtMillis = System.currentTimeMillis() + (backoffSeconds * 1000);
+
+        // Use setExactAndAllowWhileIdle for more reliable wake-up; falls back to set() if
+        // SCHEDULE_EXACT_ALARM permission is not granted or device restrictions prevent it.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
+            } else {
+                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
+            }
+            Log.d(TAG, "Scheduled update retry at " + triggerAtMillis);
+        } catch (SecurityException e) {
+            Log.w(TAG, "setExactAndAllowWhileIdle failed due to permission; using set() instead", e);
+            alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
         }
     }
 }

@@ -9,9 +9,47 @@ import java.security.NoSuchAlgorithmException;
 import static org.junit.Assert.*;
 
 /**
- * Unit tests for {@link UpdateCheckService} manifest loading and SHA-256 verification.
+ * Unit tests for {@link UpdateCheckService} manifest loading, SHA-256 verification, and retry logic.
  */
 public class UpdateCheckServiceTest {
+
+    @Test
+    public void retry_receiver_action_is_defined() {
+        // Verify the retry receiver action is correctly defined for scheduling alarms
+        assertNotNull("UpdateRetryReceiver.ACTION_UPDATE_RETRY must be defined",
+                UpdateRetryReceiver.ACTION_UPDATE_RETRY);
+        assertEquals("Retry action should have expected value",
+                "com.hse.bleradar.UPDATE_RETRY", UpdateRetryReceiver.ACTION_UPDATE_RETRY);
+    }
+
+    @Test
+    public void manifest_serialization_round_trips_correctly() {
+        // Verify that manifest serialization persists all fields correctly
+        // This ensures manifest can be persisted to SharedPreferences and restored
+        String manifestText = ""
+                + "version_code = 1\n"
+                + "version_name = 1.0.0\n"
+                + "url = https://example.com/ble-radar-release.apk\n"
+                + "size_bytes = 52428800\n"
+                + "sha256 = 0000000000000000000000000000000000000000000000000000000000000000\n"
+                + "min_sdk = 26\n"
+                + "mandatory = false\n"
+                + "notes = Bundled offline default\n";
+
+        ReleaseManifest m1 = ReleaseManifest.parse(manifestText);
+        assertNotNull("original manifest should parse", m1);
+
+        // Serialize and deserialize
+        String serialized = m1.serialize();
+        ReleaseManifest m2 = ReleaseManifest.parse(serialized);
+        assertNotNull("round-trip manifest should parse", m2);
+
+        // Verify all fields match after round-trip
+        assertEquals("version code after round-trip", m1.getVersionCode(), m2.getVersionCode());
+        assertEquals("SHA-256 after round-trip", m1.getSha256(), m2.getSha256());
+        assertEquals("size after round-trip", m1.getSizeBytes(), m2.getSizeBytes());
+        assertEquals("min SDK after round-trip", m1.getMinSdk(), m2.getMinSdk());
+    }
 
     @Test
     public void bundled_manifest_parses() {
@@ -75,6 +113,39 @@ public class UpdateCheckServiceTest {
 
         // Verification should be case-insensitive (our implementation lowercases)
         assertEquals("case-insensitive comparison", computed, uppercase.toLowerCase());
+    }
+
+    @Test
+    public void manifest_validation_rejects_invalid_inputs() {
+        // Verify manifest parsing rejects malformed inputs with proper validation
+
+        // Missing required fields
+        assertNull("should reject missing version_code",
+                ReleaseManifest.parse("version_name = 1.0.0\nurl = https://example.com/app.apk\n"));
+        assertNull("should reject missing version_name",
+                ReleaseManifest.parse("version_code = 1\nurl = https://example.com/app.apk\n"));
+        assertNull("should reject missing url",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\n"));
+        assertNull("should reject missing size_bytes",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\n"));
+        assertNull("should reject missing sha256",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\n"));
+
+        // Invalid field values
+        assertNull("should reject non-HTTPS URL",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = http://example.com/app.apk\nsize_bytes = 1024\nsha256 = " + validSha256() + "\n"));
+        assertNull("should reject invalid SHA-256 (wrong length)",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\nsha256 = 0000\n"));
+        assertNull("should reject invalid SHA-256 (non-hex characters)",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\nsha256 = " + "z".repeat(64) + "\n"));
+        assertNull("should reject zero version_code",
+                ReleaseManifest.parse("version_code = 0\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\nsha256 = " + validSha256() + "\n"));
+        assertNull("should reject zero size_bytes",
+                ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 0\nsha256 = " + validSha256() + "\n"));
+    }
+
+    private static String validSha256() {
+        return "0000000000000000000000000000000000000000000000000000000000000000";
     }
 
     /**

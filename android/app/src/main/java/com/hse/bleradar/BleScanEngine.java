@@ -29,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
 final class BleScanEngine {
 
     private static final String TAG = "BleScanEngine";
+    private static final int MIN_ANDROID_VERSION_FOR_BLUETOOTH_PERMISSIONS = Build.VERSION_CODES.S;
 
     /** Long-idle devices are pruned to keep the simple UI focused on live signals. */
     private static final long STALE_RETENTION_WINDOW_MILLIS = 30_000L;
@@ -80,7 +81,7 @@ final class BleScanEngine {
     }
 
     static String[] requiredPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (Build.VERSION.SDK_INT >= MIN_ANDROID_VERSION_FOR_BLUETOOTH_PERMISSIONS) {
             return new String[] {
                     Manifest.permission.BLUETOOTH_SCAN,
                     Manifest.permission.BLUETOOTH_CONNECT,
@@ -299,6 +300,7 @@ final class BleScanEngine {
             }
             return result.getDevice().getName();
         } catch (SecurityException denied) {
+            Log.w(TAG, "Bluetooth name permission revoked at query time");
             return null;
         }
     }
@@ -309,15 +311,7 @@ final class BleScanEngine {
         }
         for (Blip blip : blipsByAddress.values()) {
             long ageMs = Math.max(0L, nowUptimeMillis - blip.lastSeenUptimeMillis);
-            blip.freshness = NativeRadar.trackingFreshness(
-                    blip.lastRssiDbm,
-                    blip.lastRssiDbm,
-                    blip.recentRssiSpreadDb(),
-                    Math.max(1, blip.sampleCount()),
-                    calibrationProfile,
-                    trackingProfile,
-                    ageMs,
-                    blip.txPowerDbm);
+            blip.freshness = computeFreshness(blip, ageMs);
         }
     }
 
@@ -326,18 +320,21 @@ final class BleScanEngine {
             Blip blip = entry.getValue();
             long ageMs = Math.max(0L, nowUptimeMillis - blip.lastSeenUptimeMillis);
             if (NativeRadar.isAvailable()) {
-                return blip.freshness == NativeRadar.FRESHNESS_STALE
-                        || NativeRadar.trackingFreshness(
-                        blip.lastRssiDbm,
-                        blip.lastRssiDbm,
-                        blip.recentRssiSpreadDb(),
-                        Math.max(1, blip.sampleCount()),
-                        calibrationProfile,
-                        trackingProfile,
-                        ageMs,
-                        blip.txPowerDbm) == NativeRadar.FRESHNESS_STALE;
+                return computeFreshness(blip, ageMs) == NativeRadar.FRESHNESS_STALE;
             }
             return ageMs > STALE_RETENTION_WINDOW_MILLIS;
         });
+    }
+
+    private int computeFreshness(Blip blip, long ageMs) {
+        return NativeRadar.trackingFreshness(
+                blip.lastRssiDbm,
+                blip.lastRssiDbm,
+                blip.recentRssiSpreadDb(),
+                Math.max(1, blip.sampleCount()),
+                calibrationProfile,
+                trackingProfile,
+                ageMs,
+                blip.txPowerDbm);
     }
 }

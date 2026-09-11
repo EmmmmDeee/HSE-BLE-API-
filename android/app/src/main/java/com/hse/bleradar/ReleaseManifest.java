@@ -1,5 +1,6 @@
 package com.hse.bleradar;
 
+import android.util.Log;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -30,7 +31,9 @@ import java.util.regex.Pattern;
  */
 public final class ReleaseManifest {
 
+    private static final String TAG = "ReleaseManifest";
     private static final Pattern HEX_SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
+    private static final Pattern HTTPS_URL = Pattern.compile("^https://[a-zA-Z0-9._-]+.*");
 
     private final long versionCode;
     private final String versionName;
@@ -60,6 +63,7 @@ public final class ReleaseManifest {
      */
     public static ReleaseManifest parse(String text) {
         if (text == null || text.isEmpty()) {
+            Log.w(TAG, "Manifest text is null or empty");
             return null;
         }
         Map<String, String> fields = new HashMap<>();
@@ -70,6 +74,7 @@ public final class ReleaseManifest {
             }
             int eqIdx = line.indexOf('=');
             if (eqIdx < 0) {
+                Log.w(TAG, "Skipping malformed line (no '='): " + line.substring(0, Math.min(50, line.length())));
                 continue;
             }
             String key = line.substring(0, eqIdx).trim();
@@ -78,27 +83,63 @@ public final class ReleaseManifest {
         }
 
         try {
-            long versionCode = Long.parseLong(fields.getOrDefault("version_code", "0"));
+            // Validate required fields exist before parsing
+            if (!fields.containsKey("version_code")) {
+                Log.w(TAG, "Missing required field: version_code");
+                return null;
+            }
+            if (!fields.containsKey("version_name")) {
+                Log.w(TAG, "Missing required field: version_name");
+                return null;
+            }
+            if (!fields.containsKey("url")) {
+                Log.w(TAG, "Missing required field: url");
+                return null;
+            }
+            if (!fields.containsKey("size_bytes")) {
+                Log.w(TAG, "Missing required field: size_bytes");
+                return null;
+            }
+            if (!fields.containsKey("sha256")) {
+                Log.w(TAG, "Missing required field: sha256");
+                return null;
+            }
+
+            long versionCode = Long.parseLong(fields.get("version_code"));
             String versionName = fields.get("version_name");
             String url = fields.get("url");
-            long sizeBytes = Long.parseLong(fields.getOrDefault("size_bytes", "0"));
+            long sizeBytes = Long.parseLong(fields.get("size_bytes"));
             String sha256 = fields.get("sha256");
             int minSdk = Integer.parseInt(fields.getOrDefault("min_sdk", "26"));
             boolean mandatory = Boolean.parseBoolean(fields.getOrDefault("mandatory", "false"));
             String notes = fields.getOrDefault("notes", "");
 
-            if (versionCode <= 0 || versionName == null || url == null || sizeBytes <= 0 || sha256 == null || minSdk < 1) {
+            // Validate field values
+            if (versionCode <= 0) {
+                Log.w(TAG, "Invalid versionCode: " + versionCode + " (must be > 0)");
                 return null;
             }
-            if (!url.startsWith("https://")) {
+            if (sizeBytes <= 0) {
+                Log.w(TAG, "Invalid sizeBytes: " + sizeBytes + " (must be > 0)");
+                return null;
+            }
+            if (minSdk < 1) {
+                Log.w(TAG, "Invalid minSdk: " + minSdk + " (must be >= 1)");
+                return null;
+            }
+            if (!HTTPS_URL.matcher(url).matches()) {
+                Log.w(TAG, "Invalid URL: " + url + " (must be HTTPS)");
                 return null;
             }
             if (!HEX_SHA256.matcher(sha256).matches()) {
+                Log.w(TAG, "Invalid SHA-256: " + sha256 + " (must be 64 hex characters)");
                 return null;
             }
 
+            Log.d(TAG, "Parsed manifest: versionCode=" + versionCode + ", versionName=" + versionName);
             return new ReleaseManifest(versionCode, versionName, url, sizeBytes, sha256, minSdk, mandatory, notes);
         } catch (NumberFormatException e) {
+            Log.w(TAG, "Failed to parse numeric field: " + e.getMessage());
             return null;
         }
     }

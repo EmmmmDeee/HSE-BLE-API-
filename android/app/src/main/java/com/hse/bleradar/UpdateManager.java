@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.util.Log;
 
 /**
  * Manages automatic-update decision logic by wiring the verified Rust decision
@@ -18,6 +19,9 @@ import android.os.Build;
  */
 public final class UpdateManager {
 
+    private static final String TAG = "UpdateManager";
+    private static final int MIN_ANDROID_VERSION_FOR_LONG_VERSION_CODE = Build.VERSION_CODES.P;
+
     private static final String PREFS_NAME = "com.hse.bleradar.update";
     private static final String KEY_LAST_CHECK_TIME = "last_check_time_seconds";
     private static final String KEY_INSTALLED_VERSION_CODE = "installed_version_code";
@@ -28,6 +32,10 @@ public final class UpdateManager {
     public UpdateManager(Context context) {
         this.context = context;
         this.prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+    }
+
+    private static long getCurrentTimeSeconds() {
+        return System.currentTimeMillis() / 1000;
     }
 
     /**
@@ -44,9 +52,8 @@ public final class UpdateManager {
         if (!NativeRadar.isAvailable()) {
             return false;
         }
-        long nowSeconds = System.currentTimeMillis() / 1000;
         long lastCheckSeconds = prefs.getLong(KEY_LAST_CHECK_TIME, 0);
-        return NativeRadar.shouldCheckForUpdate(nowSeconds, lastCheckSeconds, minIntervalSeconds);
+        return NativeRadar.shouldCheckForUpdate(getCurrentTimeSeconds(), lastCheckSeconds, minIntervalSeconds);
     }
 
     /**
@@ -133,16 +140,16 @@ public final class UpdateManager {
      * regardless of the outcome).
      */
     public void recordCheckTime() {
-        long nowSeconds = System.currentTimeMillis() / 1000;
-        prefs.edit().putLong(KEY_LAST_CHECK_TIME, nowSeconds).apply();
+        prefs.edit().putLong(KEY_LAST_CHECK_TIME, getCurrentTimeSeconds()).apply();
     }
 
     /**
-     * Returns the installed app's versionCode.
+     * Returns the installed app's versionCode, or 0 if the package cannot be found
+     * (matches {@link NativeRadar#UPDATE_UP_TO_DATE} fallback when unavailable).
      */
     private long getInstalledVersionCode() {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (Build.VERSION.SDK_INT >= MIN_ANDROID_VERSION_FOR_LONG_VERSION_CODE) {
                 return context.getPackageManager()
                         .getPackageInfo(context.getPackageName(), 0)
                         .getLongVersionCode();
@@ -154,6 +161,7 @@ public final class UpdateManager {
                 return code;
             }
         } catch (PackageManager.NameNotFoundException e) {
+            Log.w(TAG, "Failed to read installed package version code", e);
             return 0;
         }
     }
