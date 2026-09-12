@@ -1,11 +1,13 @@
 package com.hse.bleradar;
 
+import android.content.res.AssetManager;
 import android.os.SystemClock;
 import android.util.JsonWriter;
 import android.util.Log;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.StringWriter;
@@ -20,8 +22,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
- * Loopback-only HTTP server exposing the live device snapshot as JSON, for a
- * web UI or Termux tooling running on the same device.
+ * Loopback-only HTTP server exposing the live device snapshot as JSON and
+ * the web dashboard that renders it, for a browser or Termux tooling running
+ * on the same device.
  *
  * <p>Android ships no HTTP server class ({@code com.sun.net.httpserver} is a
  * JDK-only package absent from {@code android.jar}), so this is a deliberately
@@ -33,19 +36,29 @@ import java.util.concurrent.RejectedExecutionException;
  * <ul>
  *   <li>{@code /api/devices} — every live device from
  *       {@link BleScanEngine#snapshot()}, in its ranked order: {@code address},
- *       {@code name}, {@code distance_m} / {@code distance_lower_m} /
+ *       {@code name} ({@code null} when the advertiser has none),
+ *       {@code distance_m} / {@code distance_lower_m} /
  *       {@code distance_upper_m} (metres, {@code null} when unavailable),
- *       {@code rssi_dbm}, {@code proximity}, {@code trend}, {@code freshness},
- *       {@code confidence_percent}, {@code last_seen_ago_ms}; plus the top-level
- *       {@code scanning}, {@code native_available}, {@code timestamp_ms}.</li>
+ *       {@code rssi_dbm} ({@code null} when unavailable), {@code proximity}
+ *       ({@code IMMEDIATE|NEAR|MID|FAR|UNKNOWN}), {@code trend}
+ *       ({@code STRONGER|WEAKER|STABLE|UNKNOWN}), {@code freshness}
+ *       ({@code LIVE|RECENT|STALE|UNKNOWN}), {@code confidence_percent},
+ *       {@code last_seen_ago_ms}; plus the top-level {@code scanning},
+ *       {@code native_available}, {@code timestamp_ms}.</li>
  *   <li>{@code /api/status} — {@code scanning}, {@code device_count},
  *       {@code native_available}, {@code uptime_ms}.</li>
  *   <li>{@code /api/updates} — {@code last_check_ms}, {@code next_check_ms},
  *       {@code retry_count}.</li>
- *   <li>{@code /} — an HTML index of the endpoints ({@code text/html}).</li>
+ *   <li>{@code /} — the web dashboard ({@code text/html}): the packaged
+ *       {@code assets/dashboard.html}, a self-contained page that polls the
+ *       three JSON endpoints and renders the radar and device table. Java
+ *       serves its bytes unchanged; the page is what
+ *       {@code cargo xtask verify-dashboard-live} renders in headless
+ *       Chromium against a mock of the contract above.</li>
  * </ul>
  * Unknown paths answer {@code 404}; known paths with any method but
- * {@code GET} answer {@code 405}; a malformed request line answers {@code 400}.
+ * {@code GET} answer {@code 405}; a malformed request line answers {@code 400};
+ * {@code /} answers {@code 500} if the packaged page could not be read.
  *
  * <p>Binding to {@code 127.0.0.1} is the whole access-control model: nothing
  * off-device can reach the port, and remote use goes through an SSH tunnel.
@@ -54,33 +67,27 @@ public final class ApiHttpServer {
 
     private static final String TAG = "ApiHttpServer";
     static final int PORT = 8080;
+    /** The dashboard page, packaged by {@code cargo xtask build-apk} from {@code src/main/assets/}. */
+    static final String DASHBOARD_ASSET = "dashboard.html";
     private static final int BACKLOG = 8;
     private static final int HANDLER_THREADS = 2;
     /** Frees a handler thread from a client that connects but never sends its request. */
     private static final int REQUEST_TIMEOUT_MS = 5_000;
     private static final String JSON = "application/json";
     private static final String HTML = "text/html; charset=utf-8";
-    private static final String INDEX_HTML = "<!DOCTYPE html>\n"
-            + "<html>\n"
-            + "<head><title>HSE BLE Radar API</title></head>\n"
-            + "<body>\n"
-            + "<h1>HSE BLE Radar REST API</h1>\n"
-            + "<ul>\n"
-            + "<li><a href=\"/api/devices\">/api/devices</a> - Live device snapshot</li>\n"
-            + "<li><a href=\"/api/status\">/api/status</a> - Service status</li>\n"
-            + "<li><a href=\"/api/updates\">/api/updates</a> - Update check status</li>\n"
-            + "</ul>\n"
-            + "</body>\n"
-            + "</html>\n";
 
     private final BleScanEngine engine;
     private final UpdateManager updateManager;
+    private final AssetManager assets;
+    /** The dashboard bytes, read once per {@link #start()}; {@code null} when the asset is unreadable. */
+    private volatile byte[] dashboard;
     private ServerSocket listener;
     private ExecutorService handlers;
 
-    public ApiHttpServer(BleScanEngine engine, UpdateManager updateManager) {
+    public ApiHttpServer(BleScanEngine engine, UpdateManager updateManager, AssetManager assets) {
         this.engine = engine;
         this.updateManager = updateManager;
+        this.assets = assets;
     }
 
     /**
@@ -92,6 +99,7 @@ public final class ApiHttpServer {
         if (listener != null) {
             return;
         }
+        dashboard = loadDashboard();
         ServerSocket socket;
         try {
             socket = new ServerSocket();
@@ -124,6 +132,16 @@ public final class ApiHttpServer {
         handlers.shutdownNow();
         handlers = null;
         Log.d(TAG, "HTTP server stopped");
+    }
+
+    /** Reads the packaged page; a missing or unreadable asset is logged and makes {@code /} answer 500. */
+    private byte[] loadDashboard() {
+        try (InputStream in = assets.open(DASHBOARD_ASSET)) {
+            return Streams.readAllBytes(in);
+        } catch (IOException error) {
+            Log.e(TAG, "Dashboard asset " + DASHBOARD_ASSET + " unreadable; / will answer 500", error);
+            return null;
+        }
     }
 
     private void acceptLoop(ServerSocket socket, ExecutorService pool) {
@@ -197,7 +215,13 @@ public final class ApiHttpServer {
                 writeResponse(out, 200, "OK", JSON, updatesJson());
                 break;
             default:
-                writeResponse(out, 200, "OK", HTML, INDEX_HTML);
+                byte[] page = dashboard;
+                if (page == null) {
+                    writeResponse(out, 500, "Internal Server Error", JSON,
+                            errorJson("Dashboard asset " + DASHBOARD_ASSET + " unreadable"));
+                } else {
+                    writeResponse(out, 200, "OK", HTML, page);
+                }
                 break;
         }
     }
@@ -272,7 +296,11 @@ public final class ApiHttpServer {
 
     private static void writeResponse(OutputStream out, int status, String reason, String contentType, String body)
             throws IOException {
-        byte[] payload = body.getBytes(StandardCharsets.UTF_8);
+        writeResponse(out, status, reason, contentType, body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void writeResponse(OutputStream out, int status, String reason, String contentType, byte[] payload)
+            throws IOException {
         String head = "HTTP/1.1 " + status + ' ' + reason + "\r\n"
                 + "Content-Type: " + contentType + "\r\n"
                 + "Content-Length: " + payload.length + "\r\n"

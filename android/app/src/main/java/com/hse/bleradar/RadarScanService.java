@@ -69,7 +69,7 @@ public final class RadarScanService extends Service {
         super.onCreate();
         engine = new BleScanEngine(this);
         createNotificationChannel();
-        httpServer = new ApiHttpServer(engine, new UpdateManager(this));
+        httpServer = new ApiHttpServer(engine, new UpdateManager(this), getAssets());
         httpServer.start();
     }
 

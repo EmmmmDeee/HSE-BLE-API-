@@ -165,11 +165,14 @@ public class ApiHttpServerTest {
     }
 
     @Test
-    public void root_path_returns_html_landing_page() {
-        // GET / returns HTML page with links to API endpoints
-        // This allows quick discovery and browser-based testing
-        String contentType = "text/html";
-        assertEquals("Root should serve HTML", "text/html", contentType);
+    public void root_path_returns_the_web_dashboard() {
+        // GET / returns the packaged assets/dashboard.html (text/html; charset=utf-8),
+        // a self-contained page that polls the three JSON endpoints; Java serves its
+        // bytes unchanged (read once per start() through Streams.readAllBytes) and
+        // answers 500 if the asset is unreadable. The page itself is exercised in a
+        // real browser by `cargo xtask verify-dashboard-live`.
+        String contentType = "text/html; charset=utf-8";
+        assertTrue("Root should serve HTML", contentType.startsWith("text/html"));
     }
 
     @Test

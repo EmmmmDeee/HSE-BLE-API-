@@ -93,3 +93,18 @@ jobs:
           cargo xtask prepare-bionic-sysroot "$HOME/.cache/bionic-android-24-arm64"
       - name: Run the bleradar-jni test suite on aarch64/Bionic under qemu
         run: BIONIC_SYSROOT="$HOME/.cache/bionic-android-24-arm64" cargo xtask verify-jni-target
+
+  web-dashboard:
+    # The page ApiHttpServer serves at / must render live data in a real
+    # browser engine: xtask serves the committed assets/dashboard.html next
+    # to a mock of the documented JSON contract, headless Chromium (the
+    # runner image ships Google Chrome) loads it, and the rendered DOM is
+    # checked for every device, the poll counter, and the error banner when
+    # the API answers 500 or the wrong shape (docs/AUTONOMOUS_DECISIONS.md #89).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Render the dashboard in headless Chromium against a mock of the JSON contract
+        run: cargo xtask verify-dashboard-live

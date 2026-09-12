@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>HSE BLE Radar</title>
+<!--
+  The web dashboard ApiHttpServer serves at http://127.0.0.1:8080/ for a
+  browser or Termux on the same device. Self-contained on purpose: the page
+  must render with no connectivity at all (the device may be offline and
+  the API is loopback-only), so there are no external scripts, styles or
+  fonts. It only consumes the JSON contract documented on ApiHttpServer
+  (/api/devices, /api/status, /api/updates) and never trusts a field: every
+  value is type-checked and rendered through textContent, and any failed
+  fetch, non-2xx status, unparseable JSON or response of the wrong shape
+  from any of the three endpoints raises the error banner while polling
+  continues. `cargo xtask verify-dashboard-live` renders this exact file in
+  headless Chromium against a mock of that contract and checks the DOM it
+  produces, including the <body data-state> / data-polls markers below.
+-->
+<style>
+:root {
+  --bg: #0F1419;
+  --panel: #162026;
+  --ring: #39D98A;
+  --alert: #FF7A45;
+  --info: #4CC2FF;
+  --text: #E7F3ED;
+  --muted: #7E9C90;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  padding: 12px 16px; border-bottom: 1px solid var(--panel);
+}
+h1 { font-size: 18px; margin: 0 auto 0 0; letter-spacing: .04em; }
+.pill {
+  padding: 3px 10px; border-radius: 999px; background: var(--panel);
+  color: var(--muted); font-size: 12px; border: 1px solid transparent; white-space: nowrap;
+}
+.pill[data-on="true"] { color: var(--ring); border-color: var(--ring); }
+.pill[data-on="false"] { color: var(--alert); }
+#error {
+  display: none; margin: 12px 16px 0; padding: 10px 12px; border-radius: 6px;
+  border: 1px solid var(--alert); color: var(--alert);
+}
+body[data-state="error"] #error { display: block; }
+body[data-state="error"] table { opacity: .5; }
+main { display: grid; grid-template-columns: minmax(240px, 400px) 1fr; gap: 16px; padding: 16px; }
+@media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+canvas { display: block; width: 100%; aspect-ratio: 1 / 1; background: var(--panel); border-radius: 50%; }
+dl.summary { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 12px 0 0; font-size: 13px; }
+dt { color: var(--muted); }
+dd { margin: 0; font-variant-numeric: tabular-nums; }
+.wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--panel); white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+td.num { text-align: right; }
+td.addr { font-family: ui-monospace, Menlo, Consolas, monospace; }
+tr[data-freshness="STALE"] td { color: var(--muted); }
+.prox-IMMEDIATE, .prox-NEAR { color: var(--alert); font-weight: 600; }
+.prox-MID { color: var(--info); }
+.prox-FAR, .prox-UNKNOWN { color: var(--muted); }
+small { color: var(--muted); font-size: 11px; }
+#empty { color: var(--muted); padding: 12px 8px; }
+footer { padding: 12px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--panel); }
+footer a { color: var(--info); }
+</style>
+</head>
+<body data-state="loading" data-polls="0">
+<header>
+  <h1>HSE BLE Radar</h1>
+  <span id="scan" class="pill">connecting…</span>
+  <span id="native" class="pill">native core: unknown</span>
+  <span id="count" class="pill">0 devices</span>
+</header>
+<div id="error" role="alert"></div>
+<main>
+  <section>
+    <canvas id="radar" width="400" height="400" aria-label="Radar view of nearby devices"></canvas>
+    <dl class="summary">
+      <dt>Uptime</dt><dd id="uptime">—</dd>
+      <dt>Snapshot</dt><dd id="timestamp">—</dd>
+      <dt>Update check</dt><dd id="updates">—</dd>
+    </dl>
+  </section>
+  <section class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>Address</th><th>Name</th><th>Distance</th><th>RSSI</th>
+          <th>Proximity</th><th>Trend</th><th>Freshness</th><th>Confidence</th><th>Seen</th>
+        </tr>
+      </thead>
+      <tbody id="devices"></tbody>
+    </table>
+    <div id="empty" hidden>No devices in range.</div>
+  </section>
+</main>
+<footer>
+  JSON: <a href="/api/devices">/api/devices</a> ·
+  <a href="/api/status">/api/status</a> ·
+  <a href="/api/updates">/api/updates</a>
+  — served on 127.0.0.1:8080 only; reach it remotely through an SSH tunnel.
+</footer>
+<script>
+(function () {
+  'use strict';
+
+  var POLL_MS = 1000;
+  var UPDATES_EVERY_POLLS = 15;
+  var RADAR_MIN_M = 0.1;
+  var RADAR_MAX_M = 50;
+  var RING_METRES = [0.5, 1, 2, 5, 10, 20];
+  var SWEEP_PERIOD_MS = 4000;
+  var TREND_GLYPH = { STRONGER: '▲', WEAKER: '▼', STABLE: '■' };
+  var COLOUR = {
+    ring: '#39D98A', alert: '#FF7A45', info: '#4CC2FF', text: '#E7F3ED', muted: '#7E9C90', panel: '#162026'
+  };
+
+  var body = document.body;
+  var el = {
+    scan: document.getElementById('scan'),
+    nativeCore: document.getElementById('native'),
+    count: document.getElementById('count'),
+    error: document.getElementById('error'),
+    devices: document.getElementById('devices'),
+    empty: document.getElementById('empty'),
+    uptime: document.getElementById('uptime'),
+    timestamp: document.getElementById('timestamp'),
+    updates: document.getElementById('updates'),
+    radar: document.getElementById('radar')
+  };
+
+  var polls = 0;
+  var updatesLoaded = false;
+  var latestDevices = [];
+  var sweepStartedAt = null;
+
+  function isNumber(value) {
+    return typeof value === 'number' && isFinite(value);
+  }
+
+  function text(value, fallback) {
+    return typeof value === 'string' ? value : fallback;
+  }
+
+  function fmtMetres(value) {
+    return isNumber(value) ? value.toFixed(1) + ' m' : '—';
+  }
+
+  function fmtBounds(lower, upper) {
+    if (!isNumber(lower) || !isNumber(upper)) {
+      return '';
+    }
+    return lower.toFixed(1) + '–' + upper.toFixed(1) + ' m';
+  }
+
+  function fmtRssi(value) {
+    return isNumber(value) ? Math.round(value) + ' dBm' : '—';
+  }
+
+  function fmtPercent(value) {
+    return isNumber(value) ? Math.round(value) + '%' : '—';
+  }
+
+  function fmtAgo(ms) {
+    if (!isNumber(ms) || ms < 0) {
+      return '—';
+    }
+    if (ms < 10000) {
+      return (ms / 1000).toFixed(1) + ' s';
+    }
+    if (ms < 60000) {
+      return Math.round(ms / 1000) + ' s';
+    }
+    var totalSeconds = Math.round(ms / 1000);
+    var minutes = Math.floor(totalSeconds / 60);
+    var seconds = totalSeconds % 60;
+    return minutes + 'm ' + seconds + 's';
+  }
+
+  function fmtDuration(ms) {
+    if (!isNumber(ms) || ms < 0) {
+      return '—';
+    }
+    var total = Math.floor(ms / 1000);
+    var h = Math.floor(total / 3600);
+    var m = Math.floor((total % 3600) / 60);
+    var s = total % 60;
+    return h + ':' + (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function fmtClock(epochMs) {
+    if (!isNumber(epochMs) || epochMs <= 0) {
+      return 'never';
+    }
+    return new Date(epochMs).toLocaleTimeString();
+  }
+
+  function cell(row, content, className) {
+    var td = document.createElement('td');
+    if (className) {
+      td.className = className;
+    }
+    if (typeof content === 'string') {
+      td.textContent = content;
+    } else {
+      td.appendChild(content);
+    }
+    row.appendChild(td);
+    return td;
+  }
+
+  function distanceCell(device) {
+    var span = document.createElement('span');
+    span.textContent = fmtMetres(device.distance_m);
+    var bounds = fmtBounds(device.distance_lower_m, device.distance_upper_m);
+    if (bounds) {
+      var small = document.createElement('small');
+      small.textContent = ' ' + bounds;
+      span.appendChild(small);
+    }
+    return span;
+  }
+
+  function renderDevices(devices) {
+    var rows = document.createDocumentFragment();
+    for (var i = 0; i < devices.length; i++) {
+      var device = devices[i];
+      var proximity = text(device.proximity, 'UNKNOWN');
+      var trend = text(device.trend, 'UNKNOWN');
+      var freshness = text(device.freshness, 'UNKNOWN');
+      var tr = document.createElement('tr');
+      tr.setAttribute('data-address', text(device.address, ''));
+      tr.setAttribute('data-freshness', freshness);
+      tr.setAttribute('data-proximity', proximity);
+      cell(tr, String(i + 1), 'num');
+      cell(tr, text(device.address, '—'), 'addr');
+      cell(tr, text(device.name, '') || 'Unnamed device');
+      cell(tr, distanceCell(device));
+      cell(tr, fmtRssi(device.rssi_dbm), 'num');
+      cell(tr, proximity, 'prox-' + proximity);
+      cell(tr, (TREND_GLYPH[trend] || '—') + ' ' + trend);
+      cell(tr, freshness);
+      cell(tr, fmtPercent(device.confidence_percent), 'num');
+      cell(tr, fmtAgo(device.last_seen_ago_ms) + ' ago', 'num');
+      rows.appendChild(tr);
+    }
+    el.devices.textContent = '';
+    el.devices.appendChild(rows);
+    el.empty.hidden = devices.length > 0;
+  }
+
+  function renderStatus(snapshot, status) {
+    var scanning = snapshot.scanning === true;
+    el.scan.textContent = scanning ? 'Scanning' : 'Idle';
+    el.scan.setAttribute('data-on', String(scanning));
+    var nativeAvailable = snapshot.native_available === true;
+    el.nativeCore.textContent = 'native core: ' + (nativeAvailable ? 'loaded' : 'unavailable');
+    el.nativeCore.setAttribute('data-on', String(nativeAvailable));
+    var count = isNumber(status.device_count) ? status.device_count : snapshot.devices.length;
+    el.count.textContent = count + (count === 1 ? ' device' : ' devices');
+    el.uptime.textContent = fmtDuration(status.uptime_ms);
+    el.timestamp.textContent = fmtClock(snapshot.timestamp_ms);
+  }
+
+  function renderUpdates(updates) {
+    el.updates.textContent = 'last ' + fmtClock(updates.last_check_ms)
+      + ', next ' + fmtClock(updates.next_check_ms)
+      + ', retries ' + (isNumber(updates.retry_count) ? updates.retry_count : '—');
+  }
+
+  function showError(message) {
+    body.setAttribute('data-state', 'error');
+    el.error.textContent = message;
+  }
+
+  function getJson(path) {
+    return fetch(path, { cache: 'no-store' }).then(function (response) {
+      if (!response.ok) {
+        throw new Error('HTTP ' + response.status + ' from ' + path);
+      }
+      return response.json().then(null, function () {
+        throw new Error('invalid JSON from ' + path);
+      });
+    });
+  }
+
+  function validateSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.devices)) {
+      throw new Error('/api/devices did not return a devices array');
+    }
+    for (var i = 0; i < snapshot.devices.length; i++) {
+      var device = snapshot.devices[i];
+      if (!device || typeof device !== 'object' || typeof device.address !== 'string') {
+        throw new Error('/api/devices entry ' + i + ' has no address');
+      }
+    }
+    return snapshot;
+  }
+
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function validateStatus(status) {
+    if (!isPlainObject(status) || typeof status.scanning !== 'boolean'
+        || !isNumber(status.device_count) || typeof status.native_available !== 'boolean'
+        || !isNumber(status.uptime_ms)) {
+      throw new Error('/api/status did not return the documented status object');
+    }
+    return status;
+  }
+
+  function validateUpdates(updates) {
+    if (!isPlainObject(updates) || !isNumber(updates.last_check_ms)
+        || !isNumber(updates.next_check_ms) || !isNumber(updates.retry_count)) {
+      throw new Error('/api/updates did not return the documented updates object');
+    }
+    return updates;
+  }
+
+  function poll() {
+    // One catch for everything a cycle can raise: a failed fetch, a non-2xx
+    // status, unparseable JSON, and a response of the wrong shape thrown by
+    // the validators inside the success handler (a rejection handler on the
+    // same `then` would not see those). The updates line is fetched until
+    // it has loaded once and then on every 15th poll; its failure is
+    // returned into the same chain, so it raises the banner too while the
+    // device table already rendered for this cycle stays on screen.
+    Promise.all([getJson('/api/devices'), getJson('/api/status')]).then(function (results) {
+      var snapshot = validateSnapshot(results[0]);
+      var status = validateStatus(results[1]);
+      latestDevices = snapshot.devices;
+      renderDevices(snapshot.devices);
+      renderStatus(snapshot, status);
+      polls += 1;
+      body.setAttribute('data-polls', String(polls));
+      body.setAttribute('data-state', 'live');
+      el.error.textContent = '';
+      if (!updatesLoaded || polls % UPDATES_EVERY_POLLS === 0) {
+        return getJson('/api/updates').then(function (updates) {
+          renderUpdates(validateUpdates(updates));
+          updatesLoaded = true;
+        });
+      }
+      return undefined;
+    }).catch(function (error) {
+      showError('API unreachable: ' + String(error && error.message ? error.message : error));
+    }).then(function () {
+      setTimeout(poll, POLL_MS);
+    });
+  }
+
+  function addressAngle(address) {
+    var hash = 2166136261;
+    for (var i = 0; i < address.length; i++) {
+      hash ^= address.charCodeAt(i);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return (hash / 4294967296) * Math.PI * 2;
+  }
+
+  function radiusFraction(metres) {
+    var span = Math.log(RADAR_MAX_M / RADAR_MIN_M);
+    var clamped = Math.min(RADAR_MAX_M, Math.max(RADAR_MIN_M, metres));
+    return 0.06 + 0.9 * (Math.log(clamped / RADAR_MIN_M) / span);
+  }
+
+  function blipColour(proximity) {
+    if (proximity === 'IMMEDIATE' || proximity === 'NEAR') {
+      return COLOUR.alert;
+    }
+    if (proximity === 'MID') {
+      return COLOUR.info;
+    }
+    return COLOUR.muted;
+  }
+
+  function drawRadar(now) {
+    var canvas = el.radar;
+    var context = canvas.getContext && canvas.getContext('2d');
+    if (!context) {
+      return;
+    }
+    var size = Math.max(1, Math.floor(canvas.clientWidth || 400));
+    // Backing-store size is an integer: compare against the rounded value,
+    // or a fractional devicePixelRatio would reset the canvas every frame.
+    var pixels = Math.max(1, Math.round(size * (window.devicePixelRatio || 1)));
+    if (canvas.width !== pixels || canvas.height !== pixels) {
+      canvas.width = pixels;
+      canvas.height = pixels;
+    }
+    var ratio = pixels / size;
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, size, size);
+    var centre = size / 2;
+    var outer = size / 2 - 4;
+
+    context.strokeStyle = COLOUR.ring;
+    context.fillStyle = COLOUR.muted;
+    context.font = '10px system-ui, sans-serif';
+    context.lineWidth = 1;
+    context.globalAlpha = 0.55;
+    for (var r = 0; r < RING_METRES.length; r++) {
+      var ringRadius = outer * radiusFraction(RING_METRES[r]);
+      context.beginPath();
+      context.arc(centre, centre, ringRadius, 0, Math.PI * 2);
+      context.stroke();
+      context.fillText(RING_METRES[r] + ' m', centre + 3, centre - ringRadius - 2);
+    }
+    context.beginPath();
+    context.moveTo(centre - outer, centre);
+    context.lineTo(centre + outer, centre);
+    context.moveTo(centre, centre - outer);
+    context.lineTo(centre, centre + outer);
+    context.stroke();
+    context.globalAlpha = 1;
+
+    if (sweepStartedAt === null) {
+      sweepStartedAt = now;
+    }
+    var sweep = ((now - sweepStartedAt) % SWEEP_PERIOD_MS) / SWEEP_PERIOD_MS * Math.PI * 2;
+    var gradient = context.createConicGradient
+      ? context.createConicGradient(sweep - Math.PI / 2, centre, centre)
+      : null;
+    if (gradient) {
+      gradient.addColorStop(0, 'rgba(57, 217, 138, 0.35)');
+      gradient.addColorStop(0.15, 'rgba(57, 217, 138, 0)');
+      gradient.addColorStop(1, 'rgba(57, 217, 138, 0)');
+      context.fillStyle = gradient;
+      context.beginPath();
+      context.arc(centre, centre, outer, 0, Math.PI * 2);
+      context.fill();
+    }
+    context.strokeStyle = COLOUR.ring;
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(centre, centre);
+    context.lineTo(centre + outer * Math.cos(sweep - Math.PI / 2), centre + outer * Math.sin(sweep - Math.PI / 2));
+    context.stroke();
+
+    for (var i = 0; i < latestDevices.length; i++) {
+      var device = latestDevices[i];
+      var known = isNumber(device.distance_m);
+      var fraction = known ? radiusFraction(device.distance_m) : 0.97;
+      var angle = addressAngle(text(device.address, ''));
+      var x = centre + outer * fraction * Math.cos(angle);
+      var y = centre + outer * fraction * Math.sin(angle);
+      var colour = blipColour(device.proximity);
+      context.globalAlpha = device.freshness === 'STALE' ? 0.35 : device.freshness === 'RECENT' ? 0.7 : 1;
+      context.beginPath();
+      context.arc(x, y, known ? 5 : 4, 0, Math.PI * 2);
+      if (known) {
+        context.fillStyle = colour;
+        context.fill();
+      } else {
+        context.strokeStyle = colour;
+        context.lineWidth = 1.5;
+        context.stroke();
+      }
+      context.fillStyle = COLOUR.text;
+      context.font = '11px system-ui, sans-serif';
+      context.fillText(text(device.name, '') || text(device.address, ''), x + 8, y + 4);
+    }
+    context.globalAlpha = 1;
+  }
+
+  function animate(now) {
+    if (!document.hidden) {
+      drawRadar(now);
+    }
+    window.requestAnimationFrame(animate);
+  }
+
+  poll();
+  window.requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

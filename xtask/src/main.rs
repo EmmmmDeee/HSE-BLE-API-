@@ -12,6 +12,7 @@
 //! [`repo_root`] additionally walks upward from the current directory so
 //! invoking it from a subdirectory still works.
 
+mod dashboard;
 mod dex;
 mod elf;
 mod sha256;
@@ -84,6 +85,7 @@ fn main() -> ExitCode {
         "oracle-differential" => cmd_oracle_differential(),
         "verify-jni-target" => cmd_verify_jni_target(),
         "prepare-bionic-sysroot" => cmd_prepare_bionic_sysroot(&rest),
+        "verify-dashboard-live" => cmd_verify_dashboard_live(),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -126,6 +128,7 @@ fn print_usage() {
          \x20 oracle-differential        execute the immutable oracle under qemu-aarch64 and check the committed executed-oracle vectors (see docs/ORACLE_DIFFERENTIAL.md)\n\
          \x20 verify-jni-target          run the bleradar-jni test suite cross-compiled for aarch64-linux-android under qemu-aarch64 against a Bionic runtime\n\
          \x20 prepare-bionic-sysroot <dir>  extract the Bionic runtime (linker64 + libc/libm/libdl/libc++) from the installed android-24 arm64 system image into <dir>, for BIONIC_SYSROOT\n\
+         \x20 verify-dashboard-live      render the web dashboard (assets/dashboard.html) in headless Chromium against a mock of the JSON contract and check the DOM\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/jni-contract/test/doc/checks/audit/deny)"
@@ -753,15 +756,18 @@ const REQUIRED_APK_ENTRIES: &[&str] = &[
     "classes.dex",
     "lib/arm64-v8a/libbleradar_jni.so",
     "resources.arsc",
+    "assets/dashboard.html",
+    "assets/release_manifest.txt",
 ];
 
 /// Critical Java classes the built `classes.dex` must define for the app's
-/// launch, scan, and JNI paths.
+/// launch, scan, JNI, and web-dashboard paths.
 const REQUIRED_DEX_CLASSES: &[&str] = &[
     "com/hse/bleradar/MainActivity",
     "com/hse/bleradar/NativeRadar",
     "com/hse/bleradar/RadarScanService",
     "com/hse/bleradar/BleScanEngine",
+    "com/hse/bleradar/ApiHttpServer",
 ];
 
 /// Symbol prefix every JNI export carries; used to select the JNI-facing
@@ -1949,6 +1955,12 @@ fn cmd_build_apk() -> Result<(), String> {
             .arg(&platform_jar)
             .arg("--manifest")
             .arg(&manifest_path)
+            // `src/main/assets/` (the web dashboard and the bundled release
+            // manifest) is packaged only through this flag; without it every
+            // `getAssets().open(..)` in the app fails on the device
+            // (decision #89), which `REQUIRED_APK_ENTRIES` now catches.
+            .arg("-A")
+            .arg(app_dir.join("assets"))
             .arg("-o")
             .arg(&base_apk)
             .arg("--java")
@@ -2347,6 +2359,9 @@ fn cmd_verify_android_live() -> Result<(), String> {
         .map_err(|e| format!("parsing {}: {e}", dex_path.display()))?;
     require_expected_members(&dex_classes, REQUIRED_DEX_CLASSES, "DEX class set")?;
 
+    println!("== Android lint NewApi (no library call above the manifest's minSdkVersion) ==");
+    verify_android_api_levels(&root, &discover_sdk_root()?)?;
+
     println!("== jni export contract (NativeRadar.java ↔ cross-compiled library) ==");
     let native_lib_path = root
         .join("target/aarch64-linux-android/release")
@@ -2356,6 +2371,74 @@ fn cmd_verify_android_live() -> Result<(), String> {
 
     println!("== verify-android-live complete ==");
     Ok(())
+}
+
+/// Runs the SDK's standalone `lint` with only its `NewApi` check over the app
+/// sources. A call into a `java.*`/`android.*` API newer than the manifest's
+/// `minSdkVersion` compiles against `android.jar` and packages through `d8`
+/// without complaint, but throws `NoSuchMethodError`/`NoClassDefFoundError`
+/// on every older device — `InputStream.readAllBytes()` (API 33, minSdk 26)
+/// reached `main` that way and would have crashed the first launch on
+/// Android 8–12 (decision #89). Lint needs the compiled classes on its
+/// classpath, so this runs after `build-apk`.
+fn verify_android_api_levels(root: &Path, sdk_root: &Path) -> Result<(), String> {
+    let lint = sdk_root.join("cmdline-tools/latest/bin/lint");
+    if !lint.is_file() {
+        return Err(format!(
+            "Android lint not found at {} (install \"cmdline-tools;latest\" with sdkmanager)",
+            lint.display()
+        ));
+    }
+    let app_dir = root.join(ANDROID_APP_DIR);
+    let classes_dir = root.join("target/android-apk/classes");
+    if !classes_dir.is_dir() {
+        return Err(format!(
+            "compiled classes missing at {} (run build-apk first)",
+            classes_dir.display()
+        ));
+    }
+    let mut command = Command::new(&lint);
+    command
+        .args([
+            "--check",
+            "NewApi",
+            "--exitcode",
+            "--text",
+            "stdout",
+            "--nolines",
+        ])
+        .arg("--sdk-home")
+        .arg(sdk_root)
+        .arg("--sources")
+        .arg(app_dir.join("java"))
+        .arg("--resources")
+        .arg(app_dir.join("res"))
+        .arg("--classpath")
+        .arg(&classes_dir)
+        .arg(&app_dir);
+    let program = format!("{command:?}");
+    let output = command
+        .output()
+        .map_err(|e| format!("failed to spawn {program}: {e}"))?;
+    let report = String::from_utf8_lossy(&output.stdout);
+    print!("{report}");
+    if !output.status.success() {
+        return Err(format!(
+            "lint NewApi found library calls above the manifest's minSdkVersion (report above; {})",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Renders the committed web dashboard in headless Chromium against a mock
+/// of `ApiHttpServer`'s JSON contract and checks the DOM; see
+/// `xtask/src/dashboard.rs`. A live command like `verify-android-live`
+/// (needs a Chromium/Chrome binary), so it is not part of `gates`; CI runs it
+/// in the `web-dashboard` job.
+fn cmd_verify_dashboard_live() -> Result<(), String> {
+    let root = repo_root()?;
+    dashboard::run(&root)
 }
 
 /// Executes the immutable v0.3.0 native oracle under `qemu-aarch64` against a
