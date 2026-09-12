@@ -165,18 +165,19 @@ final class BleScanEngine {
     List<Blip> snapshot() {
         pruneStale(SystemClock.uptimeMillis());
         List<Blip> snapshot = new ArrayList<>(blipsByAddress.values());
-        if (!NativeRadar.isAvailable()) {
-            // Without the native core every device is reported LIVE with zero
-            // confidence, so recency is the only signal left to rank on.
-            snapshot.sort((left, right) -> Long.compare(right.lastSeenUptimeMillis, left.lastSeenUptimeMillis));
-            return snapshot;
-        }
         // Keys are sampled once so the sort sees an immutable ordering while the
-        // scan callback keeps mutating the volatile Blip fields concurrently.
+        // scan callback keeps mutating the volatile Blip fields concurrently
+        // (a comparator reading them live can violate TimSort's contract and
+        // throw). This holds for the no-native fallback too, which ranks on
+        // recency alone because without the core every device is reported
+        // LIVE with zero confidence.
+        boolean nativeAvailable = NativeRadar.isAvailable();
         Map<Blip, Long> rankKeys = new IdentityHashMap<>();
         for (Blip blip : snapshot) {
-            rankKeys.put(blip, NativeRadar.deviceRankKey(
-                    blip.freshness, blip.lastSeenUptimeMillis, blip.confidencePercent, blip.lastRssiDbm));
+            long lastSeen = blip.lastSeenUptimeMillis;
+            rankKeys.put(blip, nativeAvailable
+                    ? NativeRadar.deviceRankKey(blip.freshness, lastSeen, blip.confidencePercent, blip.lastRssiDbm)
+                    : -lastSeen);
         }
         snapshot.sort(Comparator.comparingLong(rankKeys::get));
         return snapshot;

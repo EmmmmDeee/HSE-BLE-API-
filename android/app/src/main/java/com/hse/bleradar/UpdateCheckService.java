@@ -105,10 +105,10 @@ public final class UpdateCheckService extends Service {
                     ReleaseManifest manifest = restoreDownloadManifest();
                     if (manifest != null) {
                         try {
-                            // No start owns this restore and no promotion happened, so the
-                            // receiver stops the service unconditionally (startId -1) and
-                            // never leaves a foreground it did not enter.
-                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, -1, false);
+                            // The start that follows this restore promotes the service
+                            // (every start does); the receiver leaves that foreground and
+                            // stops the service unconditionally when the download ends.
+                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest);
                             IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
@@ -117,8 +117,11 @@ public final class UpdateCheckService extends Service {
                             }
                             Log.d(TAG, "Re-registered broadcast receiver for pending download with restored manifest");
                         } catch (Exception e) {
-                            Log.w(TAG, "Failed to re-register download receiver", e);
-                            clearDownloadId();
+                            Log.w(TAG, "Failed to re-register download receiver; cancelling the orphaned download", e);
+                            // Nothing can verify or install this job any more: cancel it
+                            // so no orphan lingers and no duplicate is enqueued beside it,
+                            // and reset the in-flight guard so later checks proceed.
+                            abandonActiveDownload();
                         }
                     } else {
                         Log.w(TAG, "Could not restore manifest for pending download; clearing");
@@ -156,6 +159,29 @@ public final class UpdateCheckService extends Service {
     }
 
     /**
+     * Forgets the active download after it completed: clears the persisted
+     * state and resets the in-flight guard, leaving the downloaded file to
+     * the installer.
+     */
+    private void releaseActiveDownload() {
+        clearDownloadId();
+        activeDownloadId = -1;
+    }
+
+    /**
+     * Gives up on the active download: cancels the DownloadManager job (which
+     * also deletes its file) so it is neither orphaned without a receiver nor
+     * duplicated by a later check, then forgets it like
+     * {@link #releaseActiveDownload()}.
+     */
+    private void abandonActiveDownload() {
+        if (activeDownloadId != -1 && downloadManager != null) {
+            downloadManager.remove(activeDownloadId);
+        }
+        releaseActiveDownload();
+    }
+
+    /**
      * Restores the manifest for a pending download from SharedPreferences.
      */
     private ReleaseManifest restoreDownloadManifest() {
@@ -176,8 +202,8 @@ public final class UpdateCheckService extends Service {
     /**
      * Triggered by an explicit action or alarm to perform an update check.
      * Handles both normal periodic checks and retry invocations via AlarmManager.
-     * When started via startForegroundService() from a retry, promotes to foreground
-     * to satisfy the Android 8+ contract and bypass the daily check throttle.
+     * Every start promotes the service to the foreground first (all callers use
+     * startForegroundService()); a retry additionally bypasses the daily throttle.
      */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -186,27 +212,28 @@ public final class UpdateCheckService extends Service {
         }
 
         boolean isRetry = intent != null && intent.getBooleanExtra("is_retry", false);
-        if (isRetry) {
-            promoteToForeground();
-        }
+        // Every start of this service arrives through startForegroundService()
+        // (MainActivity, BootCompletedReceiver, UpdateRetryReceiver; minSdk is
+        // 26), and a service started that way must call startForeground()
+        // within seconds or the platform kills the process
+        // (ForegroundServiceDidNotStartInTimeException). Promoting only for
+        // retries left the restored-download and download-in-flight paths
+        // running un-promoted (COR-030): promote first, unconditionally, and
+        // leave the foreground through finish() on every exit.
+        promoteToForeground();
 
         if (activeDownloadId != -1) {
             // A download restored in onCreate() is still in flight; its receiver
-            // verifies, installs, and stops the service when it completes.
+            // verifies, installs, and finishes the service when it completes,
+            // so the foreground entered above is kept until then.
             Log.d(TAG, "Download " + activeDownloadId + " still pending; not starting another check");
-            if (isRetry) {
-                stopForeground(Service.STOP_FOREGROUND_REMOVE);
-            }
             return START_NOT_STICKY;
         }
 
         // Check if enough time has passed since the last check (skip for retries)
         if (!isRetry && !updateManager.shouldCheckForUpdate(CHECK_INTERVAL_SECONDS)) {
             Log.d(TAG, "Not yet time for an update check; skipping");
-            if (isRetry) {
-                stopForeground(Service.STOP_FOREGROUND_REMOVE);
-            }
-            stopSelf(startId);
+            finish(startId);
             return START_NOT_STICKY;
         }
 
@@ -217,10 +244,7 @@ public final class UpdateCheckService extends Service {
         ReleaseManifest manifest = loadReleaseManifest();
         if (manifest == null) {
             Log.w(TAG, "Could not load release manifest; skipping update check");
-            if (isRetry) {
-                stopForeground(Service.STOP_FOREGROUND_REMOVE);
-            }
-            stopSelf(startId);
+            finish(startId);
             return START_NOT_STICKY;
         }
 
@@ -231,10 +255,7 @@ public final class UpdateCheckService extends Service {
         if (decision != NativeRadar.UPDATE_AVAILABLE) {
             Log.d(TAG, "No safe update available (decision=" + decision + ")");
             clearRetryCount();
-            if (isRetry) {
-                stopForeground(Service.STOP_FOREGROUND_REMOVE);
-            }
-            stopSelf(startId);
+            finish(startId);
             return START_NOT_STICKY;
         }
 
@@ -253,17 +274,14 @@ public final class UpdateCheckService extends Service {
         if (readiness != NativeRadar.DOWNLOAD_READY) {
             Log.d(TAG, "Download not ready (readiness=" + readiness + "); will retry later");
             scheduleRetry();
-            if (isRetry) {
-                stopForeground(Service.STOP_FOREGROUND_REMOVE);
-            }
-            stopSelf(startId);
+            finish(startId);
             return START_NOT_STICKY;
         }
 
         // Download is ready; do NOT clear retry count yet (only clear on successful verification)
         // Download and verify the APK
         Log.d(TAG, "Downloading update from: " + manifest.getUrl());
-        downloadAndInstallUpdate(manifest, startId, isRetry);
+        downloadAndInstallUpdate(manifest, startId);
         return START_NOT_STICKY;
     }
 
@@ -301,13 +319,10 @@ public final class UpdateCheckService extends Service {
      * Initiates a download of the update APK via DownloadManager, then verifies
      * and installs it when complete.
      */
-    private void downloadAndInstallUpdate(ReleaseManifest manifest, int startId, boolean isRetry) {
+    private void downloadAndInstallUpdate(ReleaseManifest manifest, int startId) {
         if (downloadManager == null) {
             Log.w(TAG, "DownloadManager unavailable");
-            if (isRetry) {
-                stopForeground(Service.STOP_FOREGROUND_REMOVE);
-            }
-            stopSelf(startId);
+            finish(startId);
             return;
         }
 
@@ -323,7 +338,7 @@ public final class UpdateCheckService extends Service {
             Log.d(TAG, "Enqueued download with ID " + activeDownloadId);
 
             // Register broadcast receiver for download completion
-            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, startId, isRetry);
+            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest);
             IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
@@ -332,10 +347,12 @@ public final class UpdateCheckService extends Service {
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to start download", e);
-            if (isRetry) {
-                stopForeground(Service.STOP_FOREGROUND_REMOVE);
-            }
-            stopSelf(startId);
+            // enqueue() and saveDownloadState() may have succeeded before
+            // registerReceiver() threw: cancel the receiverless job so it is
+            // neither orphaned nor guarding out every later check, and retry.
+            abandonActiveDownload();
+            scheduleRetry();
+            finish(startId);
         }
     }
 
@@ -364,35 +381,47 @@ public final class UpdateCheckService extends Service {
      * build deliberately does not ship; the DownloadManager URI needs neither
      * and the installer reads it through the granted permission.
      */
-    private void installApk(long downloadId) {
+    private boolean installApk(long downloadId) {
         try {
             Uri apkUri = downloadManager.getUriForDownloadedFile(downloadId);
             if (apkUri == null) {
                 Log.e(TAG, "DownloadManager has no URI for download " + downloadId);
-                return;
+                return false;
             }
             Intent install = new Intent(Intent.ACTION_VIEW);
             install.setDataAndType(apkUri, "application/vnd.android.package-archive");
             install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(install);
             Log.d(TAG, "Handed APK to system installer");
+            return true;
         } catch (Exception e) {
             Log.e(TAG, "Failed to install APK", e);
+            return false;
         }
     }
 
     /**
-     * Broadcast receiver that handles download completion.
+     * Leaves the foreground entered by {@link #onStartCommand} and stops the
+     * service. A start's own exit paths pass their {@code startId}; the
+     * download-completion receiver passes {@code -1}, which
+     * {@link #stopSelf(int)} treats as unconditional: the single active
+     * download was the service's last work, and any newer start that met the
+     * in-flight guard did nothing that a start-id check should protect.
+     */
+    private void finish(int startId) {
+        stopForeground(Service.STOP_FOREGROUND_REMOVE);
+        stopSelf(startId);
+    }
+
+    /**
+     * Broadcast receiver that handles the completion of the single active
+     * download and always ends the service afterwards.
      */
     private class DownloadCompletionReceiver extends BroadcastReceiver {
         private final ReleaseManifest manifest;
-        private final int startId;
-        private final boolean isRetry;
 
-        DownloadCompletionReceiver(ReleaseManifest manifest, int startId, boolean isRetry) {
+        DownloadCompletionReceiver(ReleaseManifest manifest) {
             this.manifest = manifest;
-            this.startId = startId;
-            this.isRetry = isRetry;
         }
 
         @Override
@@ -407,13 +436,15 @@ public final class UpdateCheckService extends Service {
                         .setFilterById(downloadId);
                 android.database.Cursor cursor = downloadManager.query(query);
                 if (!cursor.moveToFirst()) {
-                    Log.e(TAG, "Download not found");
+                    // The row vanished (cleared by the user or the system); the
+                    // check time was already recorded, so without a retry the
+                    // update would wait a whole interval.
+                    Log.e(TAG, "Download " + downloadId + " vanished from DownloadManager; retrying later");
                     cursor.close();
+                    abandonActiveDownload();
+                    scheduleRetry();
                     unregisterReceiver(this);
-                    if (isRetry) {
-                        stopForeground(Service.STOP_FOREGROUND_REMOVE);
-                    }
-                    stopSelf(startId);
+                    finish(-1);
                     return;
                 }
 
@@ -422,12 +453,10 @@ public final class UpdateCheckService extends Service {
                     int reason = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_REASON));
                     Log.w(TAG, "Download failed with reason " + reason);
                     cursor.close();
+                    abandonActiveDownload();
                     scheduleRetry();
                     unregisterReceiver(this);
-                    if (isRetry) {
-                        stopForeground(Service.STOP_FOREGROUND_REMOVE);
-                    }
-                    stopSelf(startId);
+                    finish(-1);
                     return;
                 }
 
@@ -441,39 +470,39 @@ public final class UpdateCheckService extends Service {
                 // Exact size and SHA-256 are checked by the Rust core's
                 // ArtifactVerifier: the only path by which an artifact
                 // becomes installable.
-                boolean verificationFailed = false;
+                boolean retryNeeded;
                 int verdict = NativeRadar.artifactVerifyFile(apkFile.getAbsolutePath(), manifest.serialize());
                 if (verdict == NativeRadar.ARTIFACT_VERIFIED) {
                     Log.d(TAG, "Artifact verification passed");
-                    clearRetryCount();
-                    installApk(downloadId);
+                    // A verified artifact that could not be handed to the
+                    // installer (no DownloadManager URI, no installer activity)
+                    // is retried like a failed download, never silently dropped.
+                    retryNeeded = !installApk(downloadId);
+                    if (!retryNeeded) {
+                        clearRetryCount();
+                    }
                 } else {
                     Log.e(TAG, "Artifact verification failed: " + artifactVerdictLabel(verdict));
-                    verificationFailed = true;
+                    retryNeeded = true;
                 }
 
-                if (verificationFailed) {
+                if (retryNeeded) {
                     scheduleRetry();
                 }
 
-                clearDownloadId();
+                // The file stays for the installer; only the bookkeeping ends.
+                releaseActiveDownload();
                 unregisterReceiver(this);
-                if (isRetry) {
-                    stopForeground(Service.STOP_FOREGROUND_REMOVE);
-                }
-                stopSelf(startId);
+                finish(-1);
             } catch (Exception e) {
                 Log.e(TAG, "Error handling download completion", e);
-                clearDownloadId();
+                releaseActiveDownload();
                 try {
                     unregisterReceiver(this);
                 } catch (IllegalArgumentException ignored) {
                     // Already unregistered
                 }
-                if (isRetry) {
-                    stopForeground(Service.STOP_FOREGROUND_REMOVE);
-                }
-                stopSelf(startId);
+                finish(-1);
             }
         }
     }

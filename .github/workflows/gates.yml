@@ -53,7 +53,8 @@ jobs:
     # aapt2, javac against the real android.jar, d8, sign, then inspect the
     # package (entries, DEX classes, export contract). Java that only ever
     # compiled in a reviewer's head reached main before this job existed
-    # (docs/AUTONOMOUS_DECISIONS.md #86), so it runs on every push and PR.
+    # (docs/AUTONOMOUS_DECISIONS.md #86), so it runs on every pull request
+    # and on every push to main (the workflow's push trigger above).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,11 +67,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      # The versions live in xtask (PINNED_* in xtask/src/main.rs), which is
+      # also what discovery prefers over anything else the runner image ships.
       - name: Install the pinned Android platform, build-tools and NDK
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           printf 'y\n%.0s' $(seq 1 30) | "$SDKMANAGER" --licenses > /dev/null
-          "$SDKMANAGER" --install "platforms;android-36" "build-tools;37.0.0" "ndk;27.3.13750724"
+          "$SDKMANAGER" --install $(cargo xtask android-sdk-packages)
       - name: Build, sign and inspect the APK
         run: cargo xtask verify-android-live
       # The shipped library is aarch64/Bionic; the JVM proof above runs on the
@@ -80,19 +83,25 @@ jobs:
       # 2.6 GB and only downloaded on a cache miss).
       - name: Install qemu-user-static and e2fsprogs for the target-ABI proof
         run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static e2fsprogs
+      # The cache key is derived from the pinned image package xtask prints,
+      # so changing PINNED_SYSTEM_IMAGE_* in xtask invalidates the cached
+      # runtime instead of silently reusing the old one.
+      - name: Name the pinned Bionic runtime
+        id: sdk
+        run: echo "image=$(cargo xtask android-sdk-packages --system-image | tr ';' '-')" >> "$GITHUB_OUTPUT"
       - name: Restore the extracted Bionic runtime
         id: bionic
         uses: actions/cache@v4
         with:
-          path: ~/.cache/bionic-android-24-arm64
-          key: bionic-sysroot-android-24-default-arm64-v8a-r1
+          path: ~/.cache/bionic-sysroot
+          key: bionic-sysroot-${{ steps.sdk.outputs.image }}-r1
       - name: Extract the Bionic runtime from the system image (cache miss only)
         if: steps.bionic.outputs.cache-hit != 'true'
         run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "system-images;android-24;default;arm64-v8a"
-          cargo xtask prepare-bionic-sysroot "$HOME/.cache/bionic-android-24-arm64"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install $(cargo xtask android-sdk-packages --system-image)
+          cargo xtask prepare-bionic-sysroot "$HOME/.cache/bionic-sysroot"
       - name: Run the bleradar-jni test suite on aarch64/Bionic under qemu
-        run: BIONIC_SYSROOT="$HOME/.cache/bionic-android-24-arm64" cargo xtask verify-jni-target
+        run: BIONIC_SYSROOT="$HOME/.cache/bionic-sysroot" cargo xtask verify-jni-target
 
   web-dashboard:
     # The page ApiHttpServer serves at / must render live data in a real
