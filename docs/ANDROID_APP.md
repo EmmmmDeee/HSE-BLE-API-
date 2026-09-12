@@ -204,13 +204,14 @@ automatic-update decision surface was added — decision #81) and on
 decision #86 — then 31 ↔ 31 after the string bridge and the
 manifest/artifact surface — decision #87). Since decision #86 the
 `android-apk` CI job rebuilds the
-package from every push, so Java that does not compile against the real
-`android.jar` can no longer reach `main` unnoticed. Since decision #89 the
+package on every pull request and every push to `main`, so Java that does
+not compile against the real `android.jar` can no longer reach `main`
+unnoticed. Since decision #89 the
 build also packages `src/main/assets/` (`aapt2 link -A`; no earlier APK
 carried the bundled `release_manifest.txt` — COR-029), `verify-android-live`
 requires both asset entries and runs lint's `NewApi` check (which found the
 API-33 `readAllBytes()` call on this minSdk-26 app — COR-028), and the
-committed APK is the #90 build (SHA-256 `cbb68444…3bbb`, 406,094 bytes; the
+committed APK is the #90 build (SHA-256 `ad14aff1…536b`, 406,094 bytes; the
 native library byte-identical to the #87 build). The SDK set that build uses
 is pinned once, in `xtask/src/main.rs` (`PINNED_*`), printed by
 `cargo xtask android-sdk-packages` for CI's `sdkmanager`, and preferred by

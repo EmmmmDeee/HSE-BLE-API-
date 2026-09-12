@@ -105,10 +105,10 @@ public final class UpdateCheckService extends Service {
                     ReleaseManifest manifest = restoreDownloadManifest();
                     if (manifest != null) {
                         try {
-                            // No start owns this restore and no promotion happened, so the
-                            // receiver stops the service unconditionally (startId -1) and
-                            // never leaves a foreground it did not enter.
-                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, -1);
+                            // The start that follows this restore promotes the service
+                            // (every start does); the receiver leaves that foreground and
+                            // stops the service unconditionally when the download ends.
+                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest);
                             IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
@@ -117,11 +117,11 @@ public final class UpdateCheckService extends Service {
                             }
                             Log.d(TAG, "Re-registered broadcast receiver for pending download with restored manifest");
                         } catch (Exception e) {
-                            Log.w(TAG, "Failed to re-register download receiver", e);
-                            clearDownloadId();
-                            // Otherwise onStartCommand's in-flight guard would
-                            // suppress every later check for this process.
-                            activeDownloadId = -1;
+                            Log.w(TAG, "Failed to re-register download receiver; cancelling the orphaned download", e);
+                            // Nothing can verify or install this job any more: cancel it
+                            // so no orphan lingers and no duplicate is enqueued beside it,
+                            // and reset the in-flight guard so later checks proceed.
+                            abandonActiveDownload();
                         }
                     } else {
                         Log.w(TAG, "Could not restore manifest for pending download; clearing");
@@ -156,6 +156,29 @@ public final class UpdateCheckService extends Service {
                 .remove(PREFS_DOWNLOAD_ID)
                 .remove(PREFS_PENDING_MANIFEST)
                 .apply();
+    }
+
+    /**
+     * Forgets the active download after it completed: clears the persisted
+     * state and resets the in-flight guard, leaving the downloaded file to
+     * the installer.
+     */
+    private void releaseActiveDownload() {
+        clearDownloadId();
+        activeDownloadId = -1;
+    }
+
+    /**
+     * Gives up on the active download: cancels the DownloadManager job (which
+     * also deletes its file) so it is neither orphaned without a receiver nor
+     * duplicated by a later check, then forgets it like
+     * {@link #releaseActiveDownload()}.
+     */
+    private void abandonActiveDownload() {
+        if (activeDownloadId != -1 && downloadManager != null) {
+            downloadManager.remove(activeDownloadId);
+        }
+        releaseActiveDownload();
     }
 
     /**
@@ -315,7 +338,7 @@ public final class UpdateCheckService extends Service {
             Log.d(TAG, "Enqueued download with ID " + activeDownloadId);
 
             // Register broadcast receiver for download completion
-            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, startId);
+            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest);
             IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
@@ -324,6 +347,11 @@ public final class UpdateCheckService extends Service {
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to start download", e);
+            // enqueue() and saveDownloadState() may have succeeded before
+            // registerReceiver() threw: cancel the receiverless job so it is
+            // neither orphaned nor guarding out every later check, and retry.
+            abandonActiveDownload();
+            scheduleRetry();
             finish(startId);
         }
     }
@@ -374,8 +402,11 @@ public final class UpdateCheckService extends Service {
 
     /**
      * Leaves the foreground entered by {@link #onStartCommand} and stops the
-     * service; a negative {@code startId} (the restored-download receiver)
-     * stops it unconditionally, as {@link #stopSelf(int)} specifies.
+     * service. A start's own exit paths pass their {@code startId}; the
+     * download-completion receiver passes {@code -1}, which
+     * {@link #stopSelf(int)} treats as unconditional: the single active
+     * download was the service's last work, and any newer start that met the
+     * in-flight guard did nothing that a start-id check should protect.
      */
     private void finish(int startId) {
         stopForeground(Service.STOP_FOREGROUND_REMOVE);
@@ -383,16 +414,14 @@ public final class UpdateCheckService extends Service {
     }
 
     /**
-     * Broadcast receiver that handles download completion.
+     * Broadcast receiver that handles the completion of the single active
+     * download and always ends the service afterwards.
      */
     private class DownloadCompletionReceiver extends BroadcastReceiver {
         private final ReleaseManifest manifest;
-        /** The start to stop when done; {@code -1} for a restored download (stop unconditionally). */
-        private final int startId;
 
-        DownloadCompletionReceiver(ReleaseManifest manifest, int startId) {
+        DownloadCompletionReceiver(ReleaseManifest manifest) {
             this.manifest = manifest;
-            this.startId = startId;
         }
 
         @Override
@@ -407,10 +436,15 @@ public final class UpdateCheckService extends Service {
                         .setFilterById(downloadId);
                 android.database.Cursor cursor = downloadManager.query(query);
                 if (!cursor.moveToFirst()) {
-                    Log.e(TAG, "Download not found");
+                    // The row vanished (cleared by the user or the system); the
+                    // check time was already recorded, so without a retry the
+                    // update would wait a whole interval.
+                    Log.e(TAG, "Download " + downloadId + " vanished from DownloadManager; retrying later");
                     cursor.close();
+                    abandonActiveDownload();
+                    scheduleRetry();
                     unregisterReceiver(this);
-                    finish(startId);
+                    finish(-1);
                     return;
                 }
 
@@ -419,9 +453,10 @@ public final class UpdateCheckService extends Service {
                     int reason = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_REASON));
                     Log.w(TAG, "Download failed with reason " + reason);
                     cursor.close();
+                    abandonActiveDownload();
                     scheduleRetry();
                     unregisterReceiver(this);
-                    finish(startId);
+                    finish(-1);
                     return;
                 }
 
@@ -455,18 +490,19 @@ public final class UpdateCheckService extends Service {
                     scheduleRetry();
                 }
 
-                clearDownloadId();
+                // The file stays for the installer; only the bookkeeping ends.
+                releaseActiveDownload();
                 unregisterReceiver(this);
-                finish(startId);
+                finish(-1);
             } catch (Exception e) {
                 Log.e(TAG, "Error handling download completion", e);
-                clearDownloadId();
+                releaseActiveDownload();
                 try {
                     unregisterReceiver(this);
                 } catch (IllegalArgumentException ignored) {
                     // Already unregistered
                 }
-                finish(startId);
+                finish(-1);
             }
         }
     }

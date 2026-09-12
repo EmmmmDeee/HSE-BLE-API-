@@ -76,10 +76,10 @@ build-tools 37.0.0, NDK 27.3.13750724, platform android-36, OpenJDK 21.0.10;
 on this host from the decision #86 sources (exit 0; APK SHA-256
 `e69204c7…60acfa`) and the decision #87 sources (exit 0; APK SHA-256
 `3e3670fb…daa64`; the `android-apk` CI job now repeats this build on every
-push and pull request), and once more from the decision #89 sources (exit 0
+pull request and every push to `main`), and once more from the decision #89 sources (exit 0
 in 12 s warm; APK SHA-256 `db4fb288…61b8`, 406,094 bytes, the first build to
 carry `assets/`), then from the decision #90 sources (exit 0; APK SHA-256
-`cbb68444…3bbb`, 406,094 bytes; `classes.dex` 64,592 bytes; the pinned SDK
+`ad14aff1…536b`, 406,094 bytes; `classes.dex` 64,948 bytes; the pinned SDK
 set chosen by xtask's discovery without a fallback notice):
 
 | Check | Outcome |

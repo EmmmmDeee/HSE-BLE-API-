@@ -183,13 +183,18 @@ public class UpdateCheckServiceTest {
         // onStartCommand() calls promoteToForeground() first, unconditionally
         // (COR-030: promoting only for retries left a download in flight or a
         // restored download running un-promoted until the platform killed the
-        // process). Every exit path — onStartCommand's early returns, the
-        // download-completion receiver's paths, and the restored-download
-        // receiver (startId -1, which stopSelf(int) treats as unconditional) —
-        // goes through finish(): stopForeground(STOP_FOREGROUND_REMOVE) then
-        // stopSelf(startId). A verified artifact whose installer hand-off
-        // fails is retried, and a failed receiver re-registration resets
-        // activeDownloadId so the in-flight guard cannot stick.
+        // process). Every exit path goes through finish():
+        // stopForeground(STOP_FOREGROUND_REMOVE) then stopSelf(startId). A
+        // start's own exits pass their startId; the download-completion
+        // receiver always passes -1 (unconditional, as stopSelf(int)
+        // specifies) because the single active download was the service's
+        // last work and a newer start that met the in-flight guard did
+        // nothing. A verified artifact whose installer hand-off fails, a
+        // failed download and a vanished DownloadManager row are retried; a
+        // job left without a receiver (registration or re-registration
+        // failed) is cancelled with DownloadManager.remove; and the in-flight
+        // guard (activeDownloadId) is reset on every completion and failure
+        // path so it can never stick.
         assertTrue("Foreground entered on every start and left on every exit", true);
     }
 
