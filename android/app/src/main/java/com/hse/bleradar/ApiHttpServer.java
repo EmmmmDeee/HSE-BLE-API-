@@ -1,16 +1,10 @@
 package com.hse.bleradar;
 
-import android.content.res.AssetManager;
-import android.os.SystemClock;
-import android.util.JsonWriter;
-import android.util.Log;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.StringWriter;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -20,6 +14,9 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.LongSupplier;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Loopback-only HTTP server exposing the live device snapshot as JSON and
@@ -32,10 +29,20 @@ import java.util.concurrent.RejectedExecutionException;
  * answered with a complete {@code Content-Length}-framed body and the
  * connection is closed.
  *
+ * <p>The class references nothing in {@code android.*}: its collaborators
+ * arrive as {@link SnapshotSource}, {@link UpdateStatusSource},
+ * {@link AssetSource} and two clocks, JSON is written by {@link Json}, and
+ * logging goes through {@code java.util.logging} (which Android routes to
+ * logcat). That is what lets {@code cargo xtask verify-api-live} run this
+ * exact class on a host JVM with fixture sources, compare its documents byte
+ * for byte with the fixtures the browser proofs use, and render the real
+ * dashboard from it in headless Chromium. {@link RadarScanService} wires the
+ * device implementations in.
+ *
  * <p>Endpoints (all {@code GET}; JSON unless noted):
  * <ul>
  *   <li>{@code /api/devices} — every live device from
- *       {@link BleScanEngine#snapshot()}, in its ranked order: {@code address},
+ *       {@link SnapshotSource#snapshot()}, in its ranked order: {@code address},
  *       {@code name} ({@code null} when the advertiser has none),
  *       {@code distance_m} / {@code distance_lower_m} /
  *       {@code distance_upper_m} (metres, {@code null} when unavailable),
@@ -52,9 +59,7 @@ import java.util.concurrent.RejectedExecutionException;
  *   <li>{@code /} — the web dashboard ({@code text/html}): the packaged
  *       {@code assets/dashboard.html}, a self-contained page that polls the
  *       three JSON endpoints and renders the radar and device table. Java
- *       serves its bytes unchanged; the page is what
- *       {@code cargo xtask verify-dashboard-live} renders in headless
- *       Chromium against a mock of the contract above.</li>
+ *       serves its bytes unchanged.</li>
  * </ul>
  * Unknown paths answer {@code 404}; known paths with any method but
  * {@code GET} answer {@code 405}; a malformed request line answers {@code 400};
@@ -65,10 +70,11 @@ import java.util.concurrent.RejectedExecutionException;
  */
 public final class ApiHttpServer {
 
-    private static final String TAG = "ApiHttpServer";
-    static final int PORT = 8080;
+    /** The loopback port the service binds; the host harness passes 0 for an ephemeral one. */
+    public static final int DEFAULT_PORT = 8080;
     /** The dashboard page, packaged by {@code cargo xtask build-apk} from {@code src/main/assets/}. */
     static final String DASHBOARD_ASSET = "dashboard.html";
+    private static final Logger LOG = Logger.getLogger("ApiHttpServer");
     private static final int BACKLOG = 8;
     private static final int HANDLER_THREADS = 2;
     /** Frees a handler thread from a client that connects but never sends its request. */
@@ -76,18 +82,32 @@ public final class ApiHttpServer {
     private static final String JSON = "application/json";
     private static final String HTML = "text/html; charset=utf-8";
 
-    private final BleScanEngine engine;
-    private final UpdateManager updateManager;
-    private final AssetManager assets;
+    private final SnapshotSource engine;
+    private final UpdateStatusSource updates;
+    private final AssetSource assets;
+    /** The {@code SystemClock.uptimeMillis()} timeline {@link Blip#lastSeenUptimeMillis} lives on. */
+    private final LongSupplier uptimeMillis;
+    /** Wall-clock epoch milliseconds for {@code timestamp_ms}. */
+    private final LongSupplier epochMillis;
+    private final int port;
     /** The dashboard bytes, read once per {@link #start()}; {@code null} when the asset is unreadable. */
     private volatile byte[] dashboard;
     private ServerSocket listener;
     private ExecutorService handlers;
 
-    public ApiHttpServer(BleScanEngine engine, UpdateManager updateManager, AssetManager assets) {
+    public ApiHttpServer(
+            SnapshotSource engine,
+            UpdateStatusSource updates,
+            AssetSource assets,
+            LongSupplier uptimeMillis,
+            LongSupplier epochMillis,
+            int port) {
         this.engine = engine;
-        this.updateManager = updateManager;
+        this.updates = updates;
         this.assets = assets;
+        this.uptimeMillis = uptimeMillis;
+        this.epochMillis = epochMillis;
+        this.port = port;
     }
 
     /**
@@ -104,18 +124,23 @@ public final class ApiHttpServer {
         try {
             socket = new ServerSocket();
             socket.setReuseAddress(true);
-            socket.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), PORT), BACKLOG);
+            socket.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), BACKLOG);
         } catch (IOException error) {
-            Log.e(TAG, "Failed to bind http://127.0.0.1:" + PORT, error);
+            LOG.log(Level.SEVERE, "Failed to bind http://127.0.0.1:" + port, error);
             return;
         }
         ExecutorService pool = Executors.newFixedThreadPool(HANDLER_THREADS);
         listener = socket;
         handlers = pool;
-        Thread acceptThread = new Thread(() -> acceptLoop(socket, pool), TAG + "-accept");
+        Thread acceptThread = new Thread(() -> acceptLoop(socket, pool), "ApiHttpServer-accept");
         acceptThread.setDaemon(true);
         acceptThread.start();
-        Log.d(TAG, "HTTP server listening on http://127.0.0.1:" + PORT);
+        LOG.info("HTTP server listening on http://127.0.0.1:" + socket.getLocalPort());
+    }
+
+    /** The port the listener is bound to, or {@code -1} while stopped (what a port-0 start received). */
+    public synchronized int boundPort() {
+        return listener == null ? -1 : listener.getLocalPort();
     }
 
     /** Closes the listener (which ends the accept loop) and the handler threads. Idempotent. */
@@ -131,7 +156,7 @@ public final class ApiHttpServer {
         listener = null;
         handlers.shutdownNow();
         handlers = null;
-        Log.d(TAG, "HTTP server stopped");
+        LOG.info("HTTP server stopped");
     }
 
     /** Reads the packaged page; a missing or unreadable asset is logged and makes {@code /} answer 500. */
@@ -139,7 +164,7 @@ public final class ApiHttpServer {
         try (InputStream in = assets.open(DASHBOARD_ASSET)) {
             return Streams.readAllBytes(in);
         } catch (IOException error) {
-            Log.e(TAG, "Dashboard asset " + DASHBOARD_ASSET + " unreadable; / will answer 500", error);
+            LOG.log(Level.SEVERE, "Dashboard asset " + DASHBOARD_ASSET + " unreadable; / will answer 500", error);
             return null;
         }
     }
@@ -187,7 +212,7 @@ public final class ApiHttpServer {
             }
             respond(out, parts[0], path);
         } catch (IOException error) {
-            Log.w(TAG, "HTTP request failed: " + error);
+            LOG.warning("HTTP request failed: " + error);
         }
     }
 
@@ -226,72 +251,56 @@ public final class ApiHttpServer {
         }
     }
 
-    private String devicesJson() throws IOException {
+    private String devicesJson() {
         List<Blip> devices = engine.snapshot();
         // Blip.lastSeenUptimeMillis is on the SystemClock.uptimeMillis() timeline,
         // so the age must be measured on that same clock, never wall-clock epoch.
-        long nowUptimeMs = SystemClock.uptimeMillis();
-        StringWriter buffer = new StringWriter();
-        try (JsonWriter writer = new JsonWriter(buffer)) {
-            writer.beginObject();
-            writer.name("devices").beginArray();
-            for (Blip device : devices) {
-                writer.beginObject();
-                writer.name("address").value(device.address);
-                writer.name("name").value(device.name);
-                writeFinite(writer, "distance_m", device.distanceMetres);
-                writeFinite(writer, "distance_lower_m", device.distanceLowerBoundMetres);
-                writeFinite(writer, "distance_upper_m", device.distanceUpperBoundMetres);
-                writeFinite(writer, "rssi_dbm", device.lastRssiDbm);
-                writer.name("proximity").value(proximityLabel(device.proximity));
-                writer.name("trend").value(trendLabel(device.trend));
-                writer.name("freshness").value(freshnessLabel(device.freshness));
-                writer.name("confidence_percent").value(device.confidencePercent);
-                writer.name("last_seen_ago_ms").value(Math.max(0L, nowUptimeMs - device.lastSeenUptimeMillis));
-                writer.endObject();
-            }
-            writer.endArray();
-            writer.name("scanning").value(engine.isScanning());
-            writer.name("native_available").value(NativeRadar.isAvailable());
-            writer.name("timestamp_ms").value(System.currentTimeMillis());
-            writer.endObject();
+        long nowUptimeMs = uptimeMillis.getAsLong();
+        Json json = new Json();
+        json.beginObject();
+        json.name("devices").beginArray();
+        for (Blip device : devices) {
+            json.beginObject();
+            json.name("address").value(device.address);
+            json.name("name").value(device.name);
+            json.name("distance_m").value(device.distanceMetres);
+            json.name("distance_lower_m").value(device.distanceLowerBoundMetres);
+            json.name("distance_upper_m").value(device.distanceUpperBoundMetres);
+            json.name("rssi_dbm").value(device.lastRssiDbm);
+            json.name("proximity").value(proximityLabel(device.proximity));
+            json.name("trend").value(trendLabel(device.trend));
+            json.name("freshness").value(freshnessLabel(device.freshness));
+            json.name("confidence_percent").value(device.confidencePercent);
+            json.name("last_seen_ago_ms").value(Math.max(0L, nowUptimeMs - device.lastSeenUptimeMillis));
+            json.endObject();
         }
-        return buffer.toString();
+        json.endArray();
+        json.name("scanning").value(engine.isScanning());
+        json.name("native_available").value(NativeRadar.isAvailable());
+        json.name("timestamp_ms").value(epochMillis.getAsLong());
+        json.endObject();
+        return json.toString();
     }
 
-    private String statusJson() throws IOException {
-        StringWriter buffer = new StringWriter();
-        try (JsonWriter writer = new JsonWriter(buffer)) {
-            writer.beginObject();
-            writer.name("scanning").value(engine.isScanning());
-            writer.name("device_count").value(engine.snapshot().size());
-            writer.name("native_available").value(NativeRadar.isAvailable());
-            writer.name("uptime_ms").value(engine.getUptimeMillis());
-            writer.endObject();
-        }
-        return buffer.toString();
+    private String statusJson() {
+        Json json = new Json();
+        json.beginObject();
+        json.name("scanning").value(engine.isScanning());
+        json.name("device_count").value(engine.snapshot().size());
+        json.name("native_available").value(NativeRadar.isAvailable());
+        json.name("uptime_ms").value(engine.getUptimeMillis());
+        json.endObject();
+        return json.toString();
     }
 
-    private String updatesJson() throws IOException {
-        StringWriter buffer = new StringWriter();
-        try (JsonWriter writer = new JsonWriter(buffer)) {
-            writer.beginObject();
-            writer.name("last_check_ms").value(updateManager.getLastCheckTimeMs());
-            writer.name("next_check_ms").value(updateManager.getNextCheckTimeMs());
-            writer.name("retry_count").value(updateManager.getRetryCount());
-            writer.endObject();
-        }
-        return buffer.toString();
-    }
-
-    /** Writes {@code value}, or JSON {@code null} for NaN/infinite (which JsonWriter would reject). */
-    private static void writeFinite(JsonWriter writer, String name, double value) throws IOException {
-        writer.name(name);
-        if (Double.isFinite(value)) {
-            writer.value(value);
-        } else {
-            writer.nullValue();
-        }
+    private String updatesJson() {
+        Json json = new Json();
+        json.beginObject();
+        json.name("last_check_ms").value(updates.getLastCheckTimeMs());
+        json.name("next_check_ms").value(updates.getNextCheckTimeMs());
+        json.name("retry_count").value(updates.getRetryCount());
+        json.endObject();
+        return json.toString();
     }
 
     private static void writeResponse(OutputStream out, int status, String reason, String contentType, String body)
@@ -313,7 +322,7 @@ public final class ApiHttpServer {
     }
 
     private static String errorJson(String message) {
-        return "{\"error\":\"" + message + "\"}";
+        return new Json().beginObject().name("error").value(message).endObject().toString();
     }
 
     private static void closeQuietly(Socket socket) {

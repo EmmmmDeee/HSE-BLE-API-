@@ -47,6 +47,12 @@ jobs:
         run: cargo xtask gates
       - name: Live JVM → JNI → Rust proof against NativeRadar.java
         run: cargo xtask verify-jni-live
+      # The app's real ApiHttpServer on this JVM with fixture sources: every
+      # HTTP contract by real requests (JSON byte-identical to the browser
+      # fixtures), then the real dashboard rendered from it by the runner's
+      # Google Chrome (docs/AUTONOMOUS_DECISIONS.md #91).
+      - name: Real ApiHttpServer on the host JVM → real dashboard → headless Chromium
+        run: cargo xtask verify-api-live
 
   android-apk:
     # The app must build from a fresh checkout: cross-compile the JNI library,

@@ -364,6 +364,19 @@ an xtask unit test inside `gates`). It needs a Chromium/Chrome binary
 on `PATH`, or Playwright's browser cache); CI's `web-dashboard` job runs it
 on every pull request and every push to `main`.
 
+```sh
+cargo xtask verify-api-live
+```
+
+This runs the app's real `ApiHttpServer` — the class the APK ships, which
+references nothing in `android.*` — on the host JVM with fixture sources and
+the host `bleradar-jni` library, answers ten real HTTP requests over loopback
+(the dashboard bytes, the three JSON documents byte-identical to the browser
+fixtures, `404`/`405`/`400`, `no-store`, exact `Content-Length`), and then
+renders the committed dashboard from that server in headless Chromium. It
+needs a JDK and a Chromium/Chrome binary; CI's `gates` job runs it after the
+live JNI proof.
+
 ## Parity report
 
 ```sh

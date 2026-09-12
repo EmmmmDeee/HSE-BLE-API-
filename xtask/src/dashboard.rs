@@ -68,12 +68,13 @@ const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// `/api/devices` as `ApiHttpServer.devicesJson` writes it (`JsonWriter`
 /// renders every double with a fraction, `null` for NaN, `null` for a
 /// nameless device), covering every proximity, trend and freshness label,
-/// a nameless device without distances (the no-native case), and a name that
-/// must be rendered as text, never as markup.
+/// a nameless device without distances (the no-native case), and a name with
+/// markup, a double quote, a backslash and non-ASCII that must be escaped in
+/// the JSON and rendered as text, never as markup.
 pub const DEVICES_JSON: &str = concat!(
     r#"{"devices":["#,
     r#"{"address":"AA:BB:CC:DD:EE:01","name":"Tag Alpha","distance_m":1.234,"distance_lower_m":0.8,"distance_upper_m":1.9,"rssi_dbm":-61.4,"proximity":"NEAR","trend":"STRONGER","freshness":"LIVE","confidence_percent":87,"last_seen_ago_ms":420},"#,
-    r#"{"address":"AA:BB:CC:DD:EE:02","name":"<b>evil</b> Ünïcødé 😀","distance_m":7.5,"distance_lower_m":5.2,"distance_upper_m":11.0,"rssi_dbm":-78.0,"proximity":"MID","trend":"WEAKER","freshness":"RECENT","confidence_percent":52,"last_seen_ago_ms":12345},"#,
+    r#"{"address":"AA:BB:CC:DD:EE:02","name":"<b>evil</b> \"Ünïcødé\" \\ 😀","distance_m":7.5,"distance_lower_m":5.2,"distance_upper_m":11.0,"rssi_dbm":-78.0,"proximity":"MID","trend":"WEAKER","freshness":"RECENT","confidence_percent":52,"last_seen_ago_ms":12345},"#,
     r#"{"address":"AA:BB:CC:DD:EE:03","name":null,"distance_m":null,"distance_lower_m":null,"distance_upper_m":null,"rssi_dbm":-90.2,"proximity":"FAR","trend":"UNKNOWN","freshness":"STALE","confidence_percent":0,"last_seen_ago_ms":75000},"#,
     r#"{"address":"AA:BB:CC:DD:EE:04","name":"Beacon Delta","distance_m":0.4,"distance_lower_m":0.3,"distance_upper_m":0.6,"rssi_dbm":-45.0,"proximity":"IMMEDIATE","trend":"STABLE","freshness":"LIVE","confidence_percent":99,"last_seen_ago_ms":90}"#,
     r#"],"scanning":true,"native_available":true,"timestamp_ms":1757700000000}"#,
@@ -594,7 +595,7 @@ pub const HEALTHY_MARKERS: &[&str] = &[
     r#"data-address="AA:BB:CC:DD:EE:03""#,
     r#"data-address="AA:BB:CC:DD:EE:04""#,
     "Tag Alpha",
-    "&lt;b&gt;evil&lt;/b&gt; Ünïcødé 😀",
+    "&lt;b&gt;evil&lt;/b&gt; \"Ünïcødé\" \\ 😀",
     "Unnamed device",
     "Beacon Delta",
     ">1.2 m<",
@@ -757,12 +758,12 @@ pub fn check_json_contract(
 }
 
 /// The JSON field names one `String <method>()` of `ApiHttpServer.java`
-/// writes: every `writer.name("…")` and `writeFinite(writer, "…", …)` in
-/// its body.
+/// writes: every `.name("…")` call in its body (the `Json` writer's
+/// `name` method, whatever the receiver is called).
 pub fn java_json_fields(source: &str, method: &str) -> Result<BTreeSet<String>, String> {
     let body = java_method_body(source, method)?;
     let mut fields = BTreeSet::new();
-    for prefix in ["writer.name(\"", "writeFinite(writer, \""] {
+    for prefix in [".name(\""] {
         let mut rest = body;
         while let Some(start) = rest.find(prefix) {
             let after = &rest[start + prefix.len()..];
@@ -1331,8 +1332,8 @@ mod tests {
         assert_eq!(counts.get("/api/updates"), Some(&3));
 
         let renamed = API_HTTP_SERVER_JAVA.replace(
-            "writer.name(\"last_seen_ago_ms\")",
-            "writer.name(\"last_seen_ms\")",
+            "json.name(\"last_seen_ago_ms\")",
+            "json.name(\"last_seen_ms\")",
         );
         let error = check_json_contract(&renamed, DASHBOARD_HTML).unwrap_err();
         assert!(
@@ -1350,8 +1351,8 @@ mod tests {
             "/api/status: the page reads `status.uptime`, which ApiHttpServer.statusJson never writes"
         );
 
-        let dropped = API_HTTP_SERVER_JAVA
-            .replace("writer.name(\"retry_count\")", "writer.name(\"retries\")");
+        let dropped =
+            API_HTTP_SERVER_JAVA.replace("json.name(\"retry_count\")", "json.name(\"retries\")");
         assert!(
             check_json_contract(&dropped, DASHBOARD_HTML)
                 .unwrap_err()
@@ -1364,11 +1365,11 @@ mod tests {
         let source = r#"
             private String aJson() throws IOException {
                 String brace = "}"; char other = '{';
-                if (x) { writer.name("one").value(1); }
-                writeFinite(writer, "two", 2.0);
-                return buffer.toString();
+                if (x) { json.name("one").value(1); }
+                json.name("two").value(2.0);
+                return json.toString();
             }
-            private String bJson() { writer.name("three").value(3); return ""; }
+            private String bJson() { json.name("three").value(3); return ""; }
         "#;
         let a = java_json_fields(source, "aJson").unwrap();
         assert_eq!(a.iter().collect::<Vec<_>>(), vec!["one", "two"]);
