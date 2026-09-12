@@ -73,3 +73,23 @@ jobs:
           "$SDKMANAGER" --install "platforms;android-36" "build-tools;37.0.0" "ndk;27.3.13750724"
       - name: Build, sign and inspect the APK
         run: cargo xtask verify-android-live
+      # The shipped library is aarch64/Bionic; the JVM proof above runs on the
+      # x86_64 host. Execute the crate's whole test suite on the target ABI
+      # under qemu-user against a Bionic runtime extracted once from the
+      # android-24 arm64 system image (~5 MB, cached; the image itself is
+      # 2.6 GB and only downloaded on a cache miss).
+      - name: Install qemu-user-static and e2fsprogs for the target-ABI proof
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static e2fsprogs
+      - name: Restore the extracted Bionic runtime
+        id: bionic
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bionic-android-24-arm64
+          key: bionic-sysroot-android-24-default-arm64-v8a-r1
+      - name: Extract the Bionic runtime from the system image (cache miss only)
+        if: steps.bionic.outputs.cache-hit != 'true'
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "system-images;android-24;default;arm64-v8a"
+          cargo xtask prepare-bionic-sysroot "$HOME/.cache/bionic-android-24-arm64"
+      - name: Run the bleradar-jni test suite on aarch64/Bionic under qemu
+        run: BIONIC_SYSROOT="$HOME/.cache/bionic-android-24-arm64" cargo xtask verify-jni-target

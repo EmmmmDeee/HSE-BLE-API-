@@ -82,6 +82,8 @@ fn main() -> ExitCode {
         "verify-jni-live" => cmd_verify_jni_live(),
         "verify-android-live" => cmd_verify_android_live(),
         "oracle-differential" => cmd_oracle_differential(),
+        "verify-jni-target" => cmd_verify_jni_target(),
+        "prepare-bionic-sysroot" => cmd_prepare_bionic_sysroot(&rest),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -122,6 +124,8 @@ fn print_usage() {
          \x20 verify-jni-live            run a live Java→JNI→Rust verification against NativeRadar.java\n\
          \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
          \x20 oracle-differential        execute the immutable oracle under qemu-aarch64 and check the committed executed-oracle vectors (see docs/ORACLE_DIFFERENTIAL.md)\n\
+         \x20 verify-jni-target          run the bleradar-jni test suite cross-compiled for aarch64-linux-android under qemu-aarch64 against a Bionic runtime\n\
+         \x20 prepare-bionic-sysroot <dir>  extract the Bionic runtime (linker64 + libc/libm/libdl/libc++) from the installed android-24 arm64 system image into <dir>, for BIONIC_SYSROOT\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/jni-contract/test/doc/checks/audit/deny)"
@@ -2413,6 +2417,185 @@ fn cmd_oracle_differential() -> Result<(), String> {
     Ok(())
 }
 
+/// Runs the `bleradar-jni` test suite — the unit tests, `tests/jni_bridge.rs`
+/// and the export campaign `tests/jni_campaign.rs` — cross-compiled for
+/// [`ANDROID_RUST_TARGET`] and executed under `qemu-aarch64` against a real
+/// Android Bionic runtime: the architecture and libc the shipped
+/// `libbleradar_jni.so` runs on, rather than the x86_64 host that the ordinary
+/// `cargo test` and `verify-jni-live` exercise. The string bridge's
+/// function-pointer and calling-convention assumptions, every export's
+/// agreement with its core, and the mock JNI function table are thereby proven
+/// on the target ABI.
+///
+/// A live command like `oracle-differential` (needs the NDK, `qemu-aarch64`,
+/// and a Bionic runtime — `BIONIC_SYSROOT`, or `debugfs` plus an installed
+/// `system-images;android-24;default;arm64-v8a`), so it is not part of
+/// `gates`; CI's `android-apk` job runs it with a cached sysroot.
+fn cmd_verify_jni_target() -> Result<(), String> {
+    let root = repo_root()?;
+    let sdk = discover_sdk_root()?;
+    let ndk = discover_ndk_root(&sdk)?;
+    let clang = ndk_aarch64_clang(&ndk)?;
+    let llvm_ar = clang.with_file_name("llvm-ar");
+    if !llvm_ar.is_file() {
+        return Err(format!("NDK llvm-ar not found at {}", llvm_ar.display()));
+    }
+    let qemu = locate_qemu_aarch64()?;
+    let sysroot = prepare_bionic_sysroot(&sdk)?;
+    let workdir = xtask_temp_dir("verify-jni-target");
+    recreate_dirs(&[&workdir])?;
+
+    println!("== cross-compile bleradar-jni tests for {ANDROID_RUST_TARGET} (NDK API-24 clang) ==");
+    let messages = run_capture({
+        let mut c = Command::new("cargo");
+        c.current_dir(&root)
+            .args([
+                "test",
+                "-p",
+                "bleradar-jni",
+                "--target",
+                ANDROID_RUST_TARGET,
+                "--locked",
+                "--no-run",
+                "--message-format=json",
+            ])
+            .env("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", &clang)
+            .env("CARGO_TARGET_AARCH64_LINUX_ANDROID_AR", &llvm_ar);
+        c
+    })?;
+    let executables = cargo_test_executables(&messages, "bleradar-jni");
+    if executables.is_empty() {
+        return Err("cargo reported no test executables for bleradar-jni".to_string());
+    }
+
+    let mut passed_total = 0;
+    for executable in &executables {
+        let name = executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("?");
+        println!("== [{name}] execute under qemu-aarch64 against the Bionic runtime ==");
+        let output = Command::new(&qemu)
+            .arg("-L")
+            .arg(&sysroot)
+            .arg("-E")
+            .arg("LD_LIBRARY_PATH=/system/lib64")
+            .arg("-E")
+            .arg(format!("TMPDIR={}", workdir.display()))
+            .arg(executable)
+            .output()
+            .map_err(|e| format!("failed to spawn {}: {e}", qemu.display()))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let passed = match parse_test_result(&stdout) {
+            Ok(passed) if output.status.success() => passed,
+            verdict => {
+                return Err(format!(
+                    "[{name}] failed under qemu-aarch64 (exit {}): {}\n--- stdout tail ---\n{}\n--- stderr tail ---\n{}",
+                    output.status,
+                    verdict.err().unwrap_or_else(|| {
+                        "harness summary was ok but the process did not exit 0".to_string()
+                    }),
+                    tail_lines(&stdout, 40),
+                    tail_lines(&stderr, 20)
+                ));
+            }
+        };
+        println!("   {name}: {passed} passed under qemu-aarch64");
+        passed_total += passed;
+    }
+    println!(
+        "verify-jni-target: {} test executables, {passed_total} tests passed on {ANDROID_RUST_TARGET} under qemu-aarch64 + Bionic",
+        executables.len()
+    );
+    Ok(())
+}
+
+/// The test executables cargo reported (`--message-format=json --no-run`) for
+/// `package`: every `compiler-artifact` line whose `package_id` names the
+/// package, whose *profile* was compiled in test mode (`cargo test` also
+/// builds the package's examples, which are not test harnesses), and whose
+/// `executable` is not null. A targeted scan, not a JSON parser, in this
+/// file's style.
+fn cargo_test_executables(messages: &str, package: &str) -> Vec<PathBuf> {
+    messages
+        .lines()
+        .filter(|line| line.contains("\"reason\":\"compiler-artifact\""))
+        .filter(|line| {
+            find_quoted_attr(line, "\"package_id\":\"").is_some_and(|id| id.contains(package))
+        })
+        .filter(|line| {
+            line.split_once("\"profile\":")
+                .is_some_and(|(_, profile)| profile.contains("\"test\":true"))
+        })
+        .filter_map(|line| find_quoted_attr(line, "\"executable\":\""))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// The libtest summary of a run: the passed count when the last
+/// `test result:` line says `ok` with zero failures, otherwise an error naming
+/// what the harness reported.
+fn parse_test_result(stdout: &str) -> Result<usize, String> {
+    let summary = stdout
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("test result: "))
+        .ok_or("no `test result:` line in the harness output")?;
+    let rest = summary.trim_start_matches("test result: ");
+    let (status, counts) = rest
+        .split_once(". ")
+        .ok_or_else(|| format!("unparseable summary: {summary}"))?;
+    let mut passed = None;
+    let mut failed = None;
+    for part in counts.split("; ") {
+        let mut words = part.split_whitespace();
+        let (Some(count), Some(label)) = (words.next(), words.next()) else {
+            continue;
+        };
+        match label {
+            "passed" => passed = count.parse::<usize>().ok(),
+            "failed" => failed = count.parse::<usize>().ok(),
+            _ => {}
+        }
+    }
+    let (Some(passed), Some(failed)) = (passed, failed) else {
+        return Err(format!("unparseable summary: {summary}"));
+    };
+    if status != "ok" || failed != 0 {
+        return Err(format!(
+            "harness reported `{status}` with {failed} failed: {summary}"
+        ));
+    }
+    Ok(passed)
+}
+
+/// The last `count` lines of `text`, for actionable failure output.
+fn tail_lines(text: &str, count: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(count);
+    lines[start..].join("\n")
+}
+
+/// `prepare-bionic-sysroot <dir>`: extracts the Bionic runtime that
+/// `verify-jni-target` and `oracle-differential` need from the installed
+/// android-24 arm64-v8a system image into `<dir>`, laid out as
+/// `system/bin/linker64` + `system/lib64/*.so` so `BIONIC_SYSROOT=<dir>`
+/// reuses it — a few megabytes CI can cache instead of the 2.6 GB image.
+fn cmd_prepare_bionic_sysroot(args: &[String]) -> Result<(), String> {
+    let [dir] = args else {
+        return Err("usage: cargo xtask prepare-bionic-sysroot <dir>".to_string());
+    };
+    let sdk = discover_sdk_root()?;
+    let sysroot = PathBuf::from(dir);
+    extract_bionic_sysroot(&sdk, &sysroot)?;
+    println!(
+        "bionic sysroot ready at {} (system/bin/linker64 + system/lib64/{{libc,libm,libdl,libc++}}.so)",
+        sysroot.display()
+    );
+    Ok(())
+}
+
 /// Shared inputs for one or more executed-oracle harness drift checks.
 struct OracleDifferentialContext<'a> {
     root: &'a Path,
@@ -2599,13 +2782,22 @@ fn prepare_bionic_sysroot(sdk_root: &Path) -> Result<PathBuf, String> {
         ));
     }
 
+    let sysroot = xtask_temp_dir("oracle-bionic-sysroot");
+    extract_bionic_sysroot(sdk_root, &sysroot)?;
+    Ok(sysroot)
+}
+
+/// Extracts the Bionic runtime from the installed arm64 system image into
+/// `sysroot`: `system/bin/linker64` and `system/lib64/{libc,libm,libdl,libc++}.so`,
+/// which is everything the executed-oracle harnesses and the cross-compiled
+/// Rust test binaries link against.
+fn extract_bionic_sysroot(sdk_root: &Path, sysroot: &Path) -> Result<(), String> {
     let image = discover_arm64_system_image(sdk_root)?;
     let debugfs = which_in_path("debugfs").ok_or_else(|| {
         "debugfs not found (install e2fsprogs) and BIONIC_SYSROOT unset; see docs/ORACLE_DIFFERENTIAL.md"
             .to_string()
     })?;
 
-    let sysroot = xtask_temp_dir("oracle-bionic-sysroot");
     let bin = sysroot.join("system/bin");
     let lib64 = sysroot.join("system/lib64");
     recreate_dirs(&[&bin, &lib64])?;
@@ -2621,7 +2813,7 @@ fn prepare_bionic_sysroot(sdk_root: &Path) -> Result<PathBuf, String> {
     for lib in ["libc.so", "libm.so", "libdl.so", "libc++.so"] {
         debugfs_dump(&debugfs, &image, &format!("/lib64/{lib}"), &lib64.join(lib))?;
     }
-    Ok(sysroot)
+    Ok(())
 }
 
 /// Finds an installed `system-images/<api>/<tag>/arm64-v8a/system.img`.
@@ -3289,6 +3481,52 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn cargo_test_executables_keeps_only_the_package_s_runnable_artifacts() {
+        let messages = concat!(
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///w/crates/bleradar-core#0.6.10","target":{"kind":["test"],"test":true},"profile":{"test":true},"executable":"/t/deps/core-1"}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///w/crates/bleradar-jni#0.2.0","target":{"kind":["cdylib","lib"],"test":true},"profile":{"test":false},"executable":null}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///w/crates/bleradar-jni#0.2.0","target":{"kind":["example"],"test":false},"profile":{"test":false},"executable":"/t/examples/scan_result_cost-1"}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///w/crates/bleradar-jni#0.2.0","target":{"kind":["test"],"test":true},"profile":{"test":true},"executable":"/t/deps/jni_bridge-1"}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        assert_eq!(
+            cargo_test_executables(messages, "bleradar-jni"),
+            vec![PathBuf::from("/t/deps/jni_bridge-1")]
+        );
+        assert!(cargo_test_executables(messages, "bleradar-compat").is_empty());
+    }
+
+    #[test]
+    fn parse_test_result_reads_libtest_summaries() {
+        assert_eq!(
+            parse_test_result(
+                "running 2 tests\ntest a ... ok\ntest result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s\n"
+            ),
+            Ok(35)
+        );
+        assert_eq!(
+            parse_test_result(
+                "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+            ),
+            Ok(0)
+        );
+        assert!(
+            parse_test_result(
+                "test result: FAILED. 34 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s"
+            )
+            .is_err()
+        );
+        assert!(parse_test_result("no summary here").is_err());
+        assert_eq!(tail_lines("a\nb\nc\nd", 2), "c\nd");
+        assert_eq!(tail_lines("a", 5), "a");
     }
 
     #[test]

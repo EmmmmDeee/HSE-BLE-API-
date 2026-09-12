@@ -1,7 +1,8 @@
 //! A `JNIEnv` function table for tests that have no JVM.
 //!
-//! Only the slots `bleradar_jni::env` reads are populated, at the same
-//! indices, over a heap `MockString` (UTF-16 units) standing in for `jstring`.
+//! Only the slots `bleradar_jni::env` reads are populated, at the JNI
+//! specification's indices restated independently below, over a heap
+//! `MockString` (UTF-16 units) standing in for `jstring`.
 //! Strings live in a thread-local arena so the safe API never dereferences a
 //! raw pointer: `read` finds a reference by pointer identity.
 
@@ -10,10 +11,19 @@
 use core::cell::RefCell;
 use core::ffi::c_void;
 
-use bleradar_jni::env::{
-    JStringRef, JniEnvPtr, SLOT_EXCEPTION_CHECK, SLOT_GET_STRING_LENGTH, SLOT_GET_STRING_REGION,
-    SLOT_NEW_STRING, TABLE_LEN_JNI_21,
-};
+use bleradar_jni::env::{JStringRef, JniEnvPtr};
+
+/// The JNI specification's function-table slots, restated here independently
+/// of `bleradar_jni::env`'s `SLOT_*` constants (which `cargo xtask
+/// verify-jni-live` checks against the JDK's `jni.h`): a drifted constant in
+/// the crate then makes the bridge read an empty slot of this table and fail,
+/// instead of the mock silently following the drift.
+const SLOT_NEW_STRING: usize = 163;
+const SLOT_GET_STRING_LENGTH: usize = 164;
+const SLOT_GET_STRING_REGION: usize = 220;
+const SLOT_EXCEPTION_CHECK: usize = 228;
+/// Members of the JNI 21 table (four reserved slots plus 231 functions).
+const TABLE_LEN: usize = 235;
 
 struct MockString {
     units: Vec<u16>,
@@ -71,18 +81,18 @@ unsafe extern "system" fn exception_check(_env: JniEnvPtr) -> u8 {
 /// reads, plus the double indirection JNI uses (`JNIEnv*` → table pointer →
 /// table).
 pub struct MockEnv {
-    _table: Box<[*const c_void; TABLE_LEN_JNI_21]>,
+    _table: Box<[*const c_void; TABLE_LEN]>,
     table_ptr: *const c_void,
 }
 
 impl MockEnv {
     pub fn new() -> Self {
-        let mut table = Box::new([core::ptr::null::<c_void>(); TABLE_LEN_JNI_21]);
+        let mut table = Box::new([core::ptr::null::<c_void>(); TABLE_LEN]);
         table[SLOT_NEW_STRING] = new_string as *const c_void;
         table[SLOT_GET_STRING_LENGTH] = get_string_length as *const c_void;
         table[SLOT_GET_STRING_REGION] = get_string_region as *const c_void;
         table[SLOT_EXCEPTION_CHECK] = exception_check as *const c_void;
-        let table_ptr = core::ptr::from_ref::<[*const c_void; TABLE_LEN_JNI_21]>(&table).cast();
+        let table_ptr = core::ptr::from_ref::<[*const c_void; TABLE_LEN]>(&table).cast();
         Self {
             _table: table,
             table_ptr,
