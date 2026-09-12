@@ -52,7 +52,11 @@ natives: `check-jni-contract` 27 ↔ 27, `verify-jni-live` `linked-natives=27`,
 `abi=9`; and after decision #87 added the string bridge and the
 manifest/artifact natives: 31 ↔ 31, `linked-natives=31`, `abi=10`, with the
 new `jni.h` slot gate reporting 235 `JNINativeInterface_` members in the JDK
-21 header and all 4 `SLOT_*` constants matching.
+21 header and all 4 `SLOT_*` constants matching. Decision #88 then executed
+the crate's own test suite on the target: `cargo xtask verify-jni-target` →
+3 executables, 36 tests passed on `aarch64-linux-android` under
+`qemu-aarch64` against the android-24 Bionic runtime (25 s), and the
+`android-apk` CI job now runs it with the ~3 MB extracted runtime cached.
 
 ## Layer 3 — reconstructed Android APK live build (executed 2026-09-09)
 

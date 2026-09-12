@@ -299,6 +299,21 @@ invoked by the JVM through reflection with the count cross-checked against
 the Java source, and JNI calls — Java strings included — return the expected
 values). CI runs it on every push and pull request.
 
+```sh
+cargo xtask verify-jni-target
+```
+
+This cross-compiles the `bleradar-jni` test suite — the unit tests, the
+`jni_bridge` regression tests and the 20,000-iteration export campaign — for
+`aarch64-linux-android` with the NDK and executes it under `qemu-aarch64`
+against a real Android Bionic runtime extracted from the
+`system-images;android-24;default;arm64-v8a` image: the architecture and libc
+the shipped `libbleradar_jni.so` runs on, rather than the x86_64 host the JVM
+proof uses. It needs `qemu-user-static`, `debugfs` (e2fsprogs) and the system
+image, or a prepared runtime via `BIONIC_SYSROOT` (`cargo xtask
+prepare-bionic-sysroot <dir>` extracts one, about 3 MB, which is what CI
+caches). CI's `android-apk` job runs it on every push and pull request.
+
 ## Strongest current Android live proof
 
 ```sh

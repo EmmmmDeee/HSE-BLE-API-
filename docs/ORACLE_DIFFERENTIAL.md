@@ -92,6 +92,16 @@ a bit bound).
 - CPU emulator: `qemu-aarch64` 8.2.2 (user-mode).
 - Toolchain: Android NDK 27.3.13750724 (`aarch64-linux-android24-clang`).
 
+## The same runtime proves the reconstruction's own JNI crate on the target
+
+Since decision #88 the extracted Bionic sysroot is also what
+`cargo xtask verify-jni-target` runs the `bleradar-jni` test suite on:
+cross-compiled for `aarch64-linux-android` with the NDK and executed under
+`qemu-aarch64 -L <sysroot>` (the Rust test binaries need only `libc`, `libm`
+and `libdl`). `cargo xtask prepare-bionic-sysroot <dir>` extracts the runtime
+once (`linker64` + `lib{c,m,dl,c++}.so`, about 3 MB) for `BIONIC_SYSROOT`,
+which is what CI caches instead of the 2.6 GB image.
+
 ## Reproducing
 
 Prerequisites (external, like the SDK/NDK that `build-apk` needs):
