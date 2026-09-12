@@ -22,7 +22,7 @@ public final class UpdateManager {
     private static final String TAG = "UpdateManager";
     private static final int MIN_ANDROID_VERSION_FOR_LONG_VERSION_CODE = Build.VERSION_CODES.P;
 
-    private static final String PREFS_NAME = "com.hse.bleradar.update";
+    private static final String PREFS_NAME = "UpdateCheckService";
     private static final String KEY_LAST_CHECK_TIME = "last_check_time_seconds";
     private static final String KEY_INSTALLED_VERSION_CODE = "installed_version_code";
 

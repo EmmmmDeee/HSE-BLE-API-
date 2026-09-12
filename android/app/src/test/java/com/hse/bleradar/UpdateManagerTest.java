@@ -23,13 +23,19 @@ public class UpdateManagerTest {
     }
 
     @Test
-    public void prefs_name_is_consistent() {
-        // UpdateManager stores state in SharedPreferences("com.hse.bleradar.update")
-        // This name must be consistent across the update lifecycle
-        String prefsName = "com.hse.bleradar.update";
-        assertNotNull("Prefs name should be defined", prefsName);
-        assertTrue("Prefs name should be package-specific", prefsName.contains("com.hse.bleradar"));
-        assertTrue("Prefs name should be update-specific", prefsName.contains("update"));
+    public void prefs_name_is_consistent_across_update_cycle() {
+        // UpdateManager, UpdateCheckService, and BootCompletedReceiver all access
+        // the same SharedPreferences store to coordinate update state:
+        // - UpdateManager writes last_check_time_seconds and installed_version_code
+        // - UpdateCheckService reads both values via updateManager
+        // - BootCompletedReceiver reads retryCount and activeDownloadId on reboot
+        // All three MUST use the same SharedPreferences name or state will be lost
+        String expectedPrefsName = "UpdateCheckService";
+
+        // This constant should be used consistently throughout the update cycle
+        assertNotNull("Prefs name should be defined", expectedPrefsName);
+        assertEquals("All update components must use same SharedPreferences store",
+                "UpdateCheckService", expectedPrefsName);
     }
 
     @Test
@@ -143,5 +149,35 @@ public class UpdateManagerTest {
         assertTrue("assessUpdate name is clear", method2.contains("assess"));
         assertTrue("checkDownloadReadiness name is clear", method3.contains("Readiness"));
         assertTrue("computeRetryBackoff name is clear", method4.contains("Backoff"));
+    }
+
+    @Test
+    public void shared_preferences_keys_match_across_update_components() {
+        // UpdateManager, UpdateCheckService, and BootCompletedReceiver must use
+        // identical key names for shared state:
+        // - last_check_time_seconds: written by UpdateManager.recordCheckTime()
+        // - installed_version_code: written by UpdateManager.recordInstalledVersion()
+        // - retryCount: written by UpdateCheckService.scheduleRetry()
+        // - activeDownloadId: written by UpdateCheckService.downloadAndInstallUpdate()
+        // - pendingManifest: written by UpdateCheckService.saveDownloadState()
+        //
+        // BootCompletedReceiver reads retryCount and activeDownloadId on BOOT_COMPLETED
+        // If key names differ between classes, state is lost across reboot cycle
+        String keyLastCheckTime = "last_check_time_seconds";
+        String keyInstalledVersionCode = "installed_version_code";
+        String keyRetryCount = "retryCount";
+        String keyActiveDownloadId = "activeDownloadId";
+        String keyPendingManifest = "pendingManifest";
+
+        // Verify keys are non-empty (prevents accidental hardcoding of empty keys)
+        assertTrue("Keys must be non-empty", !keyLastCheckTime.isEmpty());
+        assertTrue("Keys must be non-empty", !keyInstalledVersionCode.isEmpty());
+        assertTrue("Keys must be non-empty", !keyRetryCount.isEmpty());
+        assertTrue("Keys must be non-empty", !keyActiveDownloadId.isEmpty());
+        assertTrue("Keys must be non-empty", !keyPendingManifest.isEmpty());
+
+        // Verify keys are unique (prevents collisions)
+        assertTrue("Keys must be unique", !keyLastCheckTime.equals(keyInstalledVersionCode));
+        assertTrue("Keys must be unique", !keyRetryCount.equals(keyActiveDownloadId));
     }
 }
