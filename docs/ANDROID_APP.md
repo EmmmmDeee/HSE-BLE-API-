@@ -38,7 +38,7 @@ retroactively rather than in the append-only log's 2026-09-09 entries.
 | `ApiHttpServer.java` | Loopback-only (`127.0.0.1:8080`) HTTP/1.1 responder over `java.net.ServerSocket` (Android ships no `com.sun.net.httpserver`) serving the ranked snapshot as JSON (`/api/devices`, `/api/status`, `/api/updates`) and, at `/`, the web dashboard below, for a browser or Termux tooling on the same device; started and stopped with `RadarScanService`. |
 | `assets/dashboard.html` | The web dashboard: one self-contained page (no external scripts, styles or fonts — it must render with no connectivity at all, the API being loopback-only) that polls the three JSON endpoints every second, raises an error banner on any failed or malformed answer from any of them, and renders the status pills, a canvas radar (log-scale range rings, blips coloured by proximity and faded by freshness, a stable per-address bearing like `RadarView`) and the ranked device table, all through `textContent` so a device name is never markup. Java serves its bytes unchanged; `cargo xtask verify-dashboard-live` renders this exact file in headless Chromium against a mock of the JSON contract. |
 | `Streams.java` | The one `InputStream`-draining helper: `InputStream.readAllBytes()` is API 33+ while `minSdkVersion` is 26, so every asset read (the dashboard, `release_manifest.txt`) goes through this loop; `verify-android-live` runs lint's `NewApi` check so no such call comes back. |
-| `UpdateCheckService.java` | The automatic-update orchestration (`docs/AUTO_UPDATE.md`): throttle → bundled manifest → `NativeRadar.updateDecision` → real network/battery/storage conditions → `NativeRadar.downloadReadiness` → `DownloadManager` → `NativeRadar.artifactVerifyFile` (the Rust `ArtifactVerifier`, streamed over the file) → system installer via the DownloadManager `content://` URI; retries paced by `NativeRadar.retryBackoffDelaySeconds`; a `dataSync` foreground service when started from a retry alarm. |
+| `UpdateCheckService.java` | The automatic-update orchestration (`docs/AUTO_UPDATE.md`): throttle → bundled manifest → `NativeRadar.updateDecision` → real network/battery/storage conditions → `NativeRadar.downloadReadiness` → `DownloadManager` → `NativeRadar.artifactVerifyFile` (the Rust `ArtifactVerifier`, streamed over the file) → system installer via the DownloadManager `content://` URI; retries paced by `NativeRadar.retryBackoffDelaySeconds`; always a `dataSync` foreground service, promoted first on every start because every start arrives through `startForegroundService()` (COR-030), and left through one `finish()` on every exit. |
 | `ReleaseManifest.java` | A thin holder over the Rust core's validation: a text is accepted exactly when `bleradar_core::update::ReleaseManifest::parse` accepts it (`NativeRadar.releaseManifestCanonical`), every field is read back through `NativeRadar.releaseManifestField`, and `serialize()` is the canonical form Rust emitted. Java parses nothing. |
 | `UpdateRetryReceiver.java`, `BootCompletedReceiver.java` | Retry-alarm and boot receivers that restart `UpdateCheckService` (as a retry, or to restore an in-flight download) so a deferred update survives idle periods and reboots. |
 
@@ -210,8 +210,11 @@ build also packages `src/main/assets/` (`aapt2 link -A`; no earlier APK
 carried the bundled `release_manifest.txt` — COR-029), `verify-android-live`
 requires both asset entries and runs lint's `NewApi` check (which found the
 API-33 `readAllBytes()` call on this minSdk-26 app — COR-028), and the
-committed APK is the #89 build (SHA-256 `db4fb288…61b8`, 406,094 bytes; the
-native library byte-identical to the #87 build).
+committed APK is the #90 build (SHA-256 `cbb68444…3bbb`, 406,094 bytes; the
+native library byte-identical to the #87 build). The SDK set that build uses
+is pinned once, in `xtask/src/main.rs` (`PINNED_*`), printed by
+`cargo xtask android-sdk-packages` for CI's `sdkmanager`, and preferred by
+xtask's discovery over any other version a machine carries (decision #90).
 
 Reproducibility, observed 2026-09-10 by rebuilding the then-committed APK on
 a different host (build-tools 37.0.0, NDK 27.3.13750724, platform

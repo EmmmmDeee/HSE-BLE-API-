@@ -86,6 +86,7 @@ fn main() -> ExitCode {
         "verify-jni-target" => cmd_verify_jni_target(),
         "prepare-bionic-sysroot" => cmd_prepare_bionic_sysroot(&rest),
         "verify-dashboard-live" => cmd_verify_dashboard_live(),
+        "android-sdk-packages" => cmd_android_sdk_packages(&rest),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -129,6 +130,7 @@ fn print_usage() {
          \x20 verify-jni-target          run the bleradar-jni test suite cross-compiled for aarch64-linux-android under qemu-aarch64 against a Bionic runtime\n\
          \x20 prepare-bionic-sysroot <dir>  extract the Bionic runtime (linker64 + libc/libm/libdl/libc++) from the installed android-24 arm64 system image into <dir>, for BIONIC_SYSROOT\n\
          \x20 verify-dashboard-live      render the web dashboard (assets/dashboard.html) in headless Chromium against a mock of the JSON contract and check the DOM\n\
+         \x20 android-sdk-packages [--system-image]  print the pinned sdkmanager package set the Android proofs are built with (CI installs exactly this)\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/jni-contract/test/doc/checks/audit/deny)"
@@ -1121,6 +1123,47 @@ const ANDROID_RUST_TARGET: &str = "aarch64-linux-android";
 /// Final signed APK's committed name at the repository root.
 const APK_OUTPUT_NAME: &str = "HSE-BLE-Radar-arm64-v1.0.0.apk";
 
+/// The Android SDK packages the Android proofs are built and executed with:
+/// the single authority `cargo xtask android-sdk-packages` prints for CI to
+/// install, and the versions discovery prefers when several are installed
+/// (a runner image ships others of its own, and picking "the highest"
+/// silently changed the toolchain a supposedly pinned build used).
+const PINNED_PLATFORM_API: u32 = 36;
+const PINNED_BUILD_TOOLS_VERSION: &str = "37.0.0";
+const PINNED_NDK_VERSION: &str = "27.3.13750724";
+/// The arm64 system image whose Bionic runtime the qemu proofs run against
+/// (`docs/ORACLE_DIFFERENTIAL.md` records its provenance); no other image is
+/// accepted, `BIONIC_SYSROOT` being the override.
+const PINNED_SYSTEM_IMAGE_API: u32 = 24;
+const PINNED_SYSTEM_IMAGE_TAG: &str = "default";
+
+/// The `sdkmanager` package identifiers of the pinned set: the build set
+/// (platform, build-tools, NDK), or the system image alone.
+fn android_sdk_packages(system_image: bool) -> Vec<String> {
+    if system_image {
+        vec![format!(
+            "system-images;android-{PINNED_SYSTEM_IMAGE_API};{PINNED_SYSTEM_IMAGE_TAG};arm64-v8a"
+        )]
+    } else {
+        vec![
+            format!("platforms;android-{PINNED_PLATFORM_API}"),
+            format!("build-tools;{PINNED_BUILD_TOOLS_VERSION}"),
+            format!("ndk;{PINNED_NDK_VERSION}"),
+        ]
+    }
+}
+
+/// Prints the pinned package set on one line, ready for `sdkmanager --install`.
+fn cmd_android_sdk_packages(args: &[String]) -> Result<(), String> {
+    let system_image = match args {
+        [] => false,
+        [flag] if flag == "--system-image" => true,
+        _ => return Err("usage: android-sdk-packages [--system-image]".to_string()),
+    };
+    println!("{}", android_sdk_packages(system_image).join(" "));
+    Ok(())
+}
+
 /// Alias/password for the ephemeral, non-secret signing identity this
 /// command generates if one is not already present. Deliberately mirrors
 /// the Android SDK's own long-standing, publicly documented
@@ -1712,28 +1755,48 @@ fn discover_sdk_root() -> Result<PathBuf, String> {
     )
 }
 
-/// Picks the highest-versioned `build-tools/<version>` directory that
-/// contains every tool this pipeline needs.
-fn discover_build_tools(sdk_root: &Path) -> Result<PathBuf, String> {
-    let build_tools_dir = sdk_root.join("build-tools");
-    pick_highest_version_dir(&build_tools_dir, |path| {
-        ["aapt2", "d8", "zipalign", "apksigner"]
-            .iter()
-            .all(|tool| path.join(tool).is_file())
-    })
-    .ok_or_else(|| {
-        format!(
-            "no build-tools/<version> under {} contains aapt2/d8/zipalign/apksigner",
-            build_tools_dir.display()
-        )
-    })
+/// Whether a `build-tools/<version>` directory holds every tool this pipeline needs.
+fn build_tools_complete(path: &Path) -> bool {
+    ["aapt2", "d8", "zipalign", "apksigner"]
+        .iter()
+        .all(|tool| path.join(tool).is_file())
 }
 
-/// Picks the highest plain `android-<N>/android.jar` (skips extension and
-/// preview variants like `android-34-ext8` or `android-37.2-beta1`, which
-/// use a different naming scheme and are not needed here).
+/// The pinned `build-tools/<PINNED_BUILD_TOOLS_VERSION>` when it is complete;
+/// otherwise the highest-versioned complete one, said out loud, since a
+/// runner image or developer machine may carry several.
+fn discover_build_tools(sdk_root: &Path) -> Result<PathBuf, String> {
+    let build_tools_dir = sdk_root.join("build-tools");
+    let pinned = build_tools_dir.join(PINNED_BUILD_TOOLS_VERSION);
+    if build_tools_complete(&pinned) {
+        return Ok(pinned);
+    }
+    let fallback = pick_highest_version_dir(&build_tools_dir, build_tools_complete).ok_or_else(|| {
+        format!(
+            "no build-tools/<version> under {} contains aapt2/d8/zipalign/apksigner (install the pinned set: sdkmanager {})",
+            build_tools_dir.display(),
+            android_sdk_packages(false).join(" ")
+        )
+    })?;
+    println!(
+        "build-tools {PINNED_BUILD_TOOLS_VERSION} not installed; using {} (unpinned)",
+        fallback.display()
+    );
+    Ok(fallback)
+}
+
+/// The pinned `platforms/android-<PINNED_PLATFORM_API>/android.jar` when
+/// installed; otherwise the highest plain `android-<N>/android.jar` (skipping
+/// extension and preview variants like `android-34-ext8` or
+/// `android-37.2-beta1`), said out loud.
 fn discover_platform_jar(sdk_root: &Path) -> Result<PathBuf, String> {
     let platforms_dir = sdk_root.join("platforms");
+    let pinned = platforms_dir
+        .join(format!("android-{PINNED_PLATFORM_API}"))
+        .join("android.jar");
+    if pinned.is_file() {
+        return Ok(pinned);
+    }
     let entries = fs::read_dir(&platforms_dir)
         .map_err(|e| format!("reading {}: {e}", platforms_dir.display()))?;
     let mut best: Option<(u64, PathBuf)> = None;
@@ -1760,17 +1823,22 @@ fn discover_platform_jar(sdk_root: &Path) -> Result<PathBuf, String> {
             best = Some((number, jar));
         }
     }
-    best.map(|(_, jar)| jar).ok_or_else(|| {
+    let jar = best.map(|(_, jar)| jar).ok_or_else(|| {
         format!(
-            "no platforms/android-<N>/android.jar found under {}",
-            platforms_dir.display()
+            "no platforms/android-<N>/android.jar found under {} (install the pinned set: sdkmanager {})",
+            platforms_dir.display(),
+            android_sdk_packages(false).join(" ")
         )
-    })
+    })?;
+    println!(
+        "platforms/android-{PINNED_PLATFORM_API} not installed; using {} (unpinned)",
+        jar.display()
+    );
+    Ok(jar)
 }
 
 /// Locates an installed Android NDK: `ANDROID_NDK_HOME`/`ANDROID_NDK_ROOT`
-/// if set to an existing directory, else the highest-versioned
-/// `<sdk>/ndk/<version>` directory with a usable host toolchain.
+/// if set to an existing directory, else [`discover_ndk_root_in`].
 fn discover_ndk_root(sdk_root: &Path) -> Result<PathBuf, String> {
     for var in ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"] {
         if let Ok(value) = env::var(var) {
@@ -1780,10 +1848,31 @@ fn discover_ndk_root(sdk_root: &Path) -> Result<PathBuf, String> {
             }
         }
     }
+    discover_ndk_root_in(sdk_root)
+}
+
+/// The pinned `<sdk>/ndk/<PINNED_NDK_VERSION>` when it has a usable host
+/// toolchain; otherwise the highest-versioned one that does, said out loud.
+fn discover_ndk_root_in(sdk_root: &Path) -> Result<PathBuf, String> {
     let ndk_dir = sdk_root.join("ndk");
     let host_bin_suffix = format!("toolchains/llvm/prebuilt/{}/bin", ndk_host_tag());
-    pick_highest_version_dir(&ndk_dir, |path| path.join(&host_bin_suffix).is_dir())
-        .ok_or_else(|| format!("no usable ndk/<version> found under {}", ndk_dir.display()))
+    let pinned = ndk_dir.join(PINNED_NDK_VERSION);
+    if pinned.join(&host_bin_suffix).is_dir() {
+        return Ok(pinned);
+    }
+    let fallback = pick_highest_version_dir(&ndk_dir, |path| path.join(&host_bin_suffix).is_dir())
+        .ok_or_else(|| {
+            format!(
+                "no usable ndk/<version> found under {} (install the pinned set: sdkmanager {})",
+                ndk_dir.display(),
+                android_sdk_packages(false).join(" ")
+            )
+        })?;
+    println!(
+        "ndk/{PINNED_NDK_VERSION} not installed; using {} (unpinned)",
+        fallback.display()
+    );
+    Ok(fallback)
 }
 
 /// Extracts the first `prefix"..."` quoted value's inner text, e.g. calling
@@ -2516,6 +2605,7 @@ fn cmd_oracle_differential() -> Result<(), String> {
 /// `gates`; CI's `android-apk` job runs it with a cached sysroot.
 fn cmd_verify_jni_target() -> Result<(), String> {
     let root = repo_root()?;
+    ensure_rustup_target_installed(&root, ANDROID_RUST_TARGET)?;
     let sdk = discover_sdk_root()?;
     let ndk = discover_ndk_root(&sdk)?;
     let clang = ndk_aarch64_clang(&ndk)?;
@@ -2899,31 +2989,23 @@ fn extract_bionic_sysroot(sdk_root: &Path, sysroot: &Path) -> Result<(), String>
     Ok(())
 }
 
-/// Finds an installed `system-images/<api>/<tag>/arm64-v8a/system.img`.
+/// The pinned `system-images/android-<API>/<tag>/arm64-v8a/system.img`. The
+/// runtime's provenance is part of every qemu proof's evidence, so another
+/// installed image is never substituted (the first one found used to be).
 fn discover_arm64_system_image(sdk_root: &Path) -> Result<PathBuf, String> {
-    let base = sdk_root.join("system-images");
-    let apis = fs::read_dir(&base).map_err(|e| {
-        format!(
-            "no arm64 system image under {} ({e}); install one with \
-             sdkmanager \"system-images;android-24;default;arm64-v8a\" or set BIONIC_SYSROOT",
-            base.display()
-        )
-    })?;
-    for api in apis.flatten() {
-        let Ok(tags) = fs::read_dir(api.path()) else {
-            continue;
-        };
-        for tag in tags.flatten() {
-            let image = tag.path().join("arm64-v8a").join("system.img");
-            if image.is_file() {
-                return Ok(image);
-            }
-        }
+    let image = sdk_root
+        .join("system-images")
+        .join(format!("android-{PINNED_SYSTEM_IMAGE_API}"))
+        .join(PINNED_SYSTEM_IMAGE_TAG)
+        .join("arm64-v8a")
+        .join("system.img");
+    if image.is_file() {
+        return Ok(image);
     }
     Err(format!(
-        "no arm64-v8a/system.img under {}; install one with \
-         sdkmanager \"system-images;android-24;default;arm64-v8a\" or set BIONIC_SYSROOT",
-        base.display()
+        "pinned system image missing at {}; install it with sdkmanager \"{}\" or set BIONIC_SYSROOT",
+        image.display(),
+        android_sdk_packages(true)[0]
     ))
 }
 
@@ -3115,6 +3197,118 @@ fn cmd_gates() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sdk_fixture(label: &str) -> PathBuf {
+        let root = env::temp_dir().join(format!("xtask-sdk-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn touch_all(dir: &Path, files: &[&str]) {
+        fs::create_dir_all(dir).unwrap();
+        for file in files {
+            fs::write(dir.join(file), b"").unwrap();
+        }
+    }
+
+    #[test]
+    fn android_sdk_packages_prints_the_pinned_set() {
+        assert_eq!(
+            android_sdk_packages(false),
+            vec![
+                "platforms;android-36",
+                "build-tools;37.0.0",
+                "ndk;27.3.13750724"
+            ]
+        );
+        assert_eq!(
+            android_sdk_packages(true),
+            vec!["system-images;android-24;default;arm64-v8a"]
+        );
+    }
+
+    #[test]
+    fn sdk_discovery_prefers_the_pinned_versions_and_falls_back_to_the_highest() {
+        let sdk = sdk_fixture("discovery");
+        let tools = ["aapt2", "d8", "zipalign", "apksigner"];
+        assert!(
+            discover_build_tools(&sdk)
+                .unwrap_err()
+                .contains("build-tools;37.0.0")
+        );
+        touch_all(&sdk.join("build-tools/38.0.0"), &tools);
+        touch_all(&sdk.join("build-tools/39.0.0"), &["aapt2"]); // incomplete: never chosen
+        assert_eq!(
+            discover_build_tools(&sdk).unwrap(),
+            sdk.join("build-tools/38.0.0")
+        );
+        touch_all(
+            &sdk.join("build-tools").join(PINNED_BUILD_TOOLS_VERSION),
+            &tools,
+        );
+        assert_eq!(
+            discover_build_tools(&sdk).unwrap(),
+            sdk.join("build-tools").join(PINNED_BUILD_TOOLS_VERSION)
+        );
+
+        touch_all(&sdk.join("platforms/android-37"), &["android.jar"]);
+        touch_all(&sdk.join("platforms/android-37-ext1"), &["android.jar"]);
+        assert_eq!(
+            discover_platform_jar(&sdk).unwrap(),
+            sdk.join("platforms/android-37/android.jar")
+        );
+        touch_all(
+            &sdk.join(format!("platforms/android-{PINNED_PLATFORM_API}")),
+            &["android.jar"],
+        );
+        assert_eq!(
+            discover_platform_jar(&sdk).unwrap(),
+            sdk.join(format!(
+                "platforms/android-{PINNED_PLATFORM_API}/android.jar"
+            ))
+        );
+
+        let host_bin = format!("toolchains/llvm/prebuilt/{}/bin", ndk_host_tag());
+        assert!(
+            discover_ndk_root_in(&sdk)
+                .unwrap_err()
+                .contains("ndk;27.3.13750724")
+        );
+        touch_all(&sdk.join("ndk/28.0.0").join(&host_bin), &[]);
+        assert_eq!(discover_ndk_root_in(&sdk).unwrap(), sdk.join("ndk/28.0.0"));
+        touch_all(
+            &sdk.join("ndk").join(PINNED_NDK_VERSION).join(&host_bin),
+            &[],
+        );
+        assert_eq!(
+            discover_ndk_root_in(&sdk).unwrap(),
+            sdk.join("ndk").join(PINNED_NDK_VERSION)
+        );
+
+        assert!(
+            discover_arm64_system_image(&sdk)
+                .unwrap_err()
+                .contains("system-images;android-24;default;arm64-v8a")
+        );
+        touch_all(
+            &sdk.join("system-images/android-30/google_apis/arm64-v8a"),
+            &["system.img"],
+        );
+        assert!(
+            discover_arm64_system_image(&sdk).is_err(),
+            "only the pinned image is accepted"
+        );
+        touch_all(
+            &sdk.join("system-images/android-24/default/arm64-v8a"),
+            &["system.img"],
+        );
+        assert_eq!(
+            discover_arm64_system_image(&sdk).unwrap(),
+            sdk.join("system-images/android-24/default/arm64-v8a/system.img")
+        );
+        let _ = fs::remove_dir_all(&sdk);
+    }
 
     #[test]
     fn find_prefixed_runs_captures_the_run_after_a_single_prefix() {

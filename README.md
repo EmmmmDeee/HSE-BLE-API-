@@ -274,8 +274,10 @@ single local gate runner:
 cargo xtask gates
 ```
 
-These same gates run on every push and pull request via
-`.github/workflows/gates.yml`, followed by the live JVM → JNI → Rust proof
+These same gates run on every pull request and on every push to `main` via
+`.github/workflows/gates.yml` (the workflow's `push` trigger is limited to
+`main`; feature branches are covered through their pull requests), followed
+by the live JVM → JNI → Rust proof
 (`cargo xtask verify-jni-live`) on a pinned Temurin 21 JDK; the workflow pins
 `cargo-audit`/`cargo-deny` to exact versions and caches their binaries, so a
 run is reproducible and does not rebuild them from source every time.
@@ -297,7 +299,7 @@ path (wrong library path yields `UnsatisfiedLinkError`) and the success path
 (library loads, ABI version matches, every declared native is resolved and
 invoked by the JVM through reflection with the count cross-checked against
 the Java source, and JNI calls — Java strings included — return the expected
-values). CI runs it on every push and pull request.
+values). CI runs it on every pull request and every push to `main`.
 
 ```sh
 cargo xtask verify-jni-target
@@ -312,7 +314,9 @@ the shipped `libbleradar_jni.so` runs on, rather than the x86_64 host the JVM
 proof uses. It needs `qemu-user-static`, `debugfs` (e2fsprogs) and the system
 image, or a prepared runtime via `BIONIC_SYSROOT` (`cargo xtask
 prepare-bionic-sysroot <dir>` extracts one, about 3 MB, which is what CI
-caches). CI's `android-apk` job runs it on every push and pull request.
+caches). It needs the `aarch64-linux-android` Rust target, which the command
+installs through `rustup` when missing, exactly as `build-apk` does. CI's
+`android-apk` job runs it on every pull request and every push to `main`.
 
 ## Strongest current Android live proof
 
@@ -358,7 +362,7 @@ mock's keys and cover every property the page reads (the same check runs as
 an xtask unit test inside `gates`). It needs a Chromium/Chrome binary
 (`BLERADAR_CHROMIUM=<path>`, one of `chromium`/`chromium-browser`/`google-chrome`
 on `PATH`, or Playwright's browser cache); CI's `web-dashboard` job runs it
-on every push and pull request.
+on every pull request and every push to `main`.
 
 ## Parity report
 

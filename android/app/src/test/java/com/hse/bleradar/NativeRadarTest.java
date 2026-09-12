@@ -15,9 +15,12 @@ public class NativeRadarTest {
     @Test
     public void expected_abi_version_is_defined() {
         // NativeRadar expects a specific ABI version from the native library
-        // This prevents crashes from ABI mismatches between Java and Rust
+        // This prevents crashes from ABI mismatches between Java and Rust.
+        // The authoritative check is `cargo xtask verify-jni-live`, which
+        // compares this constant with the library's abiVersion() in a real
+        // JVM; this note tracks it (ABI 10 since decision #87).
         int expectedVersion = NativeRadar.EXPECTED_ABI_VERSION;
-        assertEquals("Expected ABI version should be 8", 8, expectedVersion);
+        assertEquals("Expected ABI version should be 10", 10, expectedVersion);
     }
 
     @Test

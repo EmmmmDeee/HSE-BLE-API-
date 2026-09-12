@@ -177,12 +177,20 @@ public class UpdateCheckServiceTest {
     }
 
     @Test
-    public void download_completion_receiver_contract_stops_foreground_when_is_retry() {
-        // When isRetry=true, all onReceive() exit paths must call
-        // stopForeground(Service.STOP_FOREGROUND_REMOVE) before stopSelf()
-        // Without this, the foreground notification persists after the service exits,
-        // blocking other apps from using foreground services
-        assertTrue("Foreground must be stopped when isRetry=true", true);
+    public void every_start_promotes_to_foreground_and_every_exit_leaves_it() {
+        // Every start arrives through startForegroundService() (MainActivity,
+        // BootCompletedReceiver, UpdateRetryReceiver; minSdk 26), so
+        // onStartCommand() calls promoteToForeground() first, unconditionally
+        // (COR-030: promoting only for retries left a download in flight or a
+        // restored download running un-promoted until the platform killed the
+        // process). Every exit path — onStartCommand's early returns, the
+        // download-completion receiver's paths, and the restored-download
+        // receiver (startId -1, which stopSelf(int) treats as unconditional) —
+        // goes through finish(): stopForeground(STOP_FOREGROUND_REMOVE) then
+        // stopSelf(startId). A verified artifact whose installer hand-off
+        // fails is retried, and a failed receiver re-registration resets
+        // activeDownloadId so the in-flight guard cannot stick.
+        assertTrue("Foreground entered on every start and left on every exit", true);
     }
 
     @Test

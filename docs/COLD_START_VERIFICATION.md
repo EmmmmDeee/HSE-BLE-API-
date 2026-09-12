@@ -28,7 +28,7 @@ workspace and are intentionally not re-asserted as a fixed number here (that
 would itself drift silently); the authoritative count on any given commit is
 whatever `cargo test --workspace --locked` and
 `cargo test --manifest-path xtask/Cargo.toml --locked` report, re-proven on
-every push and pull request by `.github/workflows/gates.yml`'s
+every pull request and every push to `main` by `.github/workflows/gates.yml`'s
 `cargo xtask gates`, which runs both plus the parity-report drift check.
 
 `cargo audit` and `cargo deny` now run fully offline against the vendored
@@ -78,7 +78,9 @@ on this host from the decision #86 sources (exit 0; APK SHA-256
 `3e3670fb…daa64`; the `android-apk` CI job now repeats this build on every
 push and pull request), and once more from the decision #89 sources (exit 0
 in 12 s warm; APK SHA-256 `db4fb288…61b8`, 406,094 bytes, the first build to
-carry `assets/`):
+carry `assets/`), then from the decision #90 sources (exit 0; APK SHA-256
+`cbb68444…3bbb`, 406,094 bytes; `classes.dex` 64,592 bytes; the pinned SDK
+set chosen by xtask's discovery without a fallback notice):
 
 | Check | Outcome |
 |---|---|
