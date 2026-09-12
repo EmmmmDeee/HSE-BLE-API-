@@ -1,19 +1,347 @@
 //! Regression tests for the JNI-facing ordinal/sentinel encodings that
-//! `android/app/src/main/java/com/hse/bleradar/NativeRadar.java` depends on.
+//! `android/app/src/main/java/com/hse/bleradar/NativeRadar.java` depends on,
+//! and for the string bridge (driven through the mock JNI function table in
+//! `common/mod.rs`; `cargo xtask verify-jni-live` drives it through a real JVM).
 
+mod common;
+
+use std::io::Cursor;
+
+use bleradar_core::ReleaseManifest;
 use bleradar_jni::{
-    TrackingSnapshotJniInput, ble_distance_m_or_nan, calibration_profile_path_loss_exponent_or_nan,
-    calibration_profile_rssi_at_1m_dbm_or_nan, default_calibration_profile_ordinal,
-    default_tracking_profile_ordinal, device_rank_key, device_should_prune,
-    distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan, download_readiness_ordinal,
-    filtered_rssi_or_nan, proximity_label_ordinal, retry_backoff_delay_secs,
-    should_check_for_update_flag, signal_confidence_percent_or_negative, signal_trend_ordinal,
-    tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
-    tracking_distance_m_or_nan, tracking_distance_proximity_ordinal,
-    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
-    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
-    update_decision_ordinal,
+    ARTIFACT_HASH_MISMATCH, ARTIFACT_MANIFEST_INVALID, ARTIFACT_SIZE_MISMATCH, ARTIFACT_UNREADABLE,
+    ARTIFACT_VERIFIED, Java_com_hse_bleradar_NativeRadar_artifactVerifyFile,
+    Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical,
+    Java_com_hse_bleradar_NativeRadar_releaseManifestError,
+    Java_com_hse_bleradar_NativeRadar_releaseManifestField, MANIFEST_FIELD_MANDATORY,
+    MANIFEST_FIELD_MIN_SDK, MANIFEST_FIELD_NOTES, MANIFEST_FIELD_SHA256, MANIFEST_FIELD_SIZE_BYTES,
+    MANIFEST_FIELD_URL, MANIFEST_FIELD_VERSION_CODE, MANIFEST_FIELD_VERSION_NAME,
+    TrackingSnapshotJniInput, artifact_verify_file, artifact_verify_reader, ble_distance_m_or_nan,
+    calibration_profile_path_loss_exponent_or_nan, calibration_profile_rssi_at_1m_dbm_or_nan,
+    default_calibration_profile_ordinal, default_tracking_profile_ordinal, device_rank_key,
+    device_should_prune, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
+    download_readiness_ordinal, filtered_rssi_or_nan, proximity_label_ordinal,
+    release_manifest_canonical, release_manifest_error, release_manifest_field,
+    retry_backoff_delay_secs, should_check_for_update_flag, signal_confidence_percent_or_negative,
+    signal_trend_ordinal, tracking_confidence_percent_or_negative,
+    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
+    tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
+    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
+    tracking_trend_ordinal, update_decision_ordinal,
 };
+
+use common::MockEnv;
+
+/// SHA-256 of the five bytes `hello` (the core's own documented example).
+const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+const NOTES: &str = "Ünïcødé ✓ 😀 #123";
+
+fn hello_manifest() -> String {
+    format!(
+        "version_code = 2\nversion_name = 0.2\nurl = https://e/x.apk\nsize_bytes = 5\n\
+         sha256 = {}\nmin_sdk = 21\nmandatory = false\nnotes = {NOTES}\n",
+        HELLO_SHA256.to_uppercase()
+    )
+}
+
+/// A temporary file holding `bytes`, removed when dropped.
+struct TempArtifact(std::path::PathBuf);
+
+impl TempArtifact {
+    fn new(name: &str, bytes: &[u8]) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("bleradar-jni-{}-{name}.bin", std::process::id()));
+        std::fs::write(&path, bytes).expect("write temp artifact");
+        Self(path)
+    }
+
+    fn path(&self) -> String {
+        self.0.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for TempArtifact {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn release_manifest_canonical_is_the_core_serialization_and_a_fixed_point() {
+    let text = hello_manifest();
+    let canonical = release_manifest_canonical(&text).expect("valid manifest");
+    let core = ReleaseManifest::parse(&text).expect("core accepts it");
+    assert_eq!(canonical, core.serialize());
+    // The uppercase hash is normalized, and the canonical form re-canonicalizes to itself.
+    assert!(canonical.contains(&format!("sha256 = {HELLO_SHA256}\n")));
+    assert_eq!(
+        release_manifest_canonical(&canonical).as_deref(),
+        Some(canonical.as_str())
+    );
+    assert_eq!(
+        ReleaseManifest::parse(&canonical).expect("round trip"),
+        core
+    );
+    assert_eq!(release_manifest_error(&text), None);
+}
+
+#[test]
+fn release_manifest_error_is_the_complement_of_canonical_and_names_the_cause() {
+    let insecure = hello_manifest().replace("https://", "http://");
+    assert_eq!(release_manifest_canonical(&insecure), None);
+    let error = release_manifest_error(&insecure).expect("rejected");
+    assert!(error.contains("https"), "{error}");
+    let missing = hello_manifest().replace("min_sdk = 21\n", "");
+    assert_eq!(release_manifest_canonical(&missing), None);
+    assert!(
+        release_manifest_error(&missing)
+            .expect("rejected")
+            .contains("min_sdk")
+    );
+    // The Java parser this replaced tolerated all of these; the core does not.
+    for (label, text) in [
+        ("unknown field", hello_manifest() + "author = someone\n"),
+        (
+            "malformed line",
+            hello_manifest() + "garbage without equals\n",
+        ),
+        ("duplicate field", hello_manifest() + "min_sdk = 21\n"),
+        (
+            "empty version name",
+            hello_manifest().replace("version_name = 0.2", "version_name ="),
+        ),
+        (
+            "invalid mandatory",
+            hello_manifest().replace("mandatory = false", "mandatory = maybe"),
+        ),
+        (
+            "zero size",
+            hello_manifest().replace("size_bytes = 5", "size_bytes = 0"),
+        ),
+        ("empty text", String::new()),
+    ] {
+        assert_eq!(release_manifest_canonical(&text), None, "{label}");
+        assert!(release_manifest_error(&text).is_some(), "{label}");
+    }
+}
+
+#[test]
+fn release_manifest_field_renders_every_field_and_rejects_unknown_selectors() {
+    let text = hello_manifest();
+    let field = |selector| release_manifest_field(&text, selector);
+    assert_eq!(field(MANIFEST_FIELD_VERSION_CODE).as_deref(), Some("2"));
+    assert_eq!(field(MANIFEST_FIELD_VERSION_NAME).as_deref(), Some("0.2"));
+    assert_eq!(
+        field(MANIFEST_FIELD_URL).as_deref(),
+        Some("https://e/x.apk")
+    );
+    assert_eq!(field(MANIFEST_FIELD_SIZE_BYTES).as_deref(), Some("5"));
+    assert_eq!(field(MANIFEST_FIELD_SHA256).as_deref(), Some(HELLO_SHA256));
+    assert_eq!(field(MANIFEST_FIELD_MIN_SDK).as_deref(), Some("21"));
+    assert_eq!(field(MANIFEST_FIELD_MANDATORY).as_deref(), Some("false"));
+    assert_eq!(field(MANIFEST_FIELD_NOTES).as_deref(), Some(NOTES));
+    assert_eq!(field(-1), None);
+    assert_eq!(field(8), None);
+    assert_eq!(field(i32::MAX), None);
+    assert_eq!(
+        release_manifest_field("not a manifest", MANIFEST_FIELD_URL),
+        None
+    );
+    // Every rendered field is exactly what the canonical form carries.
+    let canonical = release_manifest_canonical(&text).unwrap();
+    for (selector, key) in [
+        (MANIFEST_FIELD_VERSION_CODE, "version_code"),
+        (MANIFEST_FIELD_VERSION_NAME, "version_name"),
+        (MANIFEST_FIELD_URL, "url"),
+        (MANIFEST_FIELD_SIZE_BYTES, "size_bytes"),
+        (MANIFEST_FIELD_SHA256, "sha256"),
+        (MANIFEST_FIELD_MIN_SDK, "min_sdk"),
+        (MANIFEST_FIELD_MANDATORY, "mandatory"),
+        (MANIFEST_FIELD_NOTES, "notes"),
+    ] {
+        assert!(canonical.contains(&format!("{key} = {}\n", field(selector).unwrap())));
+    }
+}
+
+#[test]
+fn artifact_verify_reader_maps_every_outcome_to_its_ordinal() {
+    let manifest = ReleaseManifest::parse(&hello_manifest()).unwrap();
+    let verify = |bytes: &[u8]| artifact_verify_reader(Cursor::new(bytes.to_vec()), &manifest);
+    assert_eq!(verify(b"hello"), ARTIFACT_VERIFIED);
+    assert_eq!(verify(b"hellp"), ARTIFACT_HASH_MISMATCH);
+    assert_eq!(verify(b"hell"), ARTIFACT_SIZE_MISMATCH);
+    assert_eq!(verify(b"hello!"), ARTIFACT_SIZE_MISMATCH);
+    assert_eq!(verify(b""), ARTIFACT_SIZE_MISMATCH);
+    // A stream that fails mid-way is unreadable, not a mismatch.
+    struct Failing;
+    impl std::io::Read for Failing {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk gone"))
+        }
+    }
+    assert_eq!(
+        artifact_verify_reader(Failing, &manifest),
+        ARTIFACT_UNREADABLE
+    );
+}
+
+#[test]
+fn artifact_verify_file_reads_the_file_and_checks_the_manifest_first() {
+    let manifest = hello_manifest();
+    let good = TempArtifact::new("good", b"hello");
+    assert_eq!(
+        artifact_verify_file(&good.path(), &manifest),
+        ARTIFACT_VERIFIED
+    );
+    let corrupt = TempArtifact::new("corrupt", b"hellp");
+    assert_eq!(
+        artifact_verify_file(&corrupt.path(), &manifest),
+        ARTIFACT_HASH_MISMATCH
+    );
+    let missing = format!("{}.missing", good.path());
+    assert_eq!(
+        artifact_verify_file(&missing, &manifest),
+        ARTIFACT_UNREADABLE
+    );
+    let insecure = manifest.replace("https://", "http://");
+    assert_eq!(
+        artifact_verify_file(&good.path(), &insecure),
+        ARTIFACT_MANIFEST_INVALID
+    );
+    assert_eq!(
+        artifact_verify_file(&missing, &insecure),
+        ARTIFACT_MANIFEST_INVALID
+    );
+}
+
+#[test]
+fn string_exports_round_trip_through_a_jni_function_table() {
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let text = hello_manifest();
+    let jtext = mock.string(&text);
+    let canonical = mock.read(Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(
+        env,
+        core::ptr::null_mut(),
+        jtext,
+    ));
+    assert_eq!(canonical, release_manifest_canonical(&text));
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_releaseManifestError(env, core::ptr::null_mut(), jtext)
+            .is_null()
+    );
+    // A supplementary-plane character survives both UTF-16 crossings intact.
+    let notes = mock.read(Java_com_hse_bleradar_NativeRadar_releaseManifestField(
+        env,
+        core::ptr::null_mut(),
+        jtext,
+        MANIFEST_FIELD_NOTES,
+    ));
+    assert_eq!(notes.as_deref(), Some(NOTES));
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_releaseManifestField(
+            env,
+            core::ptr::null_mut(),
+            jtext,
+            8
+        )
+        .is_null()
+    );
+    let insecure = mock.string(&text.replace("https://", "http://"));
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(
+            env,
+            core::ptr::null_mut(),
+            insecure
+        )
+        .is_null()
+    );
+    let error = mock.read(Java_com_hse_bleradar_NativeRadar_releaseManifestError(
+        env,
+        core::ptr::null_mut(),
+        insecure,
+    ));
+    assert!(error.unwrap().contains("https"));
+    // An unpaired surrogate is not Unicode: the bridge treats it as invalid input.
+    let lone = mock.string_units(&[0xD83Du16]);
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(
+            env,
+            core::ptr::null_mut(),
+            lone
+        )
+        .is_null()
+    );
+    let empty = mock.string("");
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(
+            env,
+            core::ptr::null_mut(),
+            empty
+        )
+        .is_null()
+    );
+    assert!(
+        mock.read(Java_com_hse_bleradar_NativeRadar_releaseManifestError(
+            env,
+            core::ptr::null_mut(),
+            empty
+        ))
+        .is_some()
+    );
+}
+
+#[test]
+fn string_exports_answer_null_inputs_with_sentinels() {
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let jtext = mock.string(&hello_manifest());
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(null, null, jtext).is_null()
+    );
+    assert!(Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(env, null, null).is_null());
+    assert!(Java_com_hse_bleradar_NativeRadar_releaseManifestError(null, null, jtext).is_null());
+    assert!(Java_com_hse_bleradar_NativeRadar_releaseManifestError(env, null, null).is_null());
+    assert!(Java_com_hse_bleradar_NativeRadar_releaseManifestField(null, null, jtext, 0).is_null());
+    assert!(Java_com_hse_bleradar_NativeRadar_releaseManifestField(env, null, null, 0).is_null());
+    assert_eq!(
+        Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(null, null, jtext, jtext),
+        ARTIFACT_MANIFEST_INVALID
+    );
+    assert_eq!(
+        Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(env, null, jtext, null),
+        ARTIFACT_MANIFEST_INVALID
+    );
+    assert_eq!(
+        Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(env, null, null, jtext),
+        ARTIFACT_UNREADABLE
+    );
+}
+
+#[test]
+fn artifact_verify_file_export_streams_a_real_file_through_the_verifier() {
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let manifest = mock.string(&hello_manifest());
+    let good = TempArtifact::new("export-good", b"hello");
+    let path = mock.string(&good.path());
+    assert_eq!(
+        Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(env, null, path, manifest),
+        ARTIFACT_VERIFIED
+    );
+    std::fs::write(&good.0, b"hellp").unwrap();
+    assert_eq!(
+        Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(env, null, path, manifest),
+        ARTIFACT_HASH_MISMATCH
+    );
+    std::fs::write(&good.0, b"hello, world").unwrap();
+    assert_eq!(
+        Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(env, null, path, manifest),
+        ARTIFACT_SIZE_MISMATCH
+    );
+}
 
 #[test]
 fn distance_matches_reference_at_one_metre() {

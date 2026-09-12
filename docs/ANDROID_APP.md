@@ -29,15 +29,15 @@ retroactively rather than in the append-only log's 2026-09-09 entries.
 
 | Source | Role |
 |---|---|
-| `NativeRadar.java` | The only JNI façade: `static native` declarations, ordinal/sentinel constants, `EXPECTED_ABI_VERSION`, and a never-throwing `ensureLoaded()`. It is the single authority for the export contract enforced by `cargo xtask check-jni-contract`. |
+| `NativeRadar.java` | The only JNI façade: `static native` declarations, ordinal/sentinel constants, `EXPECTED_ABI_VERSION`, and a never-throwing `ensureLoaded()`. It is the single authority for the export contract enforced by `cargo xtask check-jni-contract`. Since ABI 10 it also declares the four string-taking natives of the release-manifest / artifact surface, which the Rust side reads through the audited `crates/bleradar-jni/src/env.rs`. |
 | `BleScanEngine.java` | Owns the `BluetoothLeScanner` session and the address-keyed `Blip` map; feeds every scan result through the `tracking*` natives; drops devices by the Rust `deviceShouldPrune` policy and ranks snapshots by the Rust `deviceRankKey` (sampled once per device, so the sort never races the scan callback). |
 | `Blip.java` | One tracked device: last filtered RSSI, distance and bounds, proximity, trend, freshness, confidence, retained TX power, an 8-sample filtered-RSSI window for spread, and a stable per-address display angle (RSSI carries no bearing). |
 | `RadarScanService.java` | Foreground service (`connectedDevice` type) that owns the single engine so scanning survives activity recreation; posts the oracle's own "BLE Radar is scanning" notification copy. |
 | `MainActivity.java` | Binds to the service, requests permissions, renders the status line, toggle button, radar view, and device list on a 400 ms timer; UI built from `android.widget` views in code. |
 | `RadarView.java` | Pure rendering of the snapshot: range rings with distance labels, a rotating sweep, and blips colour-coded by `NativeRadar.PROXIMITY_*` and faded by age; it draws every device the engine's Rust policy kept and applies no timeout of its own. |
 | `ApiHttpServer.java` | Loopback-only (`127.0.0.1:8080`) HTTP/1.1 responder over `java.net.ServerSocket` (Android ships no `com.sun.net.httpserver`) serving the ranked snapshot as JSON (`/api/devices`, `/api/status`, `/api/updates`) for a web UI or Termux tooling on the same device; started and stopped with `RadarScanService`. |
-| `UpdateCheckService.java` | The automatic-update orchestration (`docs/AUTO_UPDATE.md`): throttle → bundled manifest → `NativeRadar.updateDecision` → real network/battery/storage conditions → `NativeRadar.downloadReadiness` → `DownloadManager` → SHA-256 verification → system installer via the DownloadManager `content://` URI; retries paced by `NativeRadar.retryBackoffDelaySeconds`; a `dataSync` foreground service when started from a retry alarm. |
-| `ReleaseManifest.java` | Strict parser for the line-oriented release manifest (`version_code`, HTTPS `url`, `size_bytes`, 64-hex `sha256`, `min_sdk`, `mandatory`). |
+| `UpdateCheckService.java` | The automatic-update orchestration (`docs/AUTO_UPDATE.md`): throttle → bundled manifest → `NativeRadar.updateDecision` → real network/battery/storage conditions → `NativeRadar.downloadReadiness` → `DownloadManager` → `NativeRadar.artifactVerifyFile` (the Rust `ArtifactVerifier`, streamed over the file) → system installer via the DownloadManager `content://` URI; retries paced by `NativeRadar.retryBackoffDelaySeconds`; a `dataSync` foreground service when started from a retry alarm. |
+| `ReleaseManifest.java` | A thin holder over the Rust core's validation: a text is accepted exactly when `bleradar_core::update::ReleaseManifest::parse` accepts it (`NativeRadar.releaseManifestCanonical`), every field is read back through `NativeRadar.releaseManifestField`, and `serialize()` is the canonical form Rust emitted. Java parses nothing. |
 | `UpdateRetryReceiver.java`, `BootCompletedReceiver.java` | Retry-alarm and boot receivers that restart `UpdateCheckService` (as a retry, or to restore an in-flight download) so a deferred update survives idle periods and reboots. |
 
 ## Why there is no Gradle project, AndroidX, or Compose
@@ -185,7 +185,7 @@ authority.
 | Proof | Command | Needs | Runs in CI |
 |---|---|---|---|
 | Java façade ↔ Rust exports match 1:1 (no missing, no orphan) | `cargo xtask check-jni-contract [lib.so]` (also inside `cargo xtask gates`) | pinned toolchain; an ELF64 little-endian library (host Linux build or the Android cross-compile) | yes (`gates`) |
-| Real JVM loads the host library, links every declared native, checks `abiVersion`, and exercises the tracking surface | `cargo xtask verify-jni-live` | a JDK (`javac`/`java`) | yes |
+| Real JVM loads the host library, links every declared native, checks `abiVersion`, verifies the string bridge's function-table slots against the JDK's `jni.h`, and exercises the tracking, update-decision, device-map and manifest/artifact surfaces (Java strings included) | `cargo xtask verify-jni-live` | a JDK (`javac`/`java`, with `include/jni.h`) | yes |
 | Cross-compile, package, sign, and inspect the APK (entries, DEX classes, exports) | `cargo xtask build-apk`, `cargo xtask verify-android-live` | Android SDK build-tools, platform `android.jar`, NDK, JDK | yes (`android-apk` job installs the pinned platform, build-tools and NDK) |
 | Install, scan, and differential comparison against the oracle on a device | — | an ARM64 Android/Bionic device or emulator, and the original signing key for update identity | no (MIG-003, EXT-006) |
 
@@ -196,8 +196,10 @@ that last changed the Android sources or the JNI crate; the export contract
 of its `lib/arm64-v8a/libbleradar_jni.so` was re-verified against
 `NativeRadar.java` on 2026-09-11 (25 natives ↔ 25 exports, after the
 automatic-update decision surface was added — decision #81) and on
-2026-09-12 (27 ↔ 27, after the device-map policy surface was added —
-decision #86). Since decision #86 the `android-apk` CI job rebuilds the
+2026-09-12 (27 ↔ 27 after the device-map policy surface was added —
+decision #86 — then 31 ↔ 31 after the string bridge and the
+manifest/artifact surface — decision #87). Since decision #86 the
+`android-apk` CI job rebuilds the
 package from every push, so Java that does not compile against the real
 `android.jar` can no longer reach `main` unnoticed.
 

@@ -23,16 +23,20 @@
 //!
 //! # Why `unsafe_code` is allowed here (and nowhere else in the workspace)
 //!
-//! Every exported function below ignores its `env`/`class` parameters
-//! entirely — it never dereferences them — so no pointer is ever read
-//! through unchecked Rust code. The only reason this crate cannot keep the
-//! workspace-wide `unsafe_code = "forbid"` lint is that Rust's 2024-edition
-//! "unsafe attributes" lint classifies the `#[unsafe(no_mangle)]` attribute
-//! itself (needed to export a stable, unmangled C-ABI symbol name that the
-//! JVM's dynamic linker can resolve by its `Java_...` convention) as unsafe
-//! code, regardless of what the function body does. `crates/bleradar-jni/Cargo.toml`
-//! documents this narrowing; see `docs/AUTONOMOUS_DECISIONS.md` for the
-//! decision record.
+//! Every export over primitives ignores its `env`/`class` parameters
+//! entirely — it never dereferences them — so for the whole signal, tracking,
+//! update-decision and device-map surface no pointer is ever read through
+//! unchecked Rust code; those functions need `unsafe_code` only because
+//! Rust's 2024-edition "unsafe attributes" lint classifies the
+//! `#[unsafe(no_mangle)]` attribute itself (needed to export a stable,
+//! unmangled C-ABI symbol name that the JVM's dynamic linker can resolve by
+//! its `Java_...` convention) as unsafe code. The four string-taking exports
+//! of the release-manifest / artifact surface are the one exception: they
+//! read through `env`, and only through the audited [`env`](mod@env) module, which
+//! calls exactly four specification-fixed slots of the JNI function table to
+//! copy a `jstring` in and a result out. `crates/bleradar-jni/Cargo.toml`
+//! documents this narrowing; see `docs/AUTONOMOUS_DECISIONS.md` (#54, #87)
+//! for the decision records.
 //!
 //! # ABI stability
 //!
@@ -42,20 +46,28 @@
 //! or silently misinterpret return values (sentinel/ordinal drift), so keep
 //! them in lockstep.
 
+use std::io::{ErrorKind, Read};
+
 use bleradar_core::{
-    CalibrationProfile, DownloadConditions, DownloadPolicy, DownloadReadiness, FreshnessClass,
-    NetworkType, ProximityBand, RetryPolicy, SignalTrend, TrackingProfile, TrackingSnapshot,
-    TrackingSnapshotInput, ble_distance_m, ble_distance_range_m, calibration_profile,
-    calibration_profile_from_ordinal, download_readiness, filtered_rssi, proximity_label,
-    should_check_for_update, signal_confidence_percent, signal_trend,
-    tracking_profile_from_ordinal, tracking_snapshot, update_decision,
+    ArtifactVerifier, CalibrationProfile, DownloadConditions, DownloadPolicy, DownloadReadiness,
+    FreshnessClass, NetworkType, ProximityBand, ReleaseManifest, RetryPolicy, SignalTrend,
+    TrackingProfile, TrackingSnapshot, TrackingSnapshotInput, UpdateError, ble_distance_m,
+    ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
+    download_readiness, filtered_rssi, hex_encode, proximity_label, should_check_for_update,
+    signal_confidence_percent, signal_trend, tracking_profile_from_ordinal, tracking_snapshot,
+    update_decision,
 };
 
+pub mod env;
+
+pub use env::{JStringRef, JniEnvPtr};
+
 /// Opaque, never-dereferenced pointer type standing in for the JNI `JNIEnv*`
-/// and `jclass`/`jobject` parameters every native method receives.
+/// and `jclass`/`jobject` parameters every primitive-only native receives.
 ///
 /// Declaring a raw-pointer *parameter* is not `unsafe` in Rust; only
-/// dereferencing one is. Every function below only ever ignores this type.
+/// dereferencing one is. Every primitive-only export ignores this type; the
+/// string exports take [`JniEnvPtr`] and go through [`env`](mod@env).
 type JniOpaquePtr = *mut core::ffi::c_void;
 
 /// Pure, unit-testable core of
@@ -312,11 +324,13 @@ pub fn tracking_freshness_ordinal(input: TrackingSnapshotJniInput) -> i32 {
 // self-update safety decisions with the exact verified Rust code (`update.rs`,
 // `tests/update.rs`, `tests/update_campaign.rs`) instead of re-deriving them in
 // Java. The network fetch and the OS `PackageInstaller` remain the documented
-// platform boundary (see docs/AUTO_UPDATE.md). The stateful streaming
-// `ArtifactVerifier` and `UpdateSession` are deliberately not bridged here: an
-// owned-native-state JNI handle is a larger, separate surface, and every
-// function below is a total function over primitives — exactly what the live
-// JVM proof and the JNI differential campaign can exercise.
+// platform boundary (see docs/AUTO_UPDATE.md). The manifest parser and the
+// streaming `ArtifactVerifier` are bridged further down through the string
+// bridge (`releaseManifest*`, `artifactVerifyFile`); the stateful
+// `UpdateSession` is still not: an owned-native-state JNI handle is a larger,
+// separate surface. Every function in this section is a total function over
+// primitives — exactly what the live JVM proof and the JNI differential
+// campaign can exercise.
 
 /// Saturating `i64 -> u64` for a JNI-supplied quantity that is non-negative by
 /// contract (a `versionCode`, a timestamp, a byte count): a negative value is
@@ -466,11 +480,12 @@ pub fn retry_backoff_delay_secs(attempt: i32, base_delay_secs: i64, max_delay_se
 
 // ===== Device snapshot ranking and pruning policy =====
 //
-// The Android app keeps its address-keyed device map in Java (JNI cannot read
-// Java strings or return object arrays without dereferencing `JNIEnv`, which
-// this crate never does), but the *policy* decisions over that map — which
-// devices to drop and how to rank the survivors — are pure functions over
-// primitives, so they live here and run the same code the workspace tests.
+// The Android app keeps its address-keyed device map in Java (returning a
+// ranked array of device objects would need far more of the JNI object
+// surface than the audited string bridge in `env` provides), but the *policy*
+// decisions over that map — which devices to drop and how to rank the
+// survivors — are pure functions over primitives, so they live here and run
+// the same code the workspace tests.
 
 /// Pure, unit-testable core of `NativeRadar.deviceShouldPrune(int)`.
 ///
@@ -1029,18 +1044,225 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceRankKey(
     )
 }
 
+// ===== Release manifest and artifact verification (the string bridge) =====
+//
+// The Android app used to parse release manifests with its own Java parser —
+// one that defaulted missing fields, skipped malformed lines and tolerated
+// unknown keys, i.e. accepted manifests `bleradar_core::update` rejects — and
+// checked downloads with `MessageDigest`. Both now go through the verified
+// core: a manifest is accepted exactly when [`ReleaseManifest::parse`] accepts
+// it, and an artifact becomes installable only through [`ArtifactVerifier`].
+// These are the only exports that take or return Java objects; they cross the
+// boundary through [`env`](mod@env) and answer every null with a documented sentinel.
+
+/// `NativeRadar.MANIFEST_FIELD_VERSION_CODE`: the release `versionCode`, as decimal text.
+pub const MANIFEST_FIELD_VERSION_CODE: i32 = 0;
+/// `NativeRadar.MANIFEST_FIELD_VERSION_NAME`: the display version name.
+pub const MANIFEST_FIELD_VERSION_NAME: i32 = 1;
+/// `NativeRadar.MANIFEST_FIELD_URL`: the HTTPS artifact URL.
+pub const MANIFEST_FIELD_URL: i32 = 2;
+/// `NativeRadar.MANIFEST_FIELD_SIZE_BYTES`: the exact artifact size, as decimal text.
+pub const MANIFEST_FIELD_SIZE_BYTES: i32 = 3;
+/// `NativeRadar.MANIFEST_FIELD_SHA256`: the artifact SHA-256 as 64 lowercase hex characters.
+pub const MANIFEST_FIELD_SHA256: i32 = 4;
+/// `NativeRadar.MANIFEST_FIELD_MIN_SDK`: the minimum SDK level, as decimal text.
+pub const MANIFEST_FIELD_MIN_SDK: i32 = 5;
+/// `NativeRadar.MANIFEST_FIELD_MANDATORY`: `true` or `false`.
+pub const MANIFEST_FIELD_MANDATORY: i32 = 6;
+/// `NativeRadar.MANIFEST_FIELD_NOTES`: the release notes, possibly empty.
+pub const MANIFEST_FIELD_NOTES: i32 = 7;
+
+/// `NativeRadar.ARTIFACT_VERIFIED`: exact declared size and SHA-256; installable.
+pub const ARTIFACT_VERIFIED: i32 = 0;
+/// `NativeRadar.ARTIFACT_MANIFEST_INVALID`: the manifest text was null or rejected.
+pub const ARTIFACT_MANIFEST_INVALID: i32 = 1;
+/// `NativeRadar.ARTIFACT_UNREADABLE`: the path was null or the file could not be opened or read.
+pub const ARTIFACT_UNREADABLE: i32 = 2;
+/// `NativeRadar.ARTIFACT_SIZE_MISMATCH`: the file is shorter or longer than the declared size.
+pub const ARTIFACT_SIZE_MISMATCH: i32 = 3;
+/// `NativeRadar.ARTIFACT_HASH_MISMATCH`: the size matched but the SHA-256 did not.
+pub const ARTIFACT_HASH_MISMATCH: i32 = 4;
+
+/// Pure, unit-testable core of `NativeRadar.releaseManifestCanonical(String)`.
+///
+/// The canonical form ([`ReleaseManifest::serialize`]) of a manifest the core
+/// accepts, or `None` when [`ReleaseManifest::parse`] rejects the text.
+#[must_use]
+pub fn release_manifest_canonical(text: &str) -> Option<String> {
+    ReleaseManifest::parse(text)
+        .ok()
+        .map(|manifest| manifest.serialize())
+}
+
+/// Pure, unit-testable core of `NativeRadar.releaseManifestError(String)`.
+///
+/// Why the core rejects the text (the [`UpdateError`] rendering), or `None`
+/// when it is accepted — always the complement of [`release_manifest_canonical`].
+#[must_use]
+pub fn release_manifest_error(text: &str) -> Option<String> {
+    ReleaseManifest::parse(text)
+        .err()
+        .map(|error| error.to_string())
+}
+
+/// Pure, unit-testable core of `NativeRadar.releaseManifestField(String, int)`.
+///
+/// One field of an accepted manifest rendered as canonical text (numbers as
+/// decimal, the hash as lowercase hex, `mandatory` as `true`/`false`), or
+/// `None` for a rejected text or an unknown selector.
+#[must_use]
+pub fn release_manifest_field(text: &str, field: i32) -> Option<String> {
+    let manifest = ReleaseManifest::parse(text).ok()?;
+    Some(match field {
+        MANIFEST_FIELD_VERSION_CODE => manifest.version.code.to_string(),
+        MANIFEST_FIELD_VERSION_NAME => manifest.version.name,
+        MANIFEST_FIELD_URL => manifest.url,
+        MANIFEST_FIELD_SIZE_BYTES => manifest.size_bytes.to_string(),
+        MANIFEST_FIELD_SHA256 => hex_encode(&manifest.sha256),
+        MANIFEST_FIELD_MIN_SDK => manifest.min_sdk.to_string(),
+        MANIFEST_FIELD_MANDATORY => manifest.mandatory.to_string(),
+        MANIFEST_FIELD_NOTES => manifest.notes,
+        _ => return None,
+    })
+}
+
+/// Streams `reader` through the core's [`ArtifactVerifier`] and maps the
+/// outcome to an `ARTIFACT_*` ordinal: an overrun or a short stream is a size
+/// mismatch, a read error is unreadable.
+pub fn artifact_verify_reader(mut reader: impl Read, manifest: &ReleaseManifest) -> i32 {
+    let mut verifier = ArtifactVerifier::new(manifest);
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let read = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return ARTIFACT_UNREADABLE,
+        };
+        if verifier.feed(&chunk[..read]).is_err() {
+            return ARTIFACT_SIZE_MISMATCH;
+        }
+    }
+    match verifier.finish() {
+        Ok(()) => ARTIFACT_VERIFIED,
+        Err(UpdateError::HashMismatch) => ARTIFACT_HASH_MISMATCH,
+        Err(_) => ARTIFACT_SIZE_MISMATCH,
+    }
+}
+
+/// Pure-over-the-filesystem core of `NativeRadar.artifactVerifyFile(String, String)`.
+///
+/// The manifest is checked before the file is touched, so a rejected manifest
+/// answers [`ARTIFACT_MANIFEST_INVALID`] even for a missing path.
+#[must_use]
+pub fn artifact_verify_file(path: &str, manifest_text: &str) -> i32 {
+    let Ok(manifest) = ReleaseManifest::parse(manifest_text) else {
+        return ARTIFACT_MANIFEST_INVALID;
+    };
+    match std::fs::File::open(path) {
+        Ok(file) => artifact_verify_reader(file, &manifest),
+        Err(_) => ARTIFACT_UNREADABLE,
+    }
+}
+
+/// Copies `text` in through [`env`](mod@env): `None` for a null `env` or `text`, or a
+/// string the VM could not hand over as valid Unicode.
+fn read_text(env: JniEnvPtr, text: JStringRef) -> Option<String> {
+    // SAFETY: `env` and `text` are what the VM passed to the export calling
+    // this (the JNI contract every export relies on), or null, which the
+    // bridge answers without reading; the test mock honours the same contract.
+    unsafe { env::read_string(env, text) }
+}
+
+/// Copies `text` out through [`env`](mod@env): null for a null `env` or a VM
+/// allocation failure.
+fn make_text(env: JniEnvPtr, text: &str) -> JStringRef {
+    // SAFETY: as in `read_text`.
+    unsafe { env::new_string(env, text) }
+}
+
+/// Copies `text` in, applies `core`, and copies the result out; any failure
+/// on either side answers null.
+fn string_export(
+    env: JniEnvPtr,
+    text: JStringRef,
+    core: impl FnOnce(&str) -> Option<String>,
+) -> JStringRef {
+    match read_text(env, text).and_then(|text| core(&text)) {
+        Some(out) => make_text(env, &out),
+        None => core::ptr::null_mut(),
+    }
+}
+
+/// `NativeRadar.releaseManifestCanonical(String): String` — see
+/// [`release_manifest_canonical`]. Reads `env` only through [`env`](mod@env).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    text: JStringRef,
+) -> JStringRef {
+    string_export(env, text, release_manifest_canonical)
+}
+
+/// `NativeRadar.releaseManifestError(String): String` — see
+/// [`release_manifest_error`]. Reads `env` only through [`env`](mod@env).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_releaseManifestError(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    text: JStringRef,
+) -> JStringRef {
+    string_export(env, text, release_manifest_error)
+}
+
+/// `NativeRadar.releaseManifestField(String, int): String` — see
+/// [`release_manifest_field`]. Reads `env` only through [`env`](mod@env).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_releaseManifestField(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    text: JStringRef,
+    field: i32,
+) -> JStringRef {
+    string_export(env, text, |text| release_manifest_field(text, field))
+}
+
+/// `NativeRadar.artifactVerifyFile(String, String): int` — see
+/// [`artifact_verify_file`]. Reads `env` only through [`env`](mod@env); a null or
+/// rejected manifest is [`ARTIFACT_MANIFEST_INVALID`] whatever the path, and
+/// a null path is [`ARTIFACT_UNREADABLE`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    path: JStringRef,
+    manifest_text: JStringRef,
+) -> i32 {
+    let Some(manifest_text) = read_text(env, manifest_text) else {
+        return ARTIFACT_MANIFEST_INVALID;
+    };
+    // A null path is no path at all, which the core reports as unreadable —
+    // after the manifest check, as for any path.
+    let path = read_text(env, path).unwrap_or_default();
+    artifact_verify_file(&path, &manifest_text)
+}
+
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side
 /// calls once at startup to confirm the loaded `.so` matches the ABI this
 /// file documents, independent of the app's own version number.
 ///
 /// Bumped to `8` when the automatic-update decision surface
 /// (`updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
-/// `retryBackoffDelaySeconds`) was added to the ABI, and to `9` when the
-/// device-map policy surface (`deviceShouldPrune`, `deviceRankKey`) was added.
+/// `retryBackoffDelaySeconds`) was added to the ABI, to `9` when the
+/// device-map policy surface (`deviceShouldPrune`, `deviceRankKey`) was added,
+/// and to `10` when the string bridge and the release-manifest / artifact
+/// surface (`releaseManifestCanonical`, `releaseManifestError`,
+/// `releaseManifestField`, `artifactVerifyFile`) were added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    9
+    10
 }

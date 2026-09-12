@@ -290,13 +290,14 @@ cargo xtask verify-jni-live
 This compiles the host `bleradar-jni` library, verifies its export contract
 against the repository's
 `android/app/src/main/java/com/hse/bleradar/NativeRadar.java`
-(`cargo xtask check-jni-contract`), compiles that façade, then executes a
-real JVM → JNI → Rust smoke harness. It proves both the failure path (wrong
-library path yields `UnsatisfiedLinkError`) and the success path (library
-loads, ABI version matches, every declared native is resolved and invoked by
-the JVM through reflection with the count cross-checked against the Java
-source, and JNI calls return the expected values). CI runs it on every push
-and pull request.
+(`cargo xtask check-jni-contract`), checks the string bridge's JNI
+function-table slots against the JDK's `jni.h`, compiles that façade, then
+executes a real JVM → JNI → Rust smoke harness. It proves both the failure
+path (wrong library path yields `UnsatisfiedLinkError`) and the success path
+(library loads, ABI version matches, every declared native is resolved and
+invoked by the JVM through reflection with the count cross-checked against
+the Java source, and JNI calls — Java strings included — return the expected
+values). CI runs it on every push and pull request.
 
 ## Strongest current Android live proof
 

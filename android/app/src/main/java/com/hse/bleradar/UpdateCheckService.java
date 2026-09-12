@@ -23,10 +23,6 @@ import android.os.StatFs;
 import android.util.Log;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 
 /**
  * Background service that periodically checks for app updates using the
@@ -336,24 +332,21 @@ public final class UpdateCheckService extends Service {
         }
     }
 
-    /**
-     * Verifies the SHA-256 of a downloaded file.
-     */
-    private String computeSha256(File file) throws IOException, NoSuchAlgorithmException {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] buffer = new byte[8192];
-        try (FileInputStream fis = new FileInputStream(file)) {
-            int read;
-            while ((read = fis.read(buffer)) != -1) {
-                digest.update(buffer, 0, read);
-            }
+    private static String artifactVerdictLabel(int verdict) {
+        switch (verdict) {
+            case NativeRadar.ARTIFACT_VERIFIED:
+                return "verified";
+            case NativeRadar.ARTIFACT_MANIFEST_INVALID:
+                return "manifest rejected by the Rust core";
+            case NativeRadar.ARTIFACT_UNREADABLE:
+                return "downloaded file missing or unreadable";
+            case NativeRadar.ARTIFACT_SIZE_MISMATCH:
+                return "size differs from the manifest";
+            case NativeRadar.ARTIFACT_HASH_MISMATCH:
+                return "SHA-256 differs from the manifest";
+            default:
+                return "unknown verdict " + verdict;
         }
-        byte[] hash = digest.digest();
-        StringBuilder sb = new StringBuilder();
-        for (byte b : hash) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 
     /**
@@ -438,21 +431,17 @@ public final class UpdateCheckService extends Service {
                 Uri fileUri = Uri.parse(path);
                 File apkFile = new File(fileUri.getPath());
 
-                // Verify SHA-256
+                // Exact size and SHA-256 are checked by the Rust core's
+                // ArtifactVerifier: the only path by which an artifact
+                // becomes installable.
                 boolean verificationFailed = false;
-                if (apkFile.exists() && apkFile.length() == manifest.getSizeBytes()) {
-                    String actualSha = computeSha256(apkFile);
-                    if (actualSha.equalsIgnoreCase(manifest.getSha256())) {
-                        Log.d(TAG, "SHA-256 verification passed");
-                        clearRetryCount();
-                        installApk(downloadId);
-                    } else {
-                        Log.e(TAG, "SHA-256 mismatch: expected " + manifest.getSha256()
-                                + ", got " + actualSha);
-                        verificationFailed = true;
-                    }
+                int verdict = NativeRadar.artifactVerifyFile(apkFile.getAbsolutePath(), manifest.serialize());
+                if (verdict == NativeRadar.ARTIFACT_VERIFIED) {
+                    Log.d(TAG, "Artifact verification passed");
+                    clearRetryCount();
+                    installApk(downloadId);
                 } else {
-                    Log.e(TAG, "Downloaded file missing or size mismatch");
+                    Log.e(TAG, "Artifact verification failed: " + artifactVerdictLabel(verdict));
                     verificationFailed = true;
                 }
 

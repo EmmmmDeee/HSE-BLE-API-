@@ -1,40 +1,27 @@
 package com.hse.bleradar;
 
 import android.util.Log;
-import java.util.HashMap;
-import java.util.Locale;
-import java.util.Map;
-import java.util.regex.Pattern;
 
 /**
- * Parses a strictly-formatted {@code ReleaseManifest} as specified in
- * {@code docs/AUTO_UPDATE.md}.
+ * A release manifest as validated and canonicalized by the Rust update core
+ * ({@code bleradar_core::update::ReleaseManifest}) through
+ * {@link NativeRadar#releaseManifestCanonical}.
  *
- * <p>Format: line-oriented {@code key = value} (one field per line; first
- * {@code =} splits key from value; {@code #} and blank lines ignored).
- *
- * <p>Required fields:
- * <ul>
- *   <li>{@code version_code}: monotonic {@code versionCode}.</li>
- *   <li>{@code version_name}: display name (e.g. "1.0.0").</li>
- *   <li>{@code url}: must be HTTPS.</li>
- *   <li>{@code size_bytes}: non-zero.</li>
- *   <li>{@code sha256}: exactly 64 hex characters.</li>
- *   <li>{@code min_sdk}: minimum {@code minSdkVersion}.</li>
- *   <li>{@code mandatory}: "true" or "false".</li>
- * </ul>
- *
- * <p>Optional:
- * <ul>
- *   <li>{@code notes}: release notes (prose).</li>
- * </ul>
+ * <p>Java parses nothing: a text is accepted exactly when Rust accepts it
+ * (required {@code version_code}, {@code version_name}, HTTPS {@code url},
+ * non-zero {@code size_bytes}, 64-hex {@code sha256}, {@code min_sdk},
+ * {@code mandatory}; optional {@code notes}; no unknown, duplicate, or
+ * malformed lines — see {@code docs/AUTO_UPDATE.md}), every field is read
+ * back through {@link NativeRadar#releaseManifestField} from the canonical
+ * form, and {@link #serialize()} returns that canonical form, which Rust
+ * round-trips. Without the native core no manifest can be validated, so
+ * {@link #parse} yields {@code null} and the update check does not proceed.
  */
 public final class ReleaseManifest {
 
     private static final String TAG = "ReleaseManifest";
-    private static final Pattern HEX_SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
-    private static final Pattern HTTPS_URL = Pattern.compile("^https://[a-zA-Z0-9._-]+.*");
 
+    private final String canonical;
     private final long versionCode;
     private final String versionName;
     private final String url;
@@ -44,102 +31,53 @@ public final class ReleaseManifest {
     private final boolean mandatory;
     private final String notes;
 
-    private ReleaseManifest(long versionCode, String versionName, String url,
-            long sizeBytes, String sha256, int minSdk, boolean mandatory, String notes) {
-        this.versionCode = versionCode;
-        this.versionName = versionName;
-        this.url = url;
-        this.sizeBytes = sizeBytes;
-        this.sha256 = sha256.toLowerCase(Locale.US);
-        this.minSdk = minSdk;
-        this.mandatory = mandatory;
-        this.notes = notes;
+    private ReleaseManifest(String canonical) {
+        this.canonical = canonical;
+        this.versionCode = Long.parseLong(field(canonical, NativeRadar.MANIFEST_FIELD_VERSION_CODE));
+        this.versionName = field(canonical, NativeRadar.MANIFEST_FIELD_VERSION_NAME);
+        this.url = field(canonical, NativeRadar.MANIFEST_FIELD_URL);
+        this.sizeBytes = Long.parseLong(field(canonical, NativeRadar.MANIFEST_FIELD_SIZE_BYTES));
+        this.sha256 = field(canonical, NativeRadar.MANIFEST_FIELD_SHA256);
+        this.minSdk = Integer.parseInt(field(canonical, NativeRadar.MANIFEST_FIELD_MIN_SDK));
+        this.mandatory = Boolean.parseBoolean(field(canonical, NativeRadar.MANIFEST_FIELD_MANDATORY));
+        this.notes = field(canonical, NativeRadar.MANIFEST_FIELD_NOTES);
+    }
+
+    private static String field(String canonical, int field) {
+        String value = NativeRadar.releaseManifestField(canonical, field);
+        if (value == null) {
+            // Unreachable for a text Rust has just canonicalized; fail loudly
+            // rather than continue with a half-built manifest.
+            throw new IllegalStateException("Rust rejected field " + field + " of a canonical manifest");
+        }
+        return value;
     }
 
     /**
-     * Parses a manifest from a {@code key=value} line-oriented string.
+     * Validates {@code text} in the Rust core.
      *
-     * @return the parsed manifest, or null if parsing fails or a required field is missing/invalid
+     * @return the manifest, or {@code null} when the native core is unavailable,
+     *     Rust rejects the text (the reason is logged), or a numeric field does
+     *     not fit the app's signed Java types
      */
     public static ReleaseManifest parse(String text) {
-        if (text == null || text.isEmpty()) {
-            Log.w(TAG, "Manifest text is null or empty");
+        if (!NativeRadar.isAvailable()) {
+            Log.w(TAG, "Native core unavailable; cannot validate a release manifest");
             return null;
         }
-        Map<String, String> fields = new HashMap<>();
-        for (String line : text.split("\n")) {
-            line = line.trim();
-            if (line.isEmpty() || line.startsWith("#")) {
-                continue;
-            }
-            int eqIdx = line.indexOf('=');
-            if (eqIdx < 0) {
-                Log.w(TAG, "Skipping malformed line (no '='): " + line.substring(0, Math.min(50, line.length())));
-                continue;
-            }
-            String key = line.substring(0, eqIdx).trim();
-            String value = line.substring(eqIdx + 1).trim();
-            fields.put(key, value);
+        if (text == null) {
+            Log.w(TAG, "Manifest text is null");
+            return null;
         }
-
+        String canonical = NativeRadar.releaseManifestCanonical(text);
+        if (canonical == null) {
+            Log.w(TAG, "Rejected release manifest: " + NativeRadar.releaseManifestError(text));
+            return null;
+        }
         try {
-            // Validate required fields exist before parsing
-            if (!fields.containsKey("version_code")) {
-                Log.w(TAG, "Missing required field: version_code");
-                return null;
-            }
-            if (!fields.containsKey("version_name")) {
-                Log.w(TAG, "Missing required field: version_name");
-                return null;
-            }
-            if (!fields.containsKey("url")) {
-                Log.w(TAG, "Missing required field: url");
-                return null;
-            }
-            if (!fields.containsKey("size_bytes")) {
-                Log.w(TAG, "Missing required field: size_bytes");
-                return null;
-            }
-            if (!fields.containsKey("sha256")) {
-                Log.w(TAG, "Missing required field: sha256");
-                return null;
-            }
-
-            long versionCode = Long.parseLong(fields.get("version_code"));
-            String versionName = fields.get("version_name");
-            String url = fields.get("url");
-            long sizeBytes = Long.parseLong(fields.get("size_bytes"));
-            String sha256 = fields.get("sha256");
-            int minSdk = Integer.parseInt(fields.getOrDefault("min_sdk", "26"));
-            boolean mandatory = Boolean.parseBoolean(fields.getOrDefault("mandatory", "false"));
-            String notes = fields.getOrDefault("notes", "");
-
-            // Validate field values
-            if (versionCode <= 0) {
-                Log.w(TAG, "Invalid versionCode: " + versionCode + " (must be > 0)");
-                return null;
-            }
-            if (sizeBytes <= 0) {
-                Log.w(TAG, "Invalid sizeBytes: " + sizeBytes + " (must be > 0)");
-                return null;
-            }
-            if (minSdk < 1) {
-                Log.w(TAG, "Invalid minSdk: " + minSdk + " (must be >= 1)");
-                return null;
-            }
-            if (!HTTPS_URL.matcher(url).matches()) {
-                Log.w(TAG, "Invalid URL: " + url + " (must be HTTPS)");
-                return null;
-            }
-            if (!HEX_SHA256.matcher(sha256).matches()) {
-                Log.w(TAG, "Invalid SHA-256: " + sha256 + " (must be 64 hex characters)");
-                return null;
-            }
-
-            Log.d(TAG, "Parsed manifest: versionCode=" + versionCode + ", versionName=" + versionName);
-            return new ReleaseManifest(versionCode, versionName, url, sizeBytes, sha256, minSdk, mandatory, notes);
+            return new ReleaseManifest(canonical);
         } catch (NumberFormatException e) {
-            Log.w(TAG, "Failed to parse numeric field: " + e.getMessage());
+            Log.w(TAG, "Release manifest field does not fit a Java signed integer", e);
             return null;
         }
     }
@@ -160,6 +98,7 @@ public final class ReleaseManifest {
         return sizeBytes;
     }
 
+    /** Lowercase hex, exactly 64 characters. */
     public String getSha256() {
         return sha256;
     }
@@ -176,22 +115,8 @@ public final class ReleaseManifest {
         return notes;
     }
 
-    /**
-     * Serializes this manifest back to the line-oriented format (deterministic,
-     * round-trips with {@link #parse}).
-     */
+    /** The canonical line-oriented form Rust emitted; {@link #parse} of it yields an equal manifest. */
     public String serialize() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("version_code = ").append(versionCode).append("\n");
-        sb.append("version_name = ").append(versionName).append("\n");
-        sb.append("url = ").append(url).append("\n");
-        sb.append("size_bytes = ").append(sizeBytes).append("\n");
-        sb.append("sha256 = ").append(sha256).append("\n");
-        sb.append("min_sdk = ").append(minSdk).append("\n");
-        sb.append("mandatory = ").append(mandatory).append("\n");
-        if (!notes.isEmpty()) {
-            sb.append("notes = ").append(notes).append("\n");
-        }
-        return sb.toString();
+        return canonical;
     }
 }
