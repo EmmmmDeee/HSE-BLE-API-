@@ -557,13 +557,13 @@ fn device_rank_key_agrees_with_the_reference_comparator_on_random_pairs() {
         let left = sample_device(&mut state);
         let mut right = sample_device(&mut state);
         // Share fields often so every tie-break tier is exercised.
-        if xorshift(&mut state) % 2 == 0 {
+        if xorshift(&mut state).is_multiple_of(2) {
             right.0 = left.0;
         }
-        if xorshift(&mut state) % 2 == 0 {
+        if xorshift(&mut state).is_multiple_of(2) {
             right.1 = left.1;
         }
-        if xorshift(&mut state) % 2 == 0 {
+        if xorshift(&mut state).is_multiple_of(2) {
             right.2 = left.2;
         }
         let left_key = device_rank_key(left.0, left.1, left.2, left.3);

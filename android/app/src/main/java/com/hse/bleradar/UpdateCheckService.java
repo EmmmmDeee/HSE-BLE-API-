@@ -107,7 +107,10 @@ public final class UpdateCheckService extends Service {
                     ReleaseManifest manifest = restoreDownloadManifest();
                     if (manifest != null) {
                         try {
-                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, 0);
+                            // No start owns this restore and no promotion happened, so the
+                            // receiver stops the service unconditionally (startId -1) and
+                            // never leaves a foreground it did not enter.
+                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, -1, false);
                             IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
@@ -187,6 +190,16 @@ public final class UpdateCheckService extends Service {
         boolean isRetry = intent != null && intent.getBooleanExtra("is_retry", false);
         if (isRetry) {
             promoteToForeground();
+        }
+
+        if (activeDownloadId != -1) {
+            // A download restored in onCreate() is still in flight; its receiver
+            // verifies, installs, and stops the service when it completes.
+            Log.d(TAG, "Download " + activeDownloadId + " still pending; not starting another check");
+            if (isRetry) {
+                stopForeground(Service.STOP_FOREGROUND_REMOVE);
+            }
+            return START_NOT_STICKY;
         }
 
         // Check if enough time has passed since the last check (skip for retries)
@@ -344,18 +357,23 @@ public final class UpdateCheckService extends Service {
     }
 
     /**
-     * Installs the verified APK by handing it to the system via ACTION_VIEW.
-     * This uses Uri.fromFile() which is deprecated but available on all API levels.
-     * The system package installer handles the installation directly.
+     * Hands the verified APK to the system package installer through the
+     * {@code content://} URI {@link DownloadManager} serves for the download.
+     * A {@code file://} URI throws {@code FileUriExposedException} on API 24+
+     * (this app targets 34) and a FileProvider would need AndroidX, which this
+     * build deliberately does not ship; the DownloadManager URI needs neither
+     * and the installer reads it through the granted permission.
      */
-    private void installApk(File apkFile) {
+    private void installApk(long downloadId) {
         try {
-            @SuppressWarnings("deprecation")
-            Uri apkUri = Uri.fromFile(apkFile);
+            Uri apkUri = downloadManager.getUriForDownloadedFile(downloadId);
+            if (apkUri == null) {
+                Log.e(TAG, "DownloadManager has no URI for download " + downloadId);
+                return;
+            }
             Intent install = new Intent(Intent.ACTION_VIEW);
-            install.setData(apkUri);
-            install.setType("application/vnd.android.package-archive");
-            install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            install.setDataAndType(apkUri, "application/vnd.android.package-archive");
+            install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(install);
             Log.d(TAG, "Handed APK to system installer");
         } catch (Exception e) {
@@ -427,7 +445,7 @@ public final class UpdateCheckService extends Service {
                     if (actualSha.equalsIgnoreCase(manifest.getSha256())) {
                         Log.d(TAG, "SHA-256 verification passed");
                         clearRetryCount();
-                        installApk(apkFile);
+                        installApk(downloadId);
                     } else {
                         Log.e(TAG, "SHA-256 mismatch: expected " + manifest.getSha256()
                                 + ", got " + actualSha);
@@ -473,11 +491,14 @@ public final class UpdateCheckService extends Service {
     /**
      * Promotes the service to foreground when started via startForegroundService().
      * This satisfies the Android 8+ requirement to call startForeground() within 5 seconds.
+     * On API 34+ the {@code dataSync} type is required here and must match the
+     * service's manifest declaration and the {@code FOREGROUND_SERVICE_DATA_SYNC}
+     * permission; it is the public type for a download that outlives a short task.
      */
     private void promoteToForeground() {
         Notification notification = buildUpdateNotification();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPT);
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }

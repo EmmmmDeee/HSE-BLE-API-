@@ -133,21 +133,6 @@ public class BlipTest {
     }
 
     @Test
-    public void is_fresh_checks_time_window() {
-        // isFresh() checks if the device was seen within a time window
-        Blip blip = new Blip("00:11:22:33:44:55");
-        blip.lastSeenUptimeMillis = 1000L;
-
-        // Within window
-        assertTrue("Device should be fresh within window",
-                blip.isFresh(1500L, 1000L)); // 500ms ago, window 1s
-
-        // Outside window
-        assertFalse("Device should be stale outside window",
-                blip.isFresh(3000L, 1000L)); // 2000ms ago, window 1s
-    }
-
-    @Test
     public void recent_samples_wrap_around_buffer() {
         // The recent RSSI buffer is circular (wraps around)
         // This test verifies that samples are recorded correctly even after wrapping

@@ -45,7 +45,12 @@ public final class RadarView extends View {
 
     private static final float SWEEP_ARC_DEGREES = 50f;
     private static final long SWEEP_PERIOD_MILLIS = 4200L;
-    private static final long BLIP_FRESHNESS_WINDOW_MILLIS = 9000L;
+    /**
+     * Visual fade only: a blip's glow decays over this window after its last
+     * observation. Which devices appear at all is the engine's Rust freshness
+     * policy ({@link BleScanEngine#snapshot()}), never a timeout applied here.
+     */
+    private static final long BLIP_FADE_WINDOW_MILLIS = 9000L;
     private static final int RING_COUNT = 4;
     private static final int SPOKE_COUNT = 8;
     private static final int PROXIMITY_COLOUR_COUNT = 4;
@@ -287,9 +292,6 @@ public final class RadarView extends View {
     private void drawBlips(Canvas canvas, float cx, float cy, float radius) {
         long now = SystemClock.uptimeMillis();
         for (Blip blip : blips) {
-            if (!blip.isFresh(now, BLIP_FRESHNESS_WINDOW_MILLIS)) {
-                continue;
-            }
             double distance = Double.isNaN(blip.distanceMetres)
                     ? fallbackDistanceForProximity(blip.proximity)
                     : blip.distanceMetres;
@@ -311,7 +313,7 @@ public final class RadarView extends View {
             float by = cy + radius * centerNormalised * (float) Math.sin(angleRad);
 
             long age = now - blip.lastSeenUptimeMillis;
-            float freshness = 1f - Math.min(1f, age / (float) BLIP_FRESHNESS_WINDOW_MILLIS);
+            float freshness = 1f - Math.min(1f, age / (float) BLIP_FADE_WINDOW_MILLIS);
             int blipColor = colourForProximity(blip.proximity);
             float confidence = Math.max(0f, Math.min(100f, blip.confidencePercent)) / 100f;
             int glowAlpha = Math.round((90f + 165f * confidence) * freshness);
@@ -419,11 +421,7 @@ public final class RadarView extends View {
 
     private static double autoRangeMetres(List<Blip> blips) {
         double strongestBound = 0.0;
-        long now = SystemClock.uptimeMillis();
         for (Blip blip : blips) {
-            if (!blip.isFresh(now, BLIP_FRESHNESS_WINDOW_MILLIS)) {
-                continue;
-            }
             double candidate = Double.isFinite(blip.distanceUpperBoundMetres)
                     ? blip.distanceUpperBoundMetres
                     : Double.isFinite(blip.distanceMetres)

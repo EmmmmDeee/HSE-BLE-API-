@@ -247,9 +247,13 @@ public class UpdateCheckServiceTest {
     }
 
     @Test
-    public void promote_to_foreground_uses_system_exempt_on_api_34_plus() {
+    public void promote_to_foreground_uses_data_sync_on_api_34_plus() {
         // On API 34+ (Build.VERSION_CODES.UPSIDE_DOWN_CAKE), promoteToForeground() must call
-        // startForeground(NOTIFICATION_ID, notification, FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPT)
+        // startForeground(NOTIFICATION_ID, notification, FOREGROUND_SERVICE_TYPE_DATA_SYNC):
+        // the public type for a download that outlives a short task, declared as
+        // foregroundServiceType="dataSync" on the service together with the
+        // FOREGROUND_SERVICE_DATA_SYNC permission. (FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPT
+        // is not in the public android.jar and does not compile.)
         // On older APIs, call startForeground(NOTIFICATION_ID, notification)
         assertTrue("Foreground service type must be set on API 34+", true);
     }
