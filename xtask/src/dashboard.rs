@@ -7,11 +7,16 @@
 //! fetches to completion and `--dump-dom` prints the resulting document, so no
 //! browser-automation library is needed: the browser is an external tool
 //! invoked like the SDK, the JDK and qemu are, and the tooling stays
-//! dependency-free. Three scenarios run — a healthy API (every fixture device
+//! dependency-free. Five scenarios run — a healthy API (every fixture device
 //! must be rendered in server order, escaped, and the page must have polled
-//! more than once), an API answering `500`, and an API answering `200` with
-//! the wrong shape — and the last two must surface the error banner rather
-//! than a blank or silently stale page.
+//! more than once), `/api/devices` answering `500`, `/api/devices` answering
+//! `200` with the wrong shape, `/api/status` answering an array, and
+//! `/api/updates` answering `500` — and every degraded one must surface the
+//! error banner rather than a blank or silently stale page (with the device
+//! table still rendered when only the updates endpoint is broken). Before
+//! any browser runs, the JSON contract itself is locked: the field names
+//! `ApiHttpServer.java` writes must equal the fixture's keys and cover every
+//! property the page reads.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -80,23 +85,31 @@ pub const STATUS_JSON: &str =
 pub const UPDATES_JSON: &str =
     r#"{"last_check_ms":1757600000000,"next_check_ms":1757686400000,"retry_count":2}"#;
 
-/// What the mock answers on `/api/devices`.
+/// What the mock answers; every scenario but [`Scenario::Healthy`] breaks
+/// exactly one endpoint and the page must show the error banner for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scenario {
     /// The documented contract; the page must render every device.
     Healthy,
-    /// `500` with a JSON error body; the page must show the banner.
+    /// `/api/devices` answers `500` with a JSON error body.
     ServerError,
-    /// `200` with an object that has no `devices` array; the banner again.
+    /// `/api/devices` answers `200` with an object that has no `devices` array.
     WrongShape,
+    /// `/api/status` answers `200` with an array instead of the status object.
+    StatusWrongShape,
+    /// `/api/updates` answers `500`; devices and status keep rendering, the
+    /// banner must still be raised on every poll.
+    UpdatesError,
 }
 
 impl Scenario {
     /// Every scenario, in the order the command runs them.
-    pub const ALL: [Scenario; 3] = [
+    pub const ALL: [Scenario; 5] = [
         Scenario::Healthy,
         Scenario::ServerError,
         Scenario::WrongShape,
+        Scenario::StatusWrongShape,
+        Scenario::UpdatesError,
     ];
 
     /// The scenario's name in output paths and messages.
@@ -105,6 +118,27 @@ impl Scenario {
             Scenario::Healthy => "healthy",
             Scenario::ServerError => "server-error",
             Scenario::WrongShape => "wrong-shape",
+            Scenario::StatusWrongShape => "status-wrong-shape",
+            Scenario::UpdatesError => "updates-error",
+        }
+    }
+
+    /// The banner a degraded scenario must show, and whether the page may
+    /// still count successful polls (only when the broken endpoint is not
+    /// one of the two the device table depends on).
+    fn expectation(self) -> Option<(&'static str, bool)> {
+        match self {
+            Scenario::Healthy => None,
+            Scenario::ServerError => Some(("API unreachable: HTTP 500 from /api/devices", false)),
+            Scenario::WrongShape => Some((
+                "API unreachable: /api/devices did not return a devices array",
+                false,
+            )),
+            Scenario::StatusWrongShape => Some((
+                "API unreachable: /api/status did not return the documented status object",
+                false,
+            )),
+            Scenario::UpdatesError => Some(("API unreachable: HTTP 500 from /api/updates", true)),
         }
     }
 }
@@ -143,12 +177,18 @@ pub fn route(scenario: Scenario, method: &str, path: &str, dashboard: &[u8]) -> 
     }
     match path {
         "/api/devices" => match scenario {
-            Scenario::Healthy => json(200, "OK", DEVICES_JSON),
             Scenario::ServerError => json(500, "Internal Server Error", r#"{"error":"boom"}"#),
             Scenario::WrongShape => json(200, "OK", r#"{"nope":1}"#),
+            _ => json(200, "OK", DEVICES_JSON),
         },
-        "/api/status" => json(200, "OK", STATUS_JSON),
-        "/api/updates" => json(200, "OK", UPDATES_JSON),
+        "/api/status" => match scenario {
+            Scenario::StatusWrongShape => json(200, "OK", "[]"),
+            _ => json(200, "OK", STATUS_JSON),
+        },
+        "/api/updates" => match scenario {
+            Scenario::UpdatesError => json(500, "Internal Server Error", r#"{"error":"boom"}"#),
+            _ => json(200, "OK", UPDATES_JSON),
+        },
         _ => Response {
             status: 200,
             reason: "OK",
@@ -622,20 +662,33 @@ pub fn check_dom(scenario: Scenario, dom: &str) -> Result<u32, String> {
             }
             Ok(polls)
         }
-        Scenario::ServerError | Scenario::WrongShape => {
+        degraded => {
+            let (banner, table_still_renders) = degraded
+                .expectation()
+                .ok_or("a degraded scenario without an expectation")?;
             if !dom.contains(r#"data-state="error""#) {
                 return Err("the page did not enter the error state".to_string());
             }
-            let banner = match scenario {
-                Scenario::ServerError => "API unreachable: HTTP 500 from /api/devices",
-                _ => "API unreachable: /api/devices did not return a devices array",
-            };
             if !dom.contains(banner) {
                 return Err(format!("rendered page lacks the banner {banner:?}"));
             }
-            if polls != 0 {
+            if table_still_renders {
+                // The device table must have rendered from the endpoints
+                // that do answer, and the banner must still be up.
+                if polls < MIN_POLLS {
+                    return Err(format!(
+                        "the page completed {polls} poll(s) although only /api/updates was failing; at least {MIN_POLLS} expected"
+                    ));
+                }
+                if !dom.contains(r#"data-address="AA:BB:CC:DD:EE:04""#) {
+                    return Err(
+                        "the device table was not rendered although /api/devices answered"
+                            .to_string(),
+                    );
+                }
+            } else if polls != 0 {
                 return Err(format!(
-                    "the page counted {polls} successful poll(s) although every /api/devices answer was invalid"
+                    "the page counted {polls} successful poll(s) although every answer of the broken endpoint was invalid"
                 ));
             }
             Ok(polls)
@@ -970,6 +1023,29 @@ mod tests {
             route(Scenario::Healthy, "GET", "/api/updates", page).body,
             UPDATES_JSON.as_bytes()
         );
+        // Each degraded scenario breaks exactly its own endpoint.
+        for scenario in [Scenario::StatusWrongShape, Scenario::UpdatesError] {
+            assert_eq!(
+                route(scenario, "GET", "/api/devices", page).body,
+                DEVICES_JSON.as_bytes()
+            );
+        }
+        assert_eq!(
+            route(Scenario::StatusWrongShape, "GET", "/api/status", page).body,
+            b"[]"
+        );
+        assert_eq!(
+            route(Scenario::StatusWrongShape, "GET", "/api/updates", page).body,
+            UPDATES_JSON.as_bytes()
+        );
+        assert_eq!(
+            route(Scenario::UpdatesError, "GET", "/api/updates", page).status,
+            500
+        );
+        assert_eq!(
+            route(Scenario::UpdatesError, "GET", "/api/status", page).body,
+            STATUS_JSON.as_bytes()
+        );
         assert_eq!(
             route(Scenario::Healthy, "GET", "/favicon.ico", page).status,
             404
@@ -1048,6 +1124,26 @@ mod tests {
         assert_eq!(
             check_dom(Scenario::ServerError, live).unwrap_err(),
             "the page did not enter the error state"
+        );
+
+        let status_wrong = r#"<body data-state="error" data-polls="0"><div id="error">API unreachable: /api/status did not return the documented status object</div></body>"#;
+        assert_eq!(check_dom(Scenario::StatusWrongShape, status_wrong), Ok(0));
+
+        // Only /api/updates failing: the table must still render and the
+        // banner must still be up after several polls.
+        let updates_error = r#"<body data-state="error" data-polls="4"><div id="error">API unreachable: HTTP 500 from /api/updates</div><tr data-address="AA:BB:CC:DD:EE:04"></tr></body>"#;
+        assert_eq!(check_dom(Scenario::UpdatesError, updates_error), Ok(4));
+        let no_table = updates_error.replace(r#"<tr data-address="AA:BB:CC:DD:EE:04"></tr>"#, "");
+        assert!(
+            check_dom(Scenario::UpdatesError, &no_table)
+                .unwrap_err()
+                .contains("device table was not rendered")
+        );
+        let no_polls = updates_error.replace(r#"data-polls="4""#, r#"data-polls="0""#);
+        assert!(
+            check_dom(Scenario::UpdatesError, &no_polls)
+                .unwrap_err()
+                .contains("only /api/updates was failing")
         );
     }
 

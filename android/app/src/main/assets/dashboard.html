@@ -7,12 +7,15 @@
 <title>HSE BLE Radar</title>
 <!--
   The web dashboard ApiHttpServer serves at http://127.0.0.1:8080/ for a
-  browser or Termux on the same device. Self-contained on purpose: the app
-  holds no INTERNET permission and the page must work offline, so there are
-  no external scripts, styles or fonts. It only consumes the JSON contract
-  documented on ApiHttpServer (/api/devices, /api/status, /api/updates) and
-  never trusts a field: every value is type-checked and rendered through
-  textContent. `cargo xtask verify-dashboard-live` renders this exact file in
+  browser or Termux on the same device. Self-contained on purpose: the page
+  must render with no connectivity at all (the device may be offline and
+  the API is loopback-only), so there are no external scripts, styles or
+  fonts. It only consumes the JSON contract documented on ApiHttpServer
+  (/api/devices, /api/status, /api/updates) and never trusts a field: every
+  value is type-checked and rendered through textContent, and any failed
+  fetch, non-2xx status, unparseable JSON or response of the wrong shape
+  from any of the three endpoints raises the error banner while polling
+  continues. `cargo xtask verify-dashboard-live` renders this exact file in
   headless Chromium against a mock of that contract and checks the DOM it
   produces, including the <body data-state> / data-polls markers below.
 -->
@@ -134,6 +137,7 @@ footer a { color: var(--info); }
   };
 
   var polls = 0;
+  var updatesLoaded = false;
   var latestDevices = [];
   var sweepStartedAt = null;
 
@@ -174,8 +178,9 @@ footer a { color: var(--info); }
     if (ms < 60000) {
       return Math.round(ms / 1000) + ' s';
     }
-    var minutes = Math.floor(ms / 60000);
-    var seconds = Math.round((ms % 60000) / 1000);
+    var totalSeconds = Math.round(ms / 1000);
+    var minutes = Math.floor(totalSeconds / 60);
+    var seconds = totalSeconds % 60;
     return minutes + 'm ' + seconds + 's';
   }
 
@@ -299,18 +304,35 @@ footer a { color: var(--info); }
     return snapshot;
   }
 
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
   function validateStatus(status) {
-    if (!status || typeof status !== 'object') {
-      throw new Error('/api/status did not return an object');
+    if (!isPlainObject(status) || typeof status.scanning !== 'boolean'
+        || !isNumber(status.device_count) || typeof status.native_available !== 'boolean'
+        || !isNumber(status.uptime_ms)) {
+      throw new Error('/api/status did not return the documented status object');
     }
     return status;
+  }
+
+  function validateUpdates(updates) {
+    if (!isPlainObject(updates) || !isNumber(updates.last_check_ms)
+        || !isNumber(updates.next_check_ms) || !isNumber(updates.retry_count)) {
+      throw new Error('/api/updates did not return the documented updates object');
+    }
+    return updates;
   }
 
   function poll() {
     // One catch for everything a cycle can raise: a failed fetch, a non-2xx
     // status, unparseable JSON, and a response of the wrong shape thrown by
     // the validators inside the success handler (a rejection handler on the
-    // same `then` would not see those).
+    // same `then` would not see those). The updates line is fetched until
+    // it has loaded once and then on every 15th poll; its failure is
+    // returned into the same chain, so it raises the banner too while the
+    // device table already rendered for this cycle stays on screen.
     Promise.all([getJson('/api/devices'), getJson('/api/status')]).then(function (results) {
       var snapshot = validateSnapshot(results[0]);
       var status = validateStatus(results[1]);
@@ -321,11 +343,13 @@ footer a { color: var(--info); }
       body.setAttribute('data-polls', String(polls));
       body.setAttribute('data-state', 'live');
       el.error.textContent = '';
-      if (polls % UPDATES_EVERY_POLLS === 1) {
-        getJson('/api/updates').then(renderUpdates, function (error) {
-          el.updates.textContent = String(error.message || error);
+      if (!updatesLoaded || polls % UPDATES_EVERY_POLLS === 0) {
+        return getJson('/api/updates').then(function (updates) {
+          renderUpdates(validateUpdates(updates));
+          updatesLoaded = true;
         });
       }
+      return undefined;
     }).catch(function (error) {
       showError('API unreachable: ' + String(error && error.message ? error.message : error));
     }).then(function () {
@@ -364,12 +388,15 @@ footer a { color: var(--info); }
     if (!context) {
       return;
     }
-    var ratio = window.devicePixelRatio || 1;
     var size = Math.max(1, Math.floor(canvas.clientWidth || 400));
-    if (canvas.width !== size * ratio) {
-      canvas.width = size * ratio;
-      canvas.height = size * ratio;
+    // Backing-store size is an integer: compare against the rounded value,
+    // or a fractional devicePixelRatio would reset the canvas every frame.
+    var pixels = Math.max(1, Math.round(size * (window.devicePixelRatio || 1)));
+    if (canvas.width !== pixels || canvas.height !== pixels) {
+      canvas.width = pixels;
+      canvas.height = pixels;
     }
+    var ratio = pixels / size;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, size, size);
     var centre = size / 2;
