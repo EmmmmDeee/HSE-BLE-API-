@@ -23,6 +23,8 @@ import android.os.StatFs;
 import android.util.Log;
 
 import java.io.File;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Background service that periodically checks for app updates using the
@@ -272,11 +274,16 @@ public final class UpdateCheckService extends Service {
      * On failure, returns null, allowing the service to retry later. Future implementations
      * can extend this to fetch a live manifest from a remote URL or combine bundled + remote sources.
      *
+     * <p>The stream is drained by {@link Streams#readAllBytes}, not
+     * {@code InputStream.readAllBytes()}: that method exists only from API 33
+     * and threw {@code NoSuchMethodError} — past this {@code catch (Exception)}
+     * — on every API 26–32 device, on first launch.
+     *
      * @return the parsed manifest, or null if loading or parsing fails
      */
     private ReleaseManifest loadReleaseManifest() {
-        try {
-            String manifestText = new String(getAssets().open("release_manifest.txt").readAllBytes());
+        try (InputStream in = getAssets().open("release_manifest.txt")) {
+            String manifestText = new String(Streams.readAllBytes(in), StandardCharsets.UTF_8);
             return ReleaseManifest.parse(manifestText);
         } catch (Exception e) {
             Log.w(TAG, "Failed to load release manifest from assets", e);

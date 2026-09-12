@@ -35,7 +35,9 @@ retroactively rather than in the append-only log's 2026-09-09 entries.
 | `RadarScanService.java` | Foreground service (`connectedDevice` type) that owns the single engine so scanning survives activity recreation; posts the oracle's own "BLE Radar is scanning" notification copy. |
 | `MainActivity.java` | Binds to the service, requests permissions, renders the status line, toggle button, radar view, and device list on a 400 ms timer; UI built from `android.widget` views in code. |
 | `RadarView.java` | Pure rendering of the snapshot: range rings with distance labels, a rotating sweep, and blips colour-coded by `NativeRadar.PROXIMITY_*` and faded by age; it draws every device the engine's Rust policy kept and applies no timeout of its own. |
-| `ApiHttpServer.java` | Loopback-only (`127.0.0.1:8080`) HTTP/1.1 responder over `java.net.ServerSocket` (Android ships no `com.sun.net.httpserver`) serving the ranked snapshot as JSON (`/api/devices`, `/api/status`, `/api/updates`) for a web UI or Termux tooling on the same device; started and stopped with `RadarScanService`. |
+| `ApiHttpServer.java` | Loopback-only (`127.0.0.1:8080`) HTTP/1.1 responder over `java.net.ServerSocket` (Android ships no `com.sun.net.httpserver`) serving the ranked snapshot as JSON (`/api/devices`, `/api/status`, `/api/updates`) and, at `/`, the web dashboard below, for a browser or Termux tooling on the same device; started and stopped with `RadarScanService`. |
+| `assets/dashboard.html` | The web dashboard: one self-contained page (no external scripts, styles or fonts — the app holds no `INTERNET` permission and must work offline) that polls the three JSON endpoints every second and renders the status pills, a canvas radar (log-scale range rings, blips coloured by proximity and faded by freshness, a stable per-address bearing like `RadarView`) and the ranked device table, all through `textContent` so a device name is never markup. Java serves its bytes unchanged; `cargo xtask verify-dashboard-live` renders this exact file in headless Chromium against a mock of the JSON contract. |
+| `Streams.java` | The one `InputStream`-draining helper: `InputStream.readAllBytes()` is API 33+ while `minSdkVersion` is 26, so every asset read (the dashboard, `release_manifest.txt`) goes through this loop; `verify-android-live` runs lint's `NewApi` check so no such call comes back. |
 | `UpdateCheckService.java` | The automatic-update orchestration (`docs/AUTO_UPDATE.md`): throttle → bundled manifest → `NativeRadar.updateDecision` → real network/battery/storage conditions → `NativeRadar.downloadReadiness` → `DownloadManager` → `NativeRadar.artifactVerifyFile` (the Rust `ArtifactVerifier`, streamed over the file) → system installer via the DownloadManager `content://` URI; retries paced by `NativeRadar.retryBackoffDelaySeconds`; a `dataSync` foreground service when started from a retry alarm. |
 | `ReleaseManifest.java` | A thin holder over the Rust core's validation: a text is accepted exactly when `bleradar_core::update::ReleaseManifest::parse` accepts it (`NativeRadar.releaseManifestCanonical`), every field is read back through `NativeRadar.releaseManifestField`, and `serialize()` is the canonical form Rust emitted. Java parses nothing. |
 | `UpdateRetryReceiver.java`, `BootCompletedReceiver.java` | Retry-alarm and boot receivers that restart `UpdateCheckService` (as a retry, or to restore an in-flight download) so a deferred update survives idle periods and reboots. |
@@ -187,7 +189,8 @@ authority.
 | Java façade ↔ Rust exports match 1:1 (no missing, no orphan) | `cargo xtask check-jni-contract [lib.so]` (also inside `cargo xtask gates`) | pinned toolchain; an ELF64 little-endian library (host Linux build or the Android cross-compile) | yes (`gates`) |
 | Real JVM loads the host library, links every declared native, checks `abiVersion`, verifies the string bridge's function-table slots against the JDK's `jni.h`, and exercises the tracking, update-decision, device-map and manifest/artifact surfaces (Java strings included) | `cargo xtask verify-jni-live` | a JDK (`javac`/`java`, with `include/jni.h`) | yes |
 | The `bleradar-jni` test suite (unit tests, `jni_bridge`, the export campaign) cross-compiled for `aarch64-linux-android` and executed under `qemu-aarch64` against a Bionic runtime — the shipped architecture and libc | `cargo xtask verify-jni-target` (`cargo xtask prepare-bionic-sysroot <dir>` + `BIONIC_SYSROOT` to reuse an extracted runtime) | NDK, `qemu-user-static`, `debugfs` and the `android-24` arm64-v8a system image, or `BIONIC_SYSROOT` | yes (`android-apk` job, runtime cached) |
-| Cross-compile, package, sign, and inspect the APK (entries, DEX classes, exports) | `cargo xtask build-apk`, `cargo xtask verify-android-live` | Android SDK build-tools, platform `android.jar`, NDK, JDK | yes (`android-apk` job installs the pinned platform, build-tools and NDK) |
+| Cross-compile, package, sign, and inspect the APK (entries including `assets/dashboard.html` and `assets/release_manifest.txt`, DEX classes, exports), and lint's `NewApi` check that no library call exceeds the manifest's `minSdkVersion` | `cargo xtask build-apk`, `cargo xtask verify-android-live` | Android SDK build-tools, platform `android.jar`, `cmdline-tools` (`lint`), NDK, JDK | yes (`android-apk` job installs the pinned platform, build-tools and NDK) |
+| The web dashboard renders live data in a real browser engine: headless Chromium loads the committed `assets/dashboard.html` from a mock of the JSON contract and the rendered DOM must show every device in server order (escaped), more than one completed poll, and the error banner when the API answers `500` or the wrong shape | `cargo xtask verify-dashboard-live` | a Chromium/Chrome binary (`BLERADAR_CHROMIUM`, `PATH`, or Playwright's cache) | yes (`web-dashboard` job; the runner image ships Google Chrome) |
 | Install, scan, and differential comparison against the oracle on a device | — | an ARM64 Android/Bionic device or emulator, and the original signing key for update identity | no (MIG-003, EXT-006) |
 
 `ANDROID_HOME`/`ANDROID_SDK_ROOT` locate the SDK for the last two commands
@@ -202,7 +205,13 @@ decision #86 — then 31 ↔ 31 after the string bridge and the
 manifest/artifact surface — decision #87). Since decision #86 the
 `android-apk` CI job rebuilds the
 package from every push, so Java that does not compile against the real
-`android.jar` can no longer reach `main` unnoticed.
+`android.jar` can no longer reach `main` unnoticed. Since decision #89 the
+build also packages `src/main/assets/` (`aapt2 link -A`; no earlier APK
+carried the bundled `release_manifest.txt` — COR-029), `verify-android-live`
+requires both asset entries and runs lint's `NewApi` check (which found the
+API-33 `readAllBytes()` call on this minSdk-26 app — COR-028), and the
+committed APK is the #89 build (SHA-256 `d9211697…0014`, 406,094 bytes; the
+native library byte-identical to the #87 build).
 
 Reproducibility, observed 2026-09-10 by rebuilding the then-committed APK on
 a different host (build-tools 37.0.0, NDK 27.3.13750724, platform

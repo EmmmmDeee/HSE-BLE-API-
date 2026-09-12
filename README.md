@@ -326,8 +326,36 @@ post-build verification that the generated APK contains the required manifest,
 DEX, and JNI library entries, that the built DEX defines the critical Android
 classes, and that the cross-compiled native library exports exactly the JNI
 entrypoints `NativeRadar.java` declares (the same export-contract rule as
-`gates`, applied to the `aarch64-linux-android` build). Design decisions for
-the app itself are recorded in `docs/ANDROID_APP.md`.
+`gates`, applied to the `aarch64-linux-android` build). It also runs Android
+lint's `NewApi` check over the app sources, so a `java.*`/`android.*` call
+newer than the manifest's `minSdkVersion` (which `javac` and `d8` accept and
+which crashes older devices at run time) fails the build. Design decisions
+for the app itself are recorded in `docs/ANDROID_APP.md`.
+
+## Web dashboard (Termux / browser on the device)
+
+While `RadarScanService` runs, the app serves a loopback-only HTTP API on
+`http://127.0.0.1:8080/` — `/api/devices`, `/api/status`, `/api/updates` as
+JSON — and, at `/`, a self-contained web dashboard (`android/app/src/main/assets/dashboard.html`)
+that polls them every second and renders the status, a canvas radar and the
+ranked device table. Open it in any browser on the device (from Termux:
+`termux-open-url http://127.0.0.1:8080/`, or `curl http://127.0.0.1:8080/api/devices`
+for the JSON); from another machine, tunnel it with
+`ssh -L 8080:127.0.0.1:8080 <device>` — nothing off-device can reach the
+port directly.
+
+```sh
+cargo xtask verify-dashboard-live
+```
+
+This renders the committed page in headless Chromium against a mock of the
+documented JSON contract and checks the DOM it produced: every fixture device
+in the server's order with its name rendered as text (never markup), more
+than one completed poll, and the error banner when the API answers `500` or a
+response of the wrong shape. It needs a Chromium/Chrome binary
+(`BLERADAR_CHROMIUM=<path>`, one of `chromium`/`chromium-browser`/`google-chrome`
+on `PATH`, or Playwright's browser cache); CI's `web-dashboard` job runs it
+on every push and pull request.
 
 ## Parity report
 

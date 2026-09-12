@@ -76,15 +76,19 @@ build-tools 37.0.0, NDK 27.3.13750724, platform android-36, OpenJDK 21.0.10;
 on this host from the decision #86 sources (exit 0; APK SHA-256
 `e69204c7…60acfa`) and the decision #87 sources (exit 0; APK SHA-256
 `3e3670fb…daa64`; the `android-apk` CI job now repeats this build on every
-push and pull request):
+push and pull request), and once more from the decision #89 sources (exit 0
+in 12 s warm; APK SHA-256 `d9211697…0014`, 406,094 bytes, the first build to
+carry `assets/`):
 
 | Check | Outcome |
 |---|---|
 | Cross-compile `bleradar-jni` → `aarch64-linux-android` release | **Validated** |
-| aapt2 compile/link, javac, d8, zipalign, apksigner (v2+v3) | **Validated** |
+| aapt2 compile/link (with `-A assets/`), javac, d8, zipalign, apksigner (v2+v3) | **Validated** |
 | Output `HSE-BLE-Radar-arm64-v1.0.0.apk` | **Validated** (installable package artifact) |
-| Required APK entries (manifest, classes.dex, arm64 `.so`, resources.arsc) | **Validated** |
-| Required DEX classes (MainActivity, NativeRadar, RadarScanService, BleScanEngine) | **Validated** |
+| Required APK entries (manifest, classes.dex, arm64 `.so`, resources.arsc, `assets/dashboard.html`, `assets/release_manifest.txt`) | **Validated** (2026-09-12; the two asset entries failed on the pre-#89 pipeline, which never packaged `assets/` — COR-029) |
+| Required DEX classes (MainActivity, NativeRadar, RadarScanService, BleScanEngine, ApiHttpServer) | **Validated** |
+| Android lint `NewApi`: no `java.*`/`android.*` call newer than `minSdkVersion` 26 | **Validated** (2026-09-12, "No issues found."; the pre-#89 sources failed on `InputStream#readAllBytes` at API 33 — COR-028) |
+| The web dashboard renders live data in headless Chromium against a mock of the JSON contract (`cargo xtask verify-dashboard-live`) | **Validated** (2026-09-12, Chromium 141: healthy `polls=4`, every device in order and escaped; `500` and wrong-shape answers show the banner; run by the `web-dashboard` CI job) |
 | JNI export contract derived from `NativeRadar.java` (`check-jni-contract`: every `static native` ↔ one `Java_com_hse_bleradar_NativeRadar_*` export, no orphans) | **Validated** (2026-09-11, 25 ↔ 25 against the then-committed APK's `lib/arm64-v8a/libbleradar_jni.so`, SHA-256 `29d89f14…e8de02`; 2026-09-12, 27 ↔ 27 against the regenerated APK's `.so`, SHA-256 `c9d9e99a…d4b84`, then 31 ↔ 31 against the `.so` regenerated for decision #87, SHA-256 `e27e42ac…9253`) |
 | `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=8, `linked-natives=25`, 2026-09-11; abi=9, `linked-natives=27`, then abi=10, `linked-natives=31` with the string bridge exercised through real Java strings, 2026-09-12; run by CI) |
 | On-device install / BLE scan / original-oracle differential | **Unverified** — no emulator, physical device, or original signing key (MIG-003) |
