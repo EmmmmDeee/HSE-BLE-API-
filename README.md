@@ -352,7 +352,10 @@ This renders the committed page in headless Chromium against a mock of the
 documented JSON contract and checks the DOM it produced: every fixture device
 in the server's order with its name rendered as text (never markup), more
 than one completed poll, and the error banner when the API answers `500` or a
-response of the wrong shape. It needs a Chromium/Chrome binary
+response of the wrong shape. Before rendering, it locks the contract itself:
+the field names `ApiHttpServer.java` writes per endpoint must equal the
+mock's keys and cover every property the page reads (the same check runs as
+an xtask unit test inside `gates`). It needs a Chromium/Chrome binary
 (`BLERADAR_CHROMIUM=<path>`, one of `chromium`/`chromium-browser`/`google-chrome`
 on `PATH`, or Playwright's browser cache); CI's `web-dashboard` job runs it
 on every push and pull request.

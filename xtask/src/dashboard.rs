@@ -13,16 +13,16 @@
 //! the wrong shape — and the last two must surface the error banner rather
 //! than a blank or silently stale page.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -43,13 +43,22 @@ const BROWSER_TIMEOUT: Duration = Duration::from_secs(90);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Executables tried on `PATH`, in order, when `BLERADAR_CHROMIUM` is unset.
+/// Google Chrome comes first because on GitHub's Ubuntu runner image
+/// `/usr/bin/chromium` and `/usr/bin/chromium-browser` are snap wrapper
+/// stubs that hang instead of starting a browser (the first CI run of this
+/// command timed out on exactly that); every candidate is probed with
+/// `--version` before it is trusted, so such stubs are skipped either way.
 const PATH_CANDIDATES: &[&str] = &[
-    "chromium",
-    "chromium-browser",
     "google-chrome",
     "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
     "chrome",
 ];
+/// How long a candidate may take to answer `--version`.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait for a finished (or killed) process's output readers.
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `/api/devices` as `ApiHttpServer.devicesJson` writes it (`JsonWriter`
 /// renders every double with a fraction, `null` for NaN, `null` for a
@@ -293,11 +302,12 @@ fn serve_connection(
     let _ = stream.flush();
 }
 
-/// Finds a Chromium/Chrome binary: `BLERADAR_CHROMIUM` (must exist), then
-/// the `PATH` candidates, then Playwright's browser cache
-/// (`PLAYWRIGHT_BROWSERS_PATH` or `~/.cache/ms-playwright`, newest
-/// `chromium-*` first).
-pub fn locate_chromium() -> Result<PathBuf, String> {
+/// Finds a working Chromium/Chrome binary and its version line:
+/// `BLERADAR_CHROMIUM` (must exist and answer `--version`), then the `PATH`
+/// candidates, then Playwright's browser cache (`PLAYWRIGHT_BROWSERS_PATH`
+/// or `~/.cache/ms-playwright`, newest `chromium-*` first), each probed
+/// with `--version` and skipped if it does not answer.
+pub fn locate_chromium() -> Result<(PathBuf, String), String> {
     let home = env::var_os("HOME").map(PathBuf::from);
     let mut caches = Vec::new();
     if let Some(dir) = env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
@@ -310,33 +320,62 @@ pub fn locate_chromium() -> Result<PathBuf, String> {
         env::var_os("BLERADAR_CHROMIUM").as_deref(),
         env::var_os("PATH").as_deref(),
         &caches,
+        probe_browser,
     )
 }
 
-/// The pure resolution behind [`locate_chromium`].
+/// Runs `<candidate> --version` under [`PROBE_TIMEOUT`] and returns the
+/// version line, or why the candidate is unusable (a wrapper stub that
+/// hangs or exits without a version, a binary missing its libraries).
+pub fn probe_browser(candidate: &Path) -> Result<String, String> {
+    let mut command = Command::new(candidate);
+    command.arg("--version");
+    let outcome = run_with_timeout(command, PROBE_TIMEOUT)?;
+    let version = String::from_utf8_lossy(&outcome.stdout).trim().to_string();
+    if !outcome.status.success() || version.is_empty() {
+        return Err(format!(
+            "`--version` exited with {} without a version line; stderr tail:\n{}",
+            outcome.status,
+            tail(&String::from_utf8_lossy(&outcome.stderr), 5)
+        ));
+    }
+    Ok(version)
+}
+
+/// The pure resolution behind [`locate_chromium`]: the first candidate the
+/// probe accepts, in the order override → `PATH` → Playwright cache. An
+/// override that fails the probe is an error, never skipped; the error for
+/// no working candidate lists every rejected one and why.
 pub fn resolve_chromium(
     override_path: Option<&OsStr>,
     search_path: Option<&OsStr>,
     playwright_caches: &[PathBuf],
-) -> Result<PathBuf, String> {
+    probe: impl Fn(&Path) -> Result<String, String>,
+) -> Result<(PathBuf, String), String> {
     if let Some(value) = override_path {
         let path = PathBuf::from(value);
-        if path.is_file() {
-            return Ok(path);
+        if !path.is_file() {
+            return Err(format!(
+                "BLERADAR_CHROMIUM={} is not a file",
+                path.display()
+            ));
         }
-        return Err(format!(
-            "BLERADAR_CHROMIUM={} is not a file",
-            path.display()
-        ));
+        let version = probe(&path).map_err(|reason| {
+            format!(
+                "BLERADAR_CHROMIUM={} is not a working browser: {reason}",
+                path.display()
+            )
+        })?;
+        return Ok((path, version));
     }
+    let mut candidates = Vec::new();
     if let Some(search_path) = search_path {
         for name in PATH_CANDIDATES {
-            if let Some(found) = env::split_paths(search_path)
-                .map(|dir| dir.join(name))
-                .find(|candidate| candidate.is_file())
-            {
-                return Ok(found);
-            }
+            candidates.extend(
+                env::split_paths(search_path)
+                    .map(|dir| dir.join(name))
+                    .filter(|candidate| candidate.is_file()),
+            );
         }
     }
     for cache in playwright_caches {
@@ -353,24 +392,35 @@ pub fn resolve_chromium(
             })
             .collect();
         builds.sort();
-        if let Some(chrome) = builds
-            .iter()
-            .rev()
-            .map(|build| build.join("chrome-linux/chrome"))
-            .find(|chrome| chrome.is_file())
-        {
-            return Ok(chrome);
+        candidates.extend(
+            builds
+                .iter()
+                .rev()
+                .map(|build| build.join("chrome-linux/chrome"))
+                .filter(|chrome| chrome.is_file()),
+        );
+    }
+    let mut rejected = Vec::new();
+    for candidate in candidates {
+        match probe(&candidate) {
+            Ok(version) => return Ok((candidate, version)),
+            Err(reason) => rejected.push(format!("{}: {reason}", candidate.display())),
         }
     }
-    Err(format!(
-        "no Chromium/Chrome found: set BLERADAR_CHROMIUM=<binary>, put one of {} on PATH, or install Playwright's chromium",
+    let mut message = format!(
+        "no working Chromium/Chrome found: set BLERADAR_CHROMIUM=<binary>, put one of {} on PATH, or install Playwright's chromium",
         PATH_CANDIDATES.join(", ")
-    ))
+    );
+    if !rejected.is_empty() {
+        message.push_str("; rejected: ");
+        message.push_str(&rejected.join("; "));
+    }
+    Err(message)
 }
 
 /// Runs the browser headless on `url` for [`VIRTUAL_TIME_BUDGET_MS`] of
-/// virtual time and returns the serialized DOM (`--dump-dom`), or a
-/// screenshot's bytes when `screenshot` is set.
+/// virtual time and returns the serialized DOM (`--dump-dom`), or writes a
+/// screenshot when `screenshot` is set.
 pub fn render(
     chromium: &Path,
     url: &str,
@@ -397,8 +447,37 @@ pub fn render(
             command.arg("--dump-dom");
         }
     }
+    command.arg(url);
+    let program = format!("{command:?}");
+    let outcome = run_with_timeout(command, BROWSER_TIMEOUT)?;
+    if !outcome.status.success() {
+        return Err(format!(
+            "{program} exited with {}; stderr tail:\n{}",
+            outcome.status,
+            tail(&String::from_utf8_lossy(&outcome.stderr), 20)
+        ));
+    }
+    String::from_utf8(outcome.stdout)
+        .map_err(|e| format!("the browser printed non-UTF-8 output: {e}"))
+}
+
+/// What a bounded child process produced.
+#[derive(Debug)]
+pub struct Outcome {
+    /// The exit status.
+    pub status: ExitStatus,
+    /// Everything written to stdout.
+    pub stdout: Vec<u8>,
+    /// Everything written to stderr.
+    pub stderr: Vec<u8>,
+}
+
+/// Runs `command` with piped output and kills it at `timeout`; a timeout is
+/// an error carrying the stderr written so far. Output is collected on
+/// threads and waited for with a bound, so a grandchild that inherits a
+/// pipe (a browser's renderer) can never hang the caller.
+fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<Outcome, String> {
     command
-        .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -406,43 +485,51 @@ pub fn render(
     let mut child = command
         .spawn()
         .map_err(|e| format!("failed to spawn {program}: {e}"))?;
-    let stdout = child.stdout.take().ok_or("browser stdout not captured")?;
-    let stderr = child.stderr.take().ok_or("browser stderr not captured")?;
-    let stdout_thread = thread::spawn(move || read_all(stdout));
-    let stderr_thread = thread::spawn(move || read_all(stderr));
-    let deadline = Instant::now() + BROWSER_TIMEOUT;
+    let stdout = child.stdout.take().ok_or("stdout not captured")?;
+    let stderr = child.stderr.take().ok_or("stderr not captured")?;
+    let stdout_rx = drain_in_background(stdout);
+    let stderr_rx = drain_in_background(stderr);
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child
             .try_wait()
-            .map_err(|e| format!("waiting for the browser: {e}"))?
+            .map_err(|e| format!("waiting for {program}: {e}"))?
         {
             break status;
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            let stderr = stderr_rx
+                .recv_timeout(OUTPUT_DRAIN_TIMEOUT)
+                .unwrap_or_default();
             return Err(format!(
-                "the browser did not finish within {}s: {program}",
-                BROWSER_TIMEOUT.as_secs()
+                "{program} did not finish within {timeout:?}; stderr tail:\n{}",
+                tail(&String::from_utf8_lossy(&stderr), 20)
             ));
         }
         thread::sleep(Duration::from_millis(50));
     };
-    let stdout = stdout_thread.join().unwrap_or_default();
-    let stderr = stderr_thread.join().unwrap_or_default();
-    if !status.success() {
-        return Err(format!(
-            "{program} exited with {status}; stderr tail:\n{}",
-            tail(&String::from_utf8_lossy(&stderr), 20)
-        ));
-    }
-    String::from_utf8(stdout).map_err(|e| format!("the browser printed non-UTF-8 output: {e}"))
+    Ok(Outcome {
+        status,
+        stdout: stdout_rx
+            .recv_timeout(OUTPUT_DRAIN_TIMEOUT)
+            .unwrap_or_default(),
+        stderr: stderr_rx
+            .recv_timeout(OUTPUT_DRAIN_TIMEOUT)
+            .unwrap_or_default(),
+    })
 }
 
-fn read_all(mut source: impl Read) -> Vec<u8> {
-    let mut buffer = Vec::new();
-    let _ = source.read_to_end(&mut buffer);
-    buffer
+/// Reads `source` to its end on a thread; the receiver yields the bytes once.
+fn drain_in_background(mut source: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = source.read_to_end(&mut buffer);
+        let _ = tx.send(buffer);
+    });
+    rx
 }
 
 fn tail(text: &str, lines: usize) -> String {
@@ -564,6 +651,177 @@ pub fn data_polls(dom: &str) -> Option<u32> {
     rest[..end].parse().ok()
 }
 
+/// The Java side of the contract: the only writer of the three JSON documents.
+pub const API_HTTP_SERVER_JAVA_PATH: &str =
+    "android/app/src/main/java/com/hse/bleradar/ApiHttpServer.java";
+
+/// The three endpoints: path, the `ApiHttpServer` method that writes it, the
+/// fixture the mock serves, and the page variables that hold its object.
+const ENDPOINTS: [(&str, &str, &str, &[&str]); 3] = [
+    (
+        "/api/devices",
+        "devicesJson",
+        DEVICES_JSON,
+        &["device", "snapshot"],
+    ),
+    ("/api/status", "statusJson", STATUS_JSON, &["status"]),
+    ("/api/updates", "updatesJson", UPDATES_JSON, &["updates"]),
+];
+
+/// Locks the three views of the JSON contract together, so a field renamed,
+/// added or dropped on one side alone fails a gate instead of waiting for a
+/// device: the names `ApiHttpServer.<method>` writes must equal the keys of
+/// the fixture the browser is shown, and every property the page reads from
+/// that endpoint's object must be one the writer emits. Returns the field
+/// count per endpoint.
+pub fn check_json_contract(
+    java_source: &str,
+    page: &str,
+) -> Result<BTreeMap<&'static str, usize>, String> {
+    let mut counts = BTreeMap::new();
+    for (endpoint, method, fixture, variables) in ENDPOINTS {
+        let written = java_json_fields(java_source, method)?;
+        let fixture_keys = json_object_keys(fixture);
+        if written != fixture_keys {
+            return Err(format!(
+                "{endpoint}: ApiHttpServer.{method} writes {written:?} but the fixture has {fixture_keys:?}"
+            ));
+        }
+        for variable in variables {
+            let reads = page_reads(page, variable);
+            if reads.is_empty() {
+                return Err(format!("{endpoint}: the page never reads `{variable}.…`"));
+            }
+            if let Some(unknown) = reads.iter().find(|name| !written.contains(*name)) {
+                return Err(format!(
+                    "{endpoint}: the page reads `{variable}.{unknown}`, which ApiHttpServer.{method} never writes"
+                ));
+            }
+        }
+        counts.insert(endpoint, written.len());
+    }
+    Ok(counts)
+}
+
+/// The JSON field names one `String <method>()` of `ApiHttpServer.java`
+/// writes: every `writer.name("…")` and `writeFinite(writer, "…", …)` in
+/// its body.
+pub fn java_json_fields(source: &str, method: &str) -> Result<BTreeSet<String>, String> {
+    let body = java_method_body(source, method)?;
+    let mut fields = BTreeSet::new();
+    for prefix in ["writer.name(\"", "writeFinite(writer, \""] {
+        let mut rest = body;
+        while let Some(start) = rest.find(prefix) {
+            let after = &rest[start + prefix.len()..];
+            let end = after
+                .find('"')
+                .ok_or_else(|| format!("unterminated field name in {method}"))?;
+            fields.insert(after[..end].to_string());
+            rest = &after[end..];
+        }
+    }
+    if fields.is_empty() {
+        return Err(format!("ApiHttpServer.{method} writes no JSON field"));
+    }
+    Ok(fields)
+}
+
+/// The body of `String <method>()`, from its opening brace to the matching
+/// closing brace, with string and character literals skipped.
+fn java_method_body<'a>(source: &'a str, method: &str) -> Result<&'a str, String> {
+    let signature = format!("String {method}()");
+    let start = source
+        .find(&signature)
+        .ok_or_else(|| format!("`{signature}` not found in ApiHttpServer.java"))?;
+    let open = start
+        + source[start..]
+            .find('{')
+            .ok_or_else(|| format!("`{signature}` has no body"))?;
+    let mut depth = 0usize;
+    let mut literal: Option<char> = None;
+    let mut escaped = false;
+    for (offset, ch) in source[open..].char_indices() {
+        if let Some(quote) = literal {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                literal = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => literal = Some(ch),
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(&source[open..open + offset + 1]);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(format!("`{signature}` body is unterminated"))
+}
+
+/// Every object key (`"key":`) in a JSON text, at any depth; string values
+/// are never keys because nothing but whitespace may separate a key from
+/// its colon.
+pub fn json_object_keys(json: &str) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let bytes = json.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j] != b'"' {
+            if bytes[j] == b'\\' {
+                j += 1;
+            }
+            j += 1;
+        }
+        if j >= bytes.len() {
+            break;
+        }
+        if json[j + 1..].trim_start().starts_with(':') {
+            keys.insert(json[i + 1..j].to_string());
+        }
+        i = j + 1;
+    }
+    keys
+}
+
+/// The properties the page reads from `variable` (`variable.name`), ignoring
+/// occurrences that are themselves the tail of a property chain such as
+/// `el.updates.textContent`.
+pub fn page_reads(html: &str, variable: &str) -> BTreeSet<String> {
+    let is_identifier = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let pattern = format!("{variable}.");
+    let mut reads = BTreeSet::new();
+    let mut from = 0;
+    while let Some(found) = html[from..].find(&pattern) {
+        let start = from + found;
+        let chained = html[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c == '.' || is_identifier(c));
+        let name: String = html[start + pattern.len()..]
+            .chars()
+            .take_while(|c| is_identifier(*c))
+            .collect();
+        if !chained && name.chars().next().is_some_and(|c| !c.is_ascii_digit()) {
+            reads.insert(name);
+        }
+        from = start + pattern.len();
+    }
+    reads
+}
+
 /// Request counts the healthy run must reach: the page, more than one
 /// devices/status poll, and the updates endpoint on its first poll.
 pub fn check_requests(counts: &BTreeMap<String, usize>) -> Result<(), String> {
@@ -585,17 +843,31 @@ pub fn check_requests(counts: &BTreeMap<String, usize>) -> Result<(), String> {
 
 /// The whole command: locate the browser, read the page, run every scenario.
 pub fn run(root: &Path) -> Result<(), String> {
-    let chromium = locate_chromium()?;
+    let (chromium, version) = locate_chromium()?;
     let asset_path = root.join(DASHBOARD_ASSET_PATH);
     let dashboard = Arc::new(
         fs::read(&asset_path).map_err(|e| format!("reading {}: {e}", asset_path.display()))?,
+    );
+    let java_path = root.join(API_HTTP_SERVER_JAVA_PATH);
+    let java_source = fs::read_to_string(&java_path)
+        .map_err(|e| format!("reading {}: {e}", java_path.display()))?;
+    let page = std::str::from_utf8(&dashboard)
+        .map_err(|e| format!("{DASHBOARD_ASSET_PATH} is not UTF-8: {e}"))?;
+    let fields = check_json_contract(&java_source, page)?;
+    let summary: Vec<String> = fields
+        .iter()
+        .map(|(endpoint, count)| format!("{endpoint}={count}"))
+        .collect();
+    println!(
+        "json contract: ApiHttpServer writer = fixture keys ⊇ page reads ({})",
+        summary.join(", ")
     );
     let output_dir = root.join(OUTPUT_DIR);
     let _ = fs::remove_dir_all(&output_dir);
     fs::create_dir_all(&output_dir)
         .map_err(|e| format!("creating {}: {e}", output_dir.display()))?;
     println!(
-        "browser={} ({} bytes of dashboard from {})",
+        "browser={} ({version}); {} bytes of dashboard from {}",
         chromium.display(),
         dashboard.len(),
         DASHBOARD_ASSET_PATH
@@ -830,7 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn chromium_resolution_prefers_the_override_then_path_then_playwright_cache() {
+    fn chromium_resolution_probes_candidates_in_override_path_cache_order() {
         let scratch =
             env::temp_dir().join(format!("xtask-chromium-resolve-{}", std::process::id()));
         let _ = fs::remove_dir_all(&scratch);
@@ -840,38 +1112,105 @@ mod tests {
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&build).unwrap();
         fs::create_dir_all(cache.join("chromium-1100/chrome-linux")).unwrap();
-        fs::write(build.join("chrome"), b"").unwrap();
-        fs::write(cache.join("chromium-1100/chrome-linux/chrome"), b"").unwrap();
+        fs::write(build.join("chrome"), b"ok").unwrap();
+        fs::write(cache.join("chromium-1100/chrome-linux/chrome"), b"ok").unwrap();
+        // A snap wrapper stub, as GitHub's runner image has at /usr/bin/chromium.
+        fs::write(bin.join("chromium"), b"stub").unwrap();
         let empty_path = OsStr::new("");
+        // The fake probe: a candidate answers `--version` iff its content is "ok".
+        let probe = |candidate: &Path| -> Result<String, String> {
+            if fs::read(candidate).unwrap_or_default() == b"ok" {
+                Ok(format!("Chromium 141 at {}", candidate.display()))
+            } else {
+                Err("hangs".to_string())
+            }
+        };
 
         let missing = scratch.join("missing");
         assert!(
-            resolve_chromium(Some(missing.as_os_str()), None, &[])
+            resolve_chromium(Some(missing.as_os_str()), None, &[], probe)
                 .unwrap_err()
-                .contains("BLERADAR_CHROMIUM")
+                .contains("is not a file")
+        );
+        let stub = bin.join("chromium");
+        assert!(
+            resolve_chromium(Some(stub.as_os_str()), None, &[], probe)
+                .unwrap_err()
+                .contains("is not a working browser: hangs"),
+            "an override is never silently skipped"
         );
         let override_bin = build.join("chrome");
         assert_eq!(
-            resolve_chromium(Some(override_bin.as_os_str()), None, &[]).unwrap(),
-            override_bin
+            resolve_chromium(Some(override_bin.as_os_str()), None, &[], probe).unwrap(),
+            (
+                override_bin.clone(),
+                format!("Chromium 141 at {}", override_bin.display())
+            )
         );
 
-        fs::write(bin.join("google-chrome"), b"").unwrap();
-        assert_eq!(
-            resolve_chromium(None, Some(bin.as_os_str()), std::slice::from_ref(&cache)).unwrap(),
-            bin.join("google-chrome")
-        );
-        assert_eq!(
-            resolve_chromium(None, Some(empty_path), std::slice::from_ref(&cache)).unwrap(),
-            build.join("chrome"),
-            "the newest Playwright build wins"
-        );
+        // Only the stub on PATH: skipped, the Playwright cache wins (newest build).
+        let (found, _) = resolve_chromium(
+            None,
+            Some(bin.as_os_str()),
+            std::slice::from_ref(&cache),
+            probe,
+        )
+        .unwrap();
+        assert_eq!(found, build.join("chrome"));
+
+        // A working google-chrome on PATH beats both the stub and the cache.
+        fs::write(bin.join("google-chrome"), b"ok").unwrap();
+        let (found, _) = resolve_chromium(
+            None,
+            Some(bin.as_os_str()),
+            std::slice::from_ref(&cache),
+            probe,
+        )
+        .unwrap();
+        assert_eq!(found, bin.join("google-chrome"));
+
+        let error = resolve_chromium(None, Some(empty_path), &[], probe).unwrap_err();
         assert!(
-            resolve_chromium(None, Some(empty_path), &[])
-                .unwrap_err()
-                .contains("BLERADAR_CHROMIUM")
+            error.contains("BLERADAR_CHROMIUM") && !error.contains("rejected"),
+            "{error}"
+        );
+        fs::remove_file(bin.join("google-chrome")).unwrap();
+        let error = resolve_chromium(None, Some(bin.as_os_str()), &[], probe).unwrap_err();
+        assert!(
+            error.contains("rejected: ") && error.contains("chromium: hangs"),
+            "{error}"
         );
         let _ = fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn bounded_processes_are_killed_at_the_timeout_and_drained_on_success() {
+        let mut hang = Command::new("sleep");
+        hang.arg("30");
+        let error = run_with_timeout(hang, Duration::from_millis(200)).unwrap_err();
+        assert!(error.contains("did not finish within 200ms"), "{error}");
+
+        let mut chatty = Command::new("sh");
+        chatty.args(["-c", "echo version-line; echo noise >&2; exit 0"]);
+        let outcome = run_with_timeout(chatty, Duration::from_secs(10)).unwrap();
+        assert!(outcome.status.success());
+        assert_eq!(outcome.stdout, b"version-line\n");
+        assert_eq!(outcome.stderr, b"noise\n");
+
+        let mut failing = Command::new("sh");
+        failing.args(["-c", "echo why >&2; exit 3"]);
+        let outcome = run_with_timeout(failing, Duration::from_secs(10)).unwrap();
+        assert_eq!(outcome.status.code(), Some(3));
+
+        // probe_browser on the same shapes: a stub that hangs is rejected
+        // (by the caller's timeout), a real answer is the version line.
+        let mut versioned = Command::new("sh");
+        versioned.args(["-c", "echo Chromium 141.0"]);
+        let outcome = run_with_timeout(versioned, PROBE_TIMEOUT).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&outcome.stdout).trim(),
+            "Chromium 141.0"
+        );
     }
 
     #[test]
@@ -882,6 +1221,94 @@ mod tests {
         );
         assert_eq!(data_polls(r#"<body data-polls="x">"#), None);
         assert_eq!(data_polls("<body>"), None);
+    }
+
+    const API_HTTP_SERVER_JAVA: &str =
+        include_str!("../../android/app/src/main/java/com/hse/bleradar/ApiHttpServer.java");
+    const DASHBOARD_HTML: &str = include_str!("../../android/app/src/main/assets/dashboard.html");
+
+    #[test]
+    fn json_contract_locks_the_java_writer_the_fixture_and_the_page_together() {
+        let counts = check_json_contract(API_HTTP_SERVER_JAVA, DASHBOARD_HTML).unwrap();
+        assert_eq!(counts.get("/api/devices"), Some(&15));
+        assert_eq!(counts.get("/api/status"), Some(&4));
+        assert_eq!(counts.get("/api/updates"), Some(&3));
+
+        let renamed = API_HTTP_SERVER_JAVA.replace(
+            "writer.name(\"last_seen_ago_ms\")",
+            "writer.name(\"last_seen_ms\")",
+        );
+        let error = check_json_contract(&renamed, DASHBOARD_HTML).unwrap_err();
+        assert!(
+            error.starts_with("/api/devices: ApiHttpServer.devicesJson writes"),
+            "{error}"
+        );
+        assert!(
+            error.contains("last_seen_ms") && error.contains("last_seen_ago_ms"),
+            "{error}"
+        );
+
+        let page_drift = DASHBOARD_HTML.replace("status.uptime_ms", "status.uptime");
+        assert_eq!(
+            check_json_contract(API_HTTP_SERVER_JAVA, &page_drift).unwrap_err(),
+            "/api/status: the page reads `status.uptime`, which ApiHttpServer.statusJson never writes"
+        );
+
+        let dropped = API_HTTP_SERVER_JAVA
+            .replace("writer.name(\"retry_count\")", "writer.name(\"retries\")");
+        assert!(
+            check_json_contract(&dropped, DASHBOARD_HTML)
+                .unwrap_err()
+                .starts_with("/api/updates: ApiHttpServer.updatesJson writes")
+        );
+    }
+
+    #[test]
+    fn java_json_fields_reads_one_method_body_and_skips_literals() {
+        let source = r#"
+            private String aJson() throws IOException {
+                String brace = "}"; char other = '{';
+                if (x) { writer.name("one").value(1); }
+                writeFinite(writer, "two", 2.0);
+                return buffer.toString();
+            }
+            private String bJson() { writer.name("three").value(3); return ""; }
+        "#;
+        let a = java_json_fields(source, "aJson").unwrap();
+        assert_eq!(a.iter().collect::<Vec<_>>(), vec!["one", "two"]);
+        let b = java_json_fields(source, "bJson").unwrap();
+        assert_eq!(b.iter().collect::<Vec<_>>(), vec!["three"]);
+        assert!(
+            java_json_fields(source, "cJson")
+                .unwrap_err()
+                .contains("not found")
+        );
+        assert!(
+            java_json_fields("private String dJson() { return null; }", "dJson")
+                .unwrap_err()
+                .contains("writes no JSON field")
+        );
+    }
+
+    #[test]
+    fn json_object_keys_finds_nested_keys_and_ignores_string_values() {
+        let keys = json_object_keys(r#"{"a":{"b":"c:d"},"e":[{"f":1,"g":"h\"i"}],"j" : null}"#);
+        assert_eq!(
+            keys.iter().collect::<Vec<_>>(),
+            vec!["a", "b", "e", "f", "g", "j"]
+        );
+        assert!(json_object_keys(DEVICES_JSON).contains("last_seen_ago_ms"));
+    }
+
+    #[test]
+    fn page_reads_skips_property_chains_and_numeric_tails() {
+        let script = "el.updates.textContent = 1; updates.retry_count; fn(updates); updates.7; x.updates.last_check_ms; (updates.next_check_ms)";
+        let reads = page_reads(script, "updates");
+        assert_eq!(
+            reads.iter().collect::<Vec<_>>(),
+            vec!["next_check_ms", "retry_count"]
+        );
+        assert!(page_reads(script, "device").is_empty());
     }
 
     #[test]
