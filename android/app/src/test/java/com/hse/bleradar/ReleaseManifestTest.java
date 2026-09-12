@@ -4,7 +4,15 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 /**
- * Unit tests for {@link ReleaseManifest} parsing and serialization.
+ * Contract notes for {@link ReleaseManifest}: since decision #87 the manifest
+ * is validated and canonicalized by the Rust update core
+ * ({@code bleradar_core::update::ReleaseManifest::parse}) through
+ * {@code NativeRadar.releaseManifestCanonical}, so every acceptance or
+ * rejection below is the Rust contract (strict: required fields, HTTPS URL,
+ * non-zero size, 64-hex hash, no unknown, duplicate or malformed lines) and
+ * needs the native library to run. The executable lock for the same contract
+ * is {@code crates/bleradar-jni/tests/jni_bridge.rs}, the export campaign, and
+ * the JVM smoke harness of {@code cargo xtask verify-jni-live}.
  */
 public class ReleaseManifestTest {
 
@@ -116,11 +124,11 @@ public class ReleaseManifestTest {
     }
 
     @Test
-    public void defaults_mandatory_to_false() {
+    public void rejects_missing_mandatory() {
+        // mandatory is required by the Rust contract; the old Java parser defaulted it to false
         String noMandatory = VALID_MANIFEST.replaceAll("mandatory = false\n", "");
         ReleaseManifest m = ReleaseManifest.parse(noMandatory);
-        assertNotNull("manifest without mandatory field should parse", m);
-        assertFalse("mandatory should default to false", m.isMandatory());
+        assertNull("manifest without mandatory field must be rejected", m);
     }
 
     @Test
@@ -158,7 +166,7 @@ public class ReleaseManifestTest {
 
     @Test
     public void boundary_version_code_one() {
-        // versionCode = 1 is the minimum valid version
+        // a small versionCode parses (0 is accepted too; updateDecision compares codes)
         String minVersion = VALID_MANIFEST.replace("version_code = 2", "version_code = 1");
         ReleaseManifest m = ReleaseManifest.parse(minVersion);
         assertNotNull("versionCode=1 should parse", m);
@@ -184,11 +192,12 @@ public class ReleaseManifestTest {
     }
 
     @Test
-    public void rejects_min_sdk_zero() {
-        // minSdk = 0 is invalid (must be >= 1)
+    public void min_sdk_zero_parses() {
+        // min_sdk is any non-negative integer; the OS comparison in updateDecision decides compatibility
         String zeroSdk = VALID_MANIFEST.replace("min_sdk = 26", "min_sdk = 0");
         ReleaseManifest m = ReleaseManifest.parse(zeroSdk);
-        assertNull("minSdk=0 should be rejected", m);
+        assertNotNull("minSdk=0 is accepted", m);
+        assertEquals("minSdk", 0, m.getMinSdk());
     }
 
     @Test
@@ -282,12 +291,11 @@ public class ReleaseManifestTest {
     }
 
     @Test
-    public void version_name_empty_string_parses() {
-        // version_name can be empty (unusual but valid)
+    public void rejects_empty_version_name() {
+        // version_name must not be empty
         String emptyName = VALID_MANIFEST.replace("version_name = 1.0.1", "version_name = ");
         ReleaseManifest m = ReleaseManifest.parse(emptyName);
-        assertNotNull("empty version_name should parse", m);
-        assertEquals("version_name", "", m.getVersionName());
+        assertNull("empty version_name must be rejected", m);
     }
 
     @Test
@@ -347,12 +355,11 @@ public class ReleaseManifestTest {
     }
 
     @Test
-    public void mandatory_invalid_value_parses_as_false() {
-        // Boolean.parseBoolean("invalid") returns false (not an error)
+    public void rejects_invalid_mandatory_value() {
+        // Only "true" or "false" are accepted; the old Java parser read anything else as false
         String invalidBool = VALID_MANIFEST.replace("mandatory = false", "mandatory = maybe");
         ReleaseManifest m = ReleaseManifest.parse(invalidBool);
-        assertNotNull("invalid mandatory value should parse (default to false)", m);
-        assertFalse("mandatory", m.isMandatory());
+        assertNull("invalid mandatory value must be rejected", m);
     }
 
     @Test
@@ -368,21 +375,27 @@ public class ReleaseManifestTest {
     }
 
     @Test
-    public void line_with_no_equals_is_skipped() {
-        // Lines without an '=' are skipped as malformed (logged as warning)
+    public void rejects_line_without_equals() {
+        // A line that is not `key = value` rejects the whole manifest (the old Java parser skipped it)
         String malformedLine = VALID_MANIFEST + "garbage line without equals\n";
         ReleaseManifest m = ReleaseManifest.parse(malformedLine);
-        assertNotNull("manifest with malformed line should still parse", m);
-        assertEquals("version code", 2, m.getVersionCode());
+        assertNull("manifest with a malformed line must be rejected", m);
     }
 
     @Test
-    public void unknown_field_is_ignored() {
-        // Unknown fields like "author = someone" are silently ignored
+    public void rejects_unknown_field() {
+        // An unknown key rejects the manifest (the old Java parser ignored it)
         String unknownField = VALID_MANIFEST + "author = John Doe\n";
         ReleaseManifest m = ReleaseManifest.parse(unknownField);
-        assertNotNull("unknown field should be ignored", m);
-        assertEquals("version code", 2, m.getVersionCode());
+        assertNull("unknown field must be rejected", m);
+    }
+
+    @Test
+    public void rejects_duplicate_field() {
+        // A repeated key rejects the manifest rather than letting the last value win
+        String duplicate = VALID_MANIFEST + "min_sdk = 26\n";
+        ReleaseManifest m = ReleaseManifest.parse(duplicate);
+        assertNull("duplicate field must be rejected", m);
     }
 
     @Test

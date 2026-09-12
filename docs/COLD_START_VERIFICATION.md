@@ -47,6 +47,12 @@ Temurin 21 JDK with `cargo-audit` 0.22.2 / `cargo-deny` 0.20.2 pinned and
 cached. Observed on this host (rustc 1.98.0, OpenJDK 21.0.10): `gates` exit 0
 in 11 s with warm caches; `verify-jni-live` failure path
 `UnsatisfiedLinkError`, success path `linked-natives=25`, `abi=8`.
+Re-observed 2026-09-12 after decision #86 added the device-map policy
+natives: `check-jni-contract` 27 ↔ 27, `verify-jni-live` `linked-natives=27`,
+`abi=9`; and after decision #87 added the string bridge and the
+manifest/artifact natives: 31 ↔ 31, `linked-natives=31`, `abi=10`, with the
+new `jni.h` slot gate reporting 235 `JNINativeInterface_` members in the JDK
+21 header and all 4 `SLOT_*` constants matching.
 
 ## Layer 3 — reconstructed Android APK live build (executed 2026-09-09)
 
@@ -62,7 +68,11 @@ Live results, first on the 2026-09-09 host (Android SDK at
 `/usr/local/lib/android/sdk`) and re-executed 2026-09-10 on a fresh host
 (SDK installed to `/opt/android-sdk` from `commandlinetools-linux-11076708`,
 build-tools 37.0.0, NDK 27.3.13750724, platform android-36, OpenJDK 21.0.10;
-`verify-android-live` exit 0 in 23 s cold, 5 s warm):
+`verify-android-live` exit 0 in 23 s cold, 5 s warm), and again 2026-09-12
+on this host from the decision #86 sources (exit 0; APK SHA-256
+`e69204c7…60acfa`) and the decision #87 sources (exit 0; APK SHA-256
+`3e3670fb…daa64`; the `android-apk` CI job now repeats this build on every
+push and pull request):
 
 | Check | Outcome |
 |---|---|
@@ -71,8 +81,8 @@ build-tools 37.0.0, NDK 27.3.13750724, platform android-36, OpenJDK 21.0.10;
 | Output `HSE-BLE-Radar-arm64-v1.0.0.apk` | **Validated** (installable package artifact) |
 | Required APK entries (manifest, classes.dex, arm64 `.so`, resources.arsc) | **Validated** |
 | Required DEX classes (MainActivity, NativeRadar, RadarScanService, BleScanEngine) | **Validated** |
-| JNI export contract derived from `NativeRadar.java` (`check-jni-contract`: 25 `static native` ↔ 25 `Java_com_hse_bleradar_NativeRadar_*` exports, no orphans) | **Validated** (2026-09-11, against the committed APK's `lib/arm64-v8a/libbleradar_jni.so`, SHA-256 `29d89f14…e8de02`) |
-| `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=8, `linked-natives=25`, 2026-09-11; now also run by CI) |
+| JNI export contract derived from `NativeRadar.java` (`check-jni-contract`: every `static native` ↔ one `Java_com_hse_bleradar_NativeRadar_*` export, no orphans) | **Validated** (2026-09-11, 25 ↔ 25 against the then-committed APK's `lib/arm64-v8a/libbleradar_jni.so`, SHA-256 `29d89f14…e8de02`; 2026-09-12, 27 ↔ 27 against the regenerated APK's `.so`, SHA-256 `c9d9e99a…d4b84`, then 31 ↔ 31 against the `.so` regenerated for decision #87, SHA-256 `e27e42ac…9253`) |
+| `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=8, `linked-natives=25`, 2026-09-11; abi=9, `linked-natives=27`, then abi=10, `linked-natives=31` with the string bridge exercised through real Java strings, 2026-09-12; run by CI) |
 | On-device install / BLE scan / original-oracle differential | **Unverified** — no emulator, physical device, or original signing key (MIG-003) |
 
 Package identity from live `aapt dump badging`:

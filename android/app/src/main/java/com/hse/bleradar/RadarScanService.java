@@ -55,6 +55,7 @@ public final class RadarScanService extends Service {
 
     private final IBinder binder = new LocalBinder();
     private BleScanEngine engine;
+    private ApiHttpServer httpServer;
 
     /** Binder handed to {@link MainActivity} to reach this service's live state. */
     public final class LocalBinder extends Binder {
@@ -68,6 +69,8 @@ public final class RadarScanService extends Service {
         super.onCreate();
         engine = new BleScanEngine(this);
         createNotificationChannel();
+        httpServer = new ApiHttpServer(engine, new UpdateManager(this));
+        httpServer.start();
     }
 
     /**
@@ -94,6 +97,9 @@ public final class RadarScanService extends Service {
 
     @Override
     public void onDestroy() {
+        if (httpServer != null) {
+            httpServer.stop();
+        }
         if (engine != null) {
             engine.stop();
         }

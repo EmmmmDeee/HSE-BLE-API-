@@ -1301,6 +1301,11 @@ public final class JniSmoke {{
         if (type == boolean.class) {{
             return false;
         }}
+        if (type == String.class) {{
+            // Every string-taking native answers a null argument with its
+            // documented sentinel, so null is the safe default here.
+            return null;
+        }}
         throw new IllegalStateException("unsupported native parameter type: " + type.getName());
     }}
 
@@ -1341,7 +1346,7 @@ public final class JniSmoke {{
         System.out.println("linked-natives=" + linked.size());
     }}
 
-    private static void verifySuccessPath() {{
+    private static void verifySuccessPath() throws Exception {{
         require(NativeRadar.isAvailable(), "NativeRadar unavailable: " + NativeRadar.loadError());
         require(
                 NativeRadar.abiVersion() == {expected_abi_version},
@@ -1442,6 +1447,8 @@ public final class JniSmoke {{
                         == distanceWithoutTxPower,
                 "implausible txPowerDbm (TX_POWER_NOT_PRESENT sentinel) was not ignored");
         verifyUpdateDecisionSurface();
+        verifyDeviceMapPolicySurface();
+        verifyManifestSurface();
     }}
 
     /**
@@ -1505,12 +1512,129 @@ public final class JniSmoke {{
                 "retry backoff should be exponential and capped");
     }}
 
+    /**
+     * Exercises the device-map policy natives (ABI 9+) across the real
+     * JVM->.so boundary: the prune decision's ordinal contract and the packed
+     * rank key's tier order, sentinel handling, and clamping.
+     */
+    private static void verifyDeviceMapPolicySurface() {{
+        require(
+                NativeRadar.deviceShouldPrune(NativeRadar.FRESHNESS_STALE),
+                "a stale device must be pruned");
+        require(
+                !NativeRadar.deviceShouldPrune(NativeRadar.FRESHNESS_LIVE)
+                        && !NativeRadar.deviceShouldPrune(NativeRadar.FRESHNESS_RECENT)
+                        && !NativeRadar.deviceShouldPrune(99),
+                "only the stale ordinal may prune");
+        long live = NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 50, -70.0);
+        long recent = NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_RECENT, 1000L, 50, -70.0);
+        long stale = NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_STALE, 1000L, 50, -70.0);
+        require(live >= 0 && live < recent && recent < stale, "rank key must order live < recent < stale");
+        require(
+                NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 2000L, 0, -100.0) < live,
+                "a more recently seen device must rank first");
+        require(
+                NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 90, -100.0) < live,
+                "a more confident device must rank first at equal recency");
+        require(
+                NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 50, -60.0) < live,
+                "a stronger signal must rank first at equal recency and confidence");
+        require(
+                NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 50, Double.NaN)
+                        == NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 50, -127.0),
+                "a non-finite RSSI must rank as the weakest signal");
+        require(
+                NativeRadar.deviceRankKey(-5, -5L, -5, -1e9) >= 0
+                        && NativeRadar.deviceRankKey(99, Long.MAX_VALUE, 999, 1e9) >= 0,
+                "rank key must clamp extremes and stay non-negative");
+    }}
+
+    /**
+     * Exercises the string bridge (ABI 10+) across the real JVM->.so boundary:
+     * a manifest is validated and canonicalized by the Rust core, its fields
+     * come back as Java strings (including a supplementary-plane character),
+     * a rejection is explained, null arguments answer their sentinels, and a
+     * real file is verified through the Rust ArtifactVerifier against a
+     * SHA-256 computed independently here with MessageDigest.
+     */
+    private static void verifyManifestSurface() throws Exception {{
+        String notes = "Ünïcødé ✓ 😀";
+        String manifest = "version_code = 2\nversion_name = 0.2\nurl = https://e/x.apk\nsize_bytes = 5\n"
+                + "sha256 = 2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824\n"
+                + "min_sdk = 21\nmandatory = false\nnotes = " + notes + "\n";
+        String canonical = NativeRadar.releaseManifestCanonical(manifest);
+        require(canonical != null, "a valid manifest must canonicalize");
+        require(
+                canonical.contains("sha256 = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"),
+                "the canonical form must lowercase the hash: " + canonical);
+        require(canonical.equals(NativeRadar.releaseManifestCanonical(canonical)), "the canonical form must be a fixed point");
+        require(NativeRadar.releaseManifestError(manifest) == null, "a valid manifest has no error");
+        require(
+                notes.equals(NativeRadar.releaseManifestField(manifest, NativeRadar.MANIFEST_FIELD_NOTES)),
+                "notes must round-trip through UTF-16 including a surrogate pair");
+        require(
+                "2".equals(NativeRadar.releaseManifestField(manifest, NativeRadar.MANIFEST_FIELD_VERSION_CODE))
+                        && "0.2".equals(NativeRadar.releaseManifestField(manifest, NativeRadar.MANIFEST_FIELD_VERSION_NAME))
+                        && "https://e/x.apk".equals(NativeRadar.releaseManifestField(manifest, NativeRadar.MANIFEST_FIELD_URL))
+                        && "5".equals(NativeRadar.releaseManifestField(manifest, NativeRadar.MANIFEST_FIELD_SIZE_BYTES))
+                        && "21".equals(NativeRadar.releaseManifestField(manifest, NativeRadar.MANIFEST_FIELD_MIN_SDK))
+                        && "false".equals(NativeRadar.releaseManifestField(manifest, NativeRadar.MANIFEST_FIELD_MANDATORY)),
+                "manifest fields must render canonically");
+        require(NativeRadar.releaseManifestField(manifest, 99) == null, "an unknown field selector must yield null");
+        String insecure = manifest.replace("https://", "http://");
+        require(NativeRadar.releaseManifestCanonical(insecure) == null, "an http URL must be rejected");
+        String error = NativeRadar.releaseManifestError(insecure);
+        require(error != null && error.contains("https"), "the rejection must be explained: " + error);
+        require(
+                NativeRadar.releaseManifestCanonical(null) == null
+                        && NativeRadar.releaseManifestError(null) == null
+                        && NativeRadar.releaseManifestField(null, 0) == null,
+                "null text must yield null, never a crash");
+
+        java.nio.file.Path artifact = java.nio.file.Files.createTempFile("jni-smoke-artifact", ".bin");
+        try {{
+            byte[] hello = "hello".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+            java.nio.file.Files.write(artifact, hello);
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            StringBuilder hex = new StringBuilder();
+            for (byte b : digest.digest(hello)) {{
+                hex.append(String.format("%02x", b));
+            }}
+            require(canonical.contains("sha256 = " + hex + "\n"), "the independent SHA-256 of the artifact must match the manifest");
+            require(
+                    NativeRadar.artifactVerifyFile(artifact.toString(), manifest) == NativeRadar.ARTIFACT_VERIFIED,
+                    "a matching artifact must verify");
+            java.nio.file.Files.write(artifact, "hellp".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            require(
+                    NativeRadar.artifactVerifyFile(artifact.toString(), manifest) == NativeRadar.ARTIFACT_HASH_MISMATCH,
+                    "a corrupted artifact must fail the hash");
+            java.nio.file.Files.write(artifact, "hell".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            require(
+                    NativeRadar.artifactVerifyFile(artifact.toString(), manifest) == NativeRadar.ARTIFACT_SIZE_MISMATCH,
+                    "a truncated artifact must fail the size");
+            java.nio.file.Files.write(artifact, "hello!".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            require(
+                    NativeRadar.artifactVerifyFile(artifact.toString(), manifest) == NativeRadar.ARTIFACT_SIZE_MISMATCH,
+                    "an over-long artifact must fail the size");
+            require(
+                    NativeRadar.artifactVerifyFile(artifact.toString(), insecure) == NativeRadar.ARTIFACT_MANIFEST_INVALID,
+                    "a rejected manifest must fail before the file is read");
+            require(
+                    NativeRadar.artifactVerifyFile(null, manifest) == NativeRadar.ARTIFACT_UNREADABLE
+                            && NativeRadar.artifactVerifyFile(artifact.toString() + ".missing", manifest)
+                                    == NativeRadar.ARTIFACT_UNREADABLE,
+                    "a null or missing path must be unreadable");
+        }} finally {{
+            java.nio.file.Files.deleteIfExists(artifact);
+        }}
+    }}
+
     private static void verifyFailurePath() {{
         require(!NativeRadar.isAvailable(), "expected NativeRadar to be unavailable");
         require(NativeRadar.loadError() != null, "expected loadError when library path is wrong");
     }}
 
-    public static void main(String[] args) {{
+    public static void main(String[] args) throws Exception {{
         String mode = args.length == 0 ? "success" : args[0];
         switch (mode) {{
             case "success":
@@ -1987,6 +2111,145 @@ fn cmd_build_apk() -> Result<(), String> {
     Ok(())
 }
 
+/// The one module of `bleradar-jni` that reads through `JNIEnv`; its `SLOT_*`
+/// constants index the JNI function table and must equal the positions the
+/// JNI specification (as shipped in a JDK's `jni.h`) gives those functions.
+const JNI_ENV_RS_PATH: &str = "crates/bleradar-jni/src/env.rs";
+
+/// Every `SLOT_*` constant `env.rs` declares, paired with the `jni.h` member
+/// it names. Kept in lockstep with `env.rs` by [`check_jni_table_slots`].
+const JNI_TABLE_SLOTS: &[(&str, &str)] = &[
+    ("SLOT_NEW_STRING", "NewString"),
+    ("SLOT_GET_STRING_LENGTH", "GetStringLength"),
+    ("SLOT_GET_STRING_REGION", "GetStringRegion"),
+    ("SLOT_EXCEPTION_CHECK", "ExceptionCheck"),
+];
+
+/// Member names of `struct JNINativeInterface_` in a `jni.h`, in declaration
+/// order and including the reserved slots, so a name's index is its slot in
+/// the function table every `JNIEnv*` points at.
+fn jni_table_members(header: &str) -> Result<Vec<String>, String> {
+    let start = header
+        .find("struct JNINativeInterface_ {")
+        .ok_or("jni.h: `struct JNINativeInterface_ {` not found")?;
+    let body = &header[start..];
+    let end = body
+        .find("\n};")
+        .ok_or("jni.h: unterminated `struct JNINativeInterface_`")?;
+    let mut members = Vec::new();
+    for line in body[..end].lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("void *reserved") {
+            members.push(format!("reserved{}", rest.trim_end_matches(';').trim()));
+        } else if let Some(position) = line.find("(JNICALL *") {
+            let name = line[position + "(JNICALL *".len()..]
+                .split(')')
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !name.is_empty() {
+                members.push(name.to_string());
+            }
+        }
+    }
+    if members.len() < 4 {
+        return Err(format!(
+            "jni.h: only {} JNINativeInterface_ members recognized",
+            members.len()
+        ));
+    }
+    Ok(members)
+}
+
+/// The `pub const SLOT_<NAME>: usize = <N>;` declarations of `env.rs`.
+fn env_rs_slots(source: &str) -> Vec<(String, usize)> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("pub const SLOT_")?;
+            let (name, value) = rest.split_once(": usize = ")?;
+            let value = value.trim_end_matches(';').trim().parse().ok()?;
+            Some((format!("SLOT_{name}"), value))
+        })
+        .collect()
+}
+
+/// Pure check: every constant in [`JNI_TABLE_SLOTS`] is declared in `env.rs`
+/// and equals its member's position in `jni.h`, and `env.rs` declares no
+/// slot this check does not know about.
+fn check_jni_table_slots(members: &[String], slots: &[(String, usize)]) -> Result<(), String> {
+    for (constant, member) in JNI_TABLE_SLOTS {
+        let declared = slots
+            .iter()
+            .find(|(name, _)| name == constant)
+            .map(|(_, value)| *value)
+            .ok_or_else(|| format!("{JNI_ENV_RS_PATH} does not declare `{constant}`"))?;
+        let position = members
+            .iter()
+            .position(|candidate| candidate == member)
+            .ok_or_else(|| format!("jni.h has no `{member}` in JNINativeInterface_"))?;
+        if declared != position {
+            return Err(format!(
+                "`{constant}` is {declared} but jni.h places `{member}` at slot {position}"
+            ));
+        }
+    }
+    if slots.len() != JNI_TABLE_SLOTS.len() {
+        return Err(format!(
+            "{JNI_ENV_RS_PATH} declares {} `SLOT_*` constants but xtask knows {}; keep JNI_TABLE_SLOTS in lockstep",
+            slots.len(),
+            JNI_TABLE_SLOTS.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Locates a JDK's `include/jni.h`: `$JAVA_HOME/include/jni.h`, else the JDK
+/// that owns the `javac` found on `PATH` (resolving symlinks).
+fn locate_jni_header() -> Result<PathBuf, String> {
+    if let Ok(home) = env::var("JAVA_HOME") {
+        let candidate = PathBuf::from(home).join("include/jni.h");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    let path = env::var_os("PATH").ok_or("PATH is not set")?;
+    for dir in env::split_paths(&path) {
+        let javac = dir.join("javac");
+        if !javac.is_file() {
+            continue;
+        }
+        let real =
+            fs::canonicalize(&javac).map_err(|e| format!("resolving {}: {e}", javac.display()))?;
+        if let Some(jdk) = real.parent().and_then(Path::parent) {
+            let candidate = jdk.join("include/jni.h");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(
+        "jni.h not found: set JAVA_HOME to a JDK (not a JRE) or put a JDK's javac on PATH"
+            .to_string(),
+    )
+}
+
+/// Verifies `env.rs`'s function-table slots against the JDK's `jni.h`.
+fn verify_jni_table_slots(root: &Path) -> Result<(), String> {
+    let header_path = locate_jni_header()?;
+    let header = read_to_string(&header_path)?;
+    let members = jni_table_members(&header)?;
+    let slots = env_rs_slots(&read_to_string(&root.join(JNI_ENV_RS_PATH))?);
+    check_jni_table_slots(&members, &slots)?;
+    println!(
+        "jni.h function-table slots: {} members in {}; all {} `SLOT_*` constants in {JNI_ENV_RS_PATH} match",
+        members.len(),
+        header_path.display(),
+        slots.len()
+    );
+    Ok(())
+}
+
 fn cmd_verify_jni_live() -> Result<(), String> {
     let root = repo_root()?;
     let java_path = root.join(NATIVE_RADAR_JAVA_PATH);
@@ -1999,6 +2262,9 @@ fn cmd_verify_jni_live() -> Result<(), String> {
     println!("== jni export contract (NativeRadar.java ↔ host library) ==");
     let contract = verify_jni_export_contract(&java_source, &host_lib)?;
     let expected_native_count = contract.native_methods.len();
+
+    println!("== jni.h function-table slots ↔ {JNI_ENV_RS_PATH} ==");
+    verify_jni_table_slots(&root)?;
 
     let temp_dir = xtask_temp_dir("verify-jni-live");
     let src_dir = temp_dir.join("src");
@@ -3022,6 +3288,81 @@ mod tests {
                 "EXPECTED_ABI_VERSION"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn jni_table_members_reads_reserved_and_function_slots_in_order() {
+        let header = "\
+struct JNINativeInterface_ {
+    void *reserved0;
+    void *reserved1;
+    void *reserved2;
+    void *reserved3;
+    jint (JNICALL *GetVersion)(JNIEnv *env);
+
+    jclass (JNICALL *DefineClass)
+      (JNIEnv *env, const char *name, jobject loader, const jbyte *buf,
+       jsize len);
+};
+";
+        assert_eq!(
+            jni_table_members(header).unwrap(),
+            [
+                "reserved0",
+                "reserved1",
+                "reserved2",
+                "reserved3",
+                "GetVersion",
+                "DefineClass"
+            ]
+        );
+        assert!(jni_table_members("nothing here").is_err());
+    }
+
+    #[test]
+    fn env_rs_slots_reads_only_the_pub_const_slot_declarations() {
+        let source = "pub const SLOT_NEW_STRING: usize = 163;\n\
+                      const OTHER: usize = 1;\n\
+                      pub const TABLE_LEN_JNI_21: usize = 235;\n\
+                      pub const SLOT_EXCEPTION_CHECK: usize = 228;\n";
+        assert_eq!(
+            env_rs_slots(source),
+            vec![
+                ("SLOT_NEW_STRING".to_string(), 163),
+                ("SLOT_EXCEPTION_CHECK".to_string(), 228)
+            ]
+        );
+    }
+
+    #[test]
+    fn check_jni_table_slots_accepts_the_specification_layout_and_names_drift() {
+        let mut members: Vec<String> = (0..235).map(|i| format!("member{i}")).collect();
+        members[163] = "NewString".to_string();
+        members[164] = "GetStringLength".to_string();
+        members[220] = "GetStringRegion".to_string();
+        members[228] = "ExceptionCheck".to_string();
+        let slots = vec![
+            ("SLOT_NEW_STRING".to_string(), 163),
+            ("SLOT_GET_STRING_LENGTH".to_string(), 164),
+            ("SLOT_GET_STRING_REGION".to_string(), 220),
+            ("SLOT_EXCEPTION_CHECK".to_string(), 228),
+        ];
+        assert!(check_jni_table_slots(&members, &slots).is_ok());
+        let mut drifted = slots.clone();
+        drifted[0].1 = 162;
+        let error = check_jni_table_slots(&members, &drifted).unwrap_err();
+        assert!(error.contains("SLOT_NEW_STRING") && error.contains("163"));
+        let error = check_jni_table_slots(&members, &slots[1..]).unwrap_err();
+        assert!(error.contains("does not declare `SLOT_NEW_STRING`"));
+        let mut extra = slots.clone();
+        extra.push(("SLOT_UNKNOWN".to_string(), 1));
+        assert!(check_jni_table_slots(&members, &extra).is_err());
+        members[228] = "Renamed".to_string();
+        assert!(
+            check_jni_table_slots(&members, &slots)
+                .unwrap_err()
+                .contains("ExceptionCheck")
         );
     }
 

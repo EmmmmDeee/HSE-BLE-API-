@@ -47,3 +47,29 @@ jobs:
         run: cargo xtask gates
       - name: Live JVM → JNI → Rust proof against NativeRadar.java
         run: cargo xtask verify-jni-live
+
+  android-apk:
+    # The app must build from a fresh checkout: cross-compile the JNI library,
+    # aapt2, javac against the real android.jar, d8, sign, then inspect the
+    # package (entries, DEX classes, export contract). Java that only ever
+    # compiled in a reviewer's head reached main before this job existed
+    # (docs/AUTONOMOUS_DECISIONS.md #86), so it runs on every push and PR.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Add the Android cross-compilation target
+        run: rustup target add aarch64-linux-android
+      - name: Install pinned JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install the pinned Android platform, build-tools and NDK
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          printf 'y\n%.0s' $(seq 1 30) | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;37.0.0" "ndk;27.3.13750724"
+      - name: Build, sign and inspect the APK
+        run: cargo xtask verify-android-live

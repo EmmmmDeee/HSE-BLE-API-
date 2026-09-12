@@ -57,11 +57,6 @@ final class Blip {
         return bucket / 10f;
     }
 
-    /** Whether this device has been re-observed within the given freshness window. */
-    boolean isFresh(long nowUptimeMillis, long freshnessWindowMillis) {
-        return nowUptimeMillis - lastSeenUptimeMillis <= freshnessWindowMillis;
-    }
-
     synchronized void recordFilteredRssi(double filteredRssiDbm) {
         if (!Double.isFinite(filteredRssiDbm)) {
             return;

@@ -23,10 +23,6 @@ import android.os.StatFs;
 import android.util.Log;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 
 /**
  * Background service that periodically checks for app updates using the
@@ -107,7 +103,10 @@ public final class UpdateCheckService extends Service {
                     ReleaseManifest manifest = restoreDownloadManifest();
                     if (manifest != null) {
                         try {
-                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, 0);
+                            // No start owns this restore and no promotion happened, so the
+                            // receiver stops the service unconditionally (startId -1) and
+                            // never leaves a foreground it did not enter.
+                            BroadcastReceiver receiver = new DownloadCompletionReceiver(manifest, -1, false);
                             IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
@@ -187,6 +186,16 @@ public final class UpdateCheckService extends Service {
         boolean isRetry = intent != null && intent.getBooleanExtra("is_retry", false);
         if (isRetry) {
             promoteToForeground();
+        }
+
+        if (activeDownloadId != -1) {
+            // A download restored in onCreate() is still in flight; its receiver
+            // verifies, installs, and stops the service when it completes.
+            Log.d(TAG, "Download " + activeDownloadId + " still pending; not starting another check");
+            if (isRetry) {
+                stopForeground(Service.STOP_FOREGROUND_REMOVE);
+            }
+            return START_NOT_STICKY;
         }
 
         // Check if enough time has passed since the last check (skip for retries)
@@ -323,39 +332,41 @@ public final class UpdateCheckService extends Service {
         }
     }
 
-    /**
-     * Verifies the SHA-256 of a downloaded file.
-     */
-    private String computeSha256(File file) throws IOException, NoSuchAlgorithmException {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] buffer = new byte[8192];
-        try (FileInputStream fis = new FileInputStream(file)) {
-            int read;
-            while ((read = fis.read(buffer)) != -1) {
-                digest.update(buffer, 0, read);
-            }
+    private static String artifactVerdictLabel(int verdict) {
+        switch (verdict) {
+            case NativeRadar.ARTIFACT_VERIFIED:
+                return "verified";
+            case NativeRadar.ARTIFACT_MANIFEST_INVALID:
+                return "manifest rejected by the Rust core";
+            case NativeRadar.ARTIFACT_UNREADABLE:
+                return "downloaded file missing or unreadable";
+            case NativeRadar.ARTIFACT_SIZE_MISMATCH:
+                return "size differs from the manifest";
+            case NativeRadar.ARTIFACT_HASH_MISMATCH:
+                return "SHA-256 differs from the manifest";
+            default:
+                return "unknown verdict " + verdict;
         }
-        byte[] hash = digest.digest();
-        StringBuilder sb = new StringBuilder();
-        for (byte b : hash) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 
     /**
-     * Installs the verified APK by handing it to the system via ACTION_VIEW.
-     * This uses Uri.fromFile() which is deprecated but available on all API levels.
-     * The system package installer handles the installation directly.
+     * Hands the verified APK to the system package installer through the
+     * {@code content://} URI {@link DownloadManager} serves for the download.
+     * A {@code file://} URI throws {@code FileUriExposedException} on API 24+
+     * (this app targets 34) and a FileProvider would need AndroidX, which this
+     * build deliberately does not ship; the DownloadManager URI needs neither
+     * and the installer reads it through the granted permission.
      */
-    private void installApk(File apkFile) {
+    private void installApk(long downloadId) {
         try {
-            @SuppressWarnings("deprecation")
-            Uri apkUri = Uri.fromFile(apkFile);
+            Uri apkUri = downloadManager.getUriForDownloadedFile(downloadId);
+            if (apkUri == null) {
+                Log.e(TAG, "DownloadManager has no URI for download " + downloadId);
+                return;
+            }
             Intent install = new Intent(Intent.ACTION_VIEW);
-            install.setData(apkUri);
-            install.setType("application/vnd.android.package-archive");
-            install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            install.setDataAndType(apkUri, "application/vnd.android.package-archive");
+            install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(install);
             Log.d(TAG, "Handed APK to system installer");
         } catch (Exception e) {
@@ -420,21 +431,17 @@ public final class UpdateCheckService extends Service {
                 Uri fileUri = Uri.parse(path);
                 File apkFile = new File(fileUri.getPath());
 
-                // Verify SHA-256
+                // Exact size and SHA-256 are checked by the Rust core's
+                // ArtifactVerifier: the only path by which an artifact
+                // becomes installable.
                 boolean verificationFailed = false;
-                if (apkFile.exists() && apkFile.length() == manifest.getSizeBytes()) {
-                    String actualSha = computeSha256(apkFile);
-                    if (actualSha.equalsIgnoreCase(manifest.getSha256())) {
-                        Log.d(TAG, "SHA-256 verification passed");
-                        clearRetryCount();
-                        installApk(apkFile);
-                    } else {
-                        Log.e(TAG, "SHA-256 mismatch: expected " + manifest.getSha256()
-                                + ", got " + actualSha);
-                        verificationFailed = true;
-                    }
+                int verdict = NativeRadar.artifactVerifyFile(apkFile.getAbsolutePath(), manifest.serialize());
+                if (verdict == NativeRadar.ARTIFACT_VERIFIED) {
+                    Log.d(TAG, "Artifact verification passed");
+                    clearRetryCount();
+                    installApk(downloadId);
                 } else {
-                    Log.e(TAG, "Downloaded file missing or size mismatch");
+                    Log.e(TAG, "Artifact verification failed: " + artifactVerdictLabel(verdict));
                     verificationFailed = true;
                 }
 
@@ -473,11 +480,14 @@ public final class UpdateCheckService extends Service {
     /**
      * Promotes the service to foreground when started via startForegroundService().
      * This satisfies the Android 8+ requirement to call startForeground() within 5 seconds.
+     * On API 34+ the {@code dataSync} type is required here and must match the
+     * service's manifest declaration and the {@code FOREGROUND_SERVICE_DATA_SYNC}
+     * permission; it is the public type for a download that outlives a short task.
      */
     private void promoteToForeground() {
         Notification notification = buildUpdateNotification();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPT);
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }

@@ -53,8 +53,10 @@ public class BleScanEngineTest {
 
     @Test
     public void stale_retention_window_is_defined() {
-        // BleScanEngine.pruneStale() removes devices not seen for STALE_RETENTION_WINDOW_MILLIS
-        // This keeps the UI focused on recently-seen signals
+        // With the native library loaded, BleScanEngine.pruneStale() drops a device exactly when
+        // NativeRadar.deviceShouldPrune(freshness) says so (freshness == FRESHNESS_STALE from the
+        // tracking profile's windows). STALE_RETENTION_WINDOW_MILLIS is only the degraded fallback
+        // when the native library failed to load.
         long staleWindow = 30_000L; // 30 seconds
         assertEquals("Stale retention window should be 30 seconds", 30_000L, staleWindow);
         assertTrue("Window should be reasonable (at least 1 second)", staleWindow >= 1_000);
@@ -114,13 +116,17 @@ public class BleScanEngineTest {
     }
 
     @Test
-    public void snapshot_is_sorted_by_freshness_then_last_seen() {
-        // BleScanEngine.snapshot() returns a sorted list:
-        // 1. Freshness (ordinal priority)
+    public void snapshot_is_sorted_by_the_rust_rank_key() {
+        // BleScanEngine.snapshot() sorts ascending by NativeRadar.deviceRankKey(freshness,
+        // lastSeenUptimeMillis, confidencePercent, lastRssiDbm), the Rust-owned ranking:
+        // 1. Freshness (LIVE, then RECENT, then STALE)
         // 2. Last seen time (most recent first)
         // 3. Confidence percentage (highest first)
-        // 4. RSSI (strongest first)
-        // This ordering prioritizes recently-seen, high-confidence signals
+        // 4. RSSI (strongest first, whole-dBm resolution)
+        // The key is sampled once per device before sorting, so the comparator never reads a
+        // volatile Blip field mid-sort. Without the native library the list is ordered by
+        // recency alone. The ranking itself is locked in crates/bleradar-jni/tests/jni_bridge.rs
+        // (device_rank_key_agrees_with_the_reference_comparator_on_random_pairs).
         boolean sortingIsCorrect = true;
         assertTrue("Snapshot should be properly sorted", sortingIsCorrect);
     }
@@ -172,7 +178,8 @@ public class BleScanEngineTest {
     @Test
     public void record_result_updates_last_seen_time() {
         // recordResult() must update blip.lastSeenUptimeMillis to the current time
-        // This is used by isFresh() to determine if the device is stale
+        // Its age drives NativeRadar.trackingFreshness (LIVE/RECENT/STALE), which decides
+        // pruning (deviceShouldPrune) and ranking (deviceRankKey)
         // Without this, devices would stay fresh forever after one scan
         assertTrue("lastSeenUptimeMillis must be updated", true);
     }
@@ -361,9 +368,10 @@ public class BleScanEngineTest {
 
     @Test
     public void snapshot_primary_sort_is_freshness_ordinal() {
-        // snapshot() must sort by freshness ordinal first:
-        // FRESHNESS_LIVE (0) > FRESHNESS_RECENT (1) > FRESHNESS_STALE (2)
-        // This ensures UI shows the freshest signals first
+        // The four tiers below are the tiers of NativeRadar.deviceRankKey, in precedence order;
+        // snapshot() sorts ascending by that Rust-computed key.
+        // Primary: freshness ordinal, FRESHNESS_LIVE (0) before FRESHNESS_RECENT (1) before
+        // FRESHNESS_STALE (2), so the UI shows the freshest signals first
         int live = NativeRadar.FRESHNESS_LIVE;
         int recent = NativeRadar.FRESHNESS_RECENT;
         int stale = NativeRadar.FRESHNESS_STALE;
@@ -405,7 +413,8 @@ public class BleScanEngineTest {
     public void snapshot_sort_is_stable_across_calls() {
         // snapshot() must produce consistent ordering across multiple calls
         // Two consecutive calls with the same device state should return lists in the same order
-        // This prevents UI flicker from sort instability
+        // This prevents UI flicker from sort instability; sampling each device's rank key once
+        // before sorting is what guarantees it even while the scan callback mutates Blips
         boolean consistentOrdering = true;
         assertTrue("Snapshot sort order must be stable", consistentOrdering);
     }

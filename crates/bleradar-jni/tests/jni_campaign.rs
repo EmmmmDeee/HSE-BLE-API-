@@ -1,16 +1,21 @@
 //! Differential campaign over every exported JNI symbol
 //! (`docs/AUTONOMOUS_DECISIONS.md` #65).
 //!
-//! The Android app calls the 25 `Java_com_hse_bleradar_NativeRadar_*` exports
-//! (the signal/tracking surface plus the four automatic-update decision
-//! bridges — `updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
-//! `retryBackoffDelaySeconds`) on every scan result or update check, and the
-//! release profile they ship with aborts the process on any panic. Each export
-//! ignores its `JNIEnv`/`jclass` arguments,
-//! so this test calls the exported functions themselves with null pointers
-//! and checks, over random and adversarial inputs (NaN, infinities, signed
-//! zeros, subnormals, `f64::MAX`, arbitrary bit patterns, `i32`/`i64`
-//! extremes, invalid ordinals, negative counts and ages):
+//! The Android app calls the 31 `Java_com_hse_bleradar_NativeRadar_*` exports
+//! (the signal/tracking surface, the four automatic-update decision bridges —
+//! `updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
+//! `retryBackoffDelaySeconds` — the two device-map policy bridges —
+//! `deviceShouldPrune`, `deviceRankKey` — and the four string-bridge exports
+//! of the release-manifest / artifact surface) on every scan result,
+//! snapshot, or update check, and the release profile they ship with aborts
+//! the process on any panic. Every primitive export ignores its
+//! `JNIEnv`/`jclass` arguments, so this test calls the exported functions
+//! themselves with null pointers; the string exports are driven through the
+//! mock JNI function table in `common/mod.rs` (and with null pointers, which
+//! must answer their sentinels). Over random and adversarial inputs (NaN,
+//! infinities, signed zeros, subnormals, `f64::MAX`, arbitrary bit patterns,
+//! `i32`/`i64` extremes, invalid ordinals, negative counts and ages, mutated
+//! manifests) it checks:
 //!
 //! - no export panics;
 //! - every export returns bit-for-bit what its documented pure core returns,
@@ -29,27 +34,38 @@
 //! Scale with `BLERADAR_JNI_CAMPAIGN_ITERATIONS`, reseed with
 //! `BLERADAR_JNI_CAMPAIGN_SEED`; a failure prints the seed and the inputs.
 
+mod common;
+
+use std::cmp::Reverse;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use bleradar_core::{
     CalibrationProfile, DownloadConditions, DownloadPolicy, DownloadReadiness, FreshnessClass,
-    NetworkType, ProximityBand, RetryPolicy, SignalTrend, TrackingProfile, TrackingSnapshotInput,
-    ble_distance_m, ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
-    download_readiness, filtered_rssi, proximity_label, proximity_label_from_distance_m,
-    should_check_for_update, signal_confidence_percent, signal_trend, tracking_profile,
-    tracking_profile_from_ordinal, tracking_snapshot, update_decision,
+    NetworkType, ProximityBand, ReleaseManifest, RetryPolicy, SignalTrend, TrackingProfile,
+    TrackingSnapshotInput, ble_distance_m, ble_distance_range_m, calibration_profile,
+    calibration_profile_from_ordinal, download_readiness, filtered_rssi, proximity_label,
+    proximity_label_from_distance_m, should_check_for_update, signal_confidence_percent,
+    signal_trend, tracking_profile, tracking_profile_from_ordinal, tracking_snapshot,
+    update_decision,
 };
 use bleradar_jni::{
-    Java_com_hse_bleradar_NativeRadar_abiVersion, Java_com_hse_bleradar_NativeRadar_bleDistanceM,
+    ARTIFACT_MANIFEST_INVALID, ARTIFACT_UNREADABLE, Java_com_hse_bleradar_NativeRadar_abiVersion,
+    Java_com_hse_bleradar_NativeRadar_artifactVerifyFile,
+    Java_com_hse_bleradar_NativeRadar_bleDistanceM,
     Java_com_hse_bleradar_NativeRadar_calibrationProfilePathLossExponent,
     Java_com_hse_bleradar_NativeRadar_calibrationProfileRssiAt1mDbm,
     Java_com_hse_bleradar_NativeRadar_defaultCalibrationProfile,
     Java_com_hse_bleradar_NativeRadar_defaultTrackingProfile,
+    Java_com_hse_bleradar_NativeRadar_deviceRankKey,
+    Java_com_hse_bleradar_NativeRadar_deviceShouldPrune,
     Java_com_hse_bleradar_NativeRadar_distanceLowerBoundM,
     Java_com_hse_bleradar_NativeRadar_distanceUpperBoundM,
     Java_com_hse_bleradar_NativeRadar_downloadReadiness,
     Java_com_hse_bleradar_NativeRadar_filteredRssi,
     Java_com_hse_bleradar_NativeRadar_proximityLabel,
+    Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical,
+    Java_com_hse_bleradar_NativeRadar_releaseManifestError,
+    Java_com_hse_bleradar_NativeRadar_releaseManifestField,
     Java_com_hse_bleradar_NativeRadar_retryBackoffDelaySeconds,
     Java_com_hse_bleradar_NativeRadar_shouldCheckForUpdate,
     Java_com_hse_bleradar_NativeRadar_signalConfidencePercent,
@@ -66,14 +82,16 @@ use bleradar_jni::{
     Java_com_hse_bleradar_NativeRadar_updateDecision, TrackingSnapshotJniInput,
     ble_distance_m_or_nan, calibration_profile_path_loss_exponent_or_nan,
     calibration_profile_rssi_at_1m_dbm_or_nan, default_calibration_profile_ordinal,
-    default_tracking_profile_ordinal, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
-    download_readiness_ordinal, filtered_rssi_or_nan, proximity_label_ordinal,
-    retry_backoff_delay_secs, should_check_for_update_flag, signal_confidence_percent_or_negative,
-    signal_trend_ordinal, tracking_confidence_percent_or_negative,
-    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
-    tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
-    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
-    tracking_trend_ordinal, update_decision_ordinal,
+    default_tracking_profile_ordinal, device_rank_key, device_should_prune,
+    distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan, download_readiness_ordinal,
+    filtered_rssi_or_nan, proximity_label_ordinal, release_manifest_canonical,
+    release_manifest_error, release_manifest_field, retry_backoff_delay_secs,
+    should_check_for_update_flag, signal_confidence_percent_or_negative, signal_trend_ordinal,
+    tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
+    tracking_distance_m_or_nan, tracking_distance_proximity_ordinal,
+    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
+    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
+    update_decision_ordinal,
 };
 
 const DEFAULT_ITERATIONS: u64 = 20_000;
@@ -991,16 +1009,275 @@ fn check_update(rng: &mut Rng) -> Result<(), String> {
     Ok(())
 }
 
+/// A freshness ordinal: usually a valid `0..=2`, sometimes any `i32`.
+fn freshness(rng: &mut Rng) -> i32 {
+    if rng.below(4) == 0 {
+        int(rng)
+    } else {
+        rng.below(3) as i32
+    }
+}
+
+/// A device as `BleScanEngine.snapshot()` presents it to `deviceRankKey`:
+/// freshness ordinal, last-seen uptime, confidence percent, filtered RSSI —
+/// each drawn from the adversarial generators so every clamp edge is hit.
+fn device(rng: &mut Rng) -> (i32, i64, i32, f64) {
+    (freshness(rng), age(rng), int(rng), value(rng, -130.0, 30.0))
+}
+
+/// Independent reference for the ranking the bridge packs into one `i64`:
+/// freshness ascending, then last-seen descending, then confidence descending,
+/// then whole-dBm RSSI descending, each over the key's documented clamped domain
+/// (a non-finite RSSI is the weakest signal).
+fn reference_rank(device: (i32, i64, i32, f64)) -> (i32, Reverse<i64>, Reverse<i32>, Reverse<i64>) {
+    let rssi = if device.3.is_finite() {
+        (device.3 as i64).clamp(-127, 20)
+    } else {
+        -127
+    };
+    (
+        device.0.clamp(0, 2),
+        Reverse(device.1.clamp(0, (1 << 40) - 1)),
+        Reverse(device.2.clamp(0, 100)),
+        Reverse(rssi),
+    )
+}
+
+/// Differential check over the two device-map policy exports: the prune
+/// decision is exactly "ordinal == Stale" (the encoding `trackingFreshness`
+/// emits) and a proper `jboolean`; the rank key equals its core, is never
+/// negative, and orders two random devices — which often share fields so every
+/// tie-break tier is reached — exactly as the independent reference does.
+fn check_device_policy(rng: &mut Rng) -> Result<(), String> {
+    let ordinal = freshness(rng);
+    let prune = Java_com_hse_bleradar_NativeRadar_deviceShouldPrune(null(), null(), ordinal);
+    if prune > 1 {
+        return Err(format!(
+            "deviceShouldPrune returned non-boolean {prune} [freshness={ordinal}]"
+        ));
+    }
+    let prune = prune != 0;
+    if prune != device_should_prune(ordinal)
+        || prune != (ordinal == freshness_ordinal(FreshnessClass::Stale))
+    {
+        return Err(format!(
+            "deviceShouldPrune export/core/reference disagree [freshness={ordinal}]"
+        ));
+    }
+
+    let left = device(rng);
+    let mut right = device(rng);
+    if rng.below(2) == 0 {
+        right.0 = left.0;
+    }
+    if rng.below(2) == 0 {
+        right.1 = left.1;
+    }
+    if rng.below(2) == 0 {
+        right.2 = left.2;
+    }
+    let key = |d: (i32, i64, i32, f64)| {
+        Java_com_hse_bleradar_NativeRadar_deviceRankKey(null(), null(), d.0, d.1, d.2, d.3)
+    };
+    let (left_key, right_key) = (key(left), key(right));
+    for (label, d, k) in [("left", left, left_key), ("right", right, right_key)] {
+        if k != device_rank_key(d.0, d.1, d.2, d.3) {
+            return Err(format!(
+                "deviceRankKey export/core disagree [{label}={d:?}]"
+            ));
+        }
+        if k < 0 {
+            return Err(format!(
+                "deviceRankKey returned negative {k} [{label}={d:?}]"
+            ));
+        }
+    }
+    if left_key.cmp(&right_key) != reference_rank(left).cmp(&reference_rank(right)) {
+        return Err(format!(
+            "deviceRankKey order disagrees with the reference \
+             [left={left:?} key={left_key} right={right:?} key={right_key}]"
+        ));
+    }
+    Ok(())
+}
+
+const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+/// A release manifest: a valid template with zero to three random mutations
+/// (dropped, duplicated, unknown, malformed or blank lines, comments, an http
+/// URL, a zero size, a bad hash, a bad boolean, an empty name, whitespace),
+/// sometimes with CRLF line endings, always with non-ASCII notes.
+fn manifest_text(rng: &mut Rng) -> String {
+    let mut lines: Vec<String> = vec![
+        format!("version_code = {}", rng.below(1_000)),
+        "version_name = 1.2.3".to_string(),
+        "url = https://example.invalid/app.apk".to_string(),
+        format!("size_bytes = {}", 1 + rng.below(1_000_000)),
+        format!("sha256 = {HELLO_SHA256}"),
+        format!("min_sdk = {}", rng.below(40)),
+        if rng.below(2) == 0 {
+            "mandatory = true".to_string()
+        } else {
+            "mandatory = false".to_string()
+        },
+        "notes = Ünïcødé ✓ 😀 #123".to_string(),
+    ];
+    for _ in 0..rng.below(4) {
+        if lines.is_empty() {
+            break;
+        }
+        match rng.below(12) {
+            0 => {
+                let index = rng.below(lines.len());
+                lines.remove(index);
+            }
+            1 => {
+                let index = rng.below(lines.len());
+                let duplicate = lines[index].clone();
+                lines.push(duplicate);
+            }
+            2 => lines.push("author = someone".to_string()),
+            3 => lines.push("garbage without equals".to_string()),
+            4 => lines.push("# a comment".to_string()),
+            5 => lines.push(String::new()),
+            6 => replace_line(&mut lines, "url", "url = http://example.invalid/app.apk"),
+            7 => replace_line(&mut lines, "size_bytes", "size_bytes = 0"),
+            8 => replace_line(&mut lines, "sha256", "sha256 = not-hex"),
+            9 => replace_line(&mut lines, "mandatory", "mandatory = maybe"),
+            10 => replace_line(&mut lines, "version_name", "version_name ="),
+            _ => {
+                let index = rng.below(lines.len());
+                lines[index] = format!("  {}  ", lines[index].replace('=', "   =   "));
+            }
+        }
+    }
+    let separator = if rng.below(4) == 0 { "\r\n" } else { "\n" };
+    lines.join(separator)
+}
+
+fn replace_line(lines: &mut [String], key: &str, replacement: &str) {
+    for line in lines.iter_mut() {
+        if line.trim_start().starts_with(key) {
+            *line = replacement.to_string();
+        }
+    }
+}
+
+/// Differential check over the four string-bridge exports, driven through the
+/// mock JNI function table: canonical and error are each other's complement
+/// and equal the core; every field selector renders exactly the canonical
+/// line's value; null `env`/`jstring` arguments answer their sentinels.
+fn check_manifest(rng: &mut Rng, mock: &common::MockEnv) -> Result<(), String> {
+    let text = manifest_text(rng);
+    let env = mock.env();
+    let jtext = mock.string(&text);
+    let fail = |message: &str| Err(format!("{message} [text={text:?}]"));
+    let core = ReleaseManifest::parse(&text);
+
+    let canonical = mock.read(Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(
+        env,
+        null(),
+        jtext,
+    ));
+    let expected_canonical = core.as_ref().ok().map(ReleaseManifest::serialize);
+    if canonical != expected_canonical || canonical != release_manifest_canonical(&text) {
+        return fail("releaseManifestCanonical export/core/bleradar-core disagree");
+    }
+    let error = mock.read(Java_com_hse_bleradar_NativeRadar_releaseManifestError(
+        env,
+        null(),
+        jtext,
+    ));
+    let expected_error = core.as_ref().err().map(ToString::to_string);
+    if error != expected_error || error != release_manifest_error(&text) {
+        return fail("releaseManifestError export/core/bleradar-core disagree");
+    }
+    if canonical.is_some() == error.is_some() {
+        return fail("canonical and error must be each other's complement");
+    }
+    if let Some(canonical) = &canonical
+        && ReleaseManifest::parse(canonical).ok() != core.ok()
+    {
+        return fail("canonical form does not round-trip through the core");
+    }
+
+    let selector = if rng.below(4) == 0 {
+        int(rng)
+    } else {
+        rng.below(9) as i32 - 1
+    };
+    let field = mock.read(Java_com_hse_bleradar_NativeRadar_releaseManifestField(
+        env,
+        null(),
+        jtext,
+        selector,
+    ));
+    if field != release_manifest_field(&text, selector) {
+        return fail("releaseManifestField export/core disagree");
+    }
+    match (&field, &canonical) {
+        (Some(value), Some(canonical)) => {
+            let key = [
+                "version_code",
+                "version_name",
+                "url",
+                "size_bytes",
+                "sha256",
+                "min_sdk",
+                "mandatory",
+                "notes",
+            ][usize::try_from(selector).unwrap()];
+            if !canonical.contains(&format!("{key} = {value}\n")) {
+                return fail("a rendered field is not the canonical line's value");
+            }
+        }
+        (Some(_), None) => return fail("a field was rendered for a rejected manifest"),
+        (None, Some(_)) if (0..=7).contains(&selector) => {
+            return fail("a valid selector rendered nothing for an accepted manifest");
+        }
+        _ => {}
+    }
+
+    if !Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(null(), null(), jtext).is_null()
+        || !Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical(env, null(), null())
+            .is_null()
+        || !Java_com_hse_bleradar_NativeRadar_releaseManifestError(null(), null(), jtext).is_null()
+        || !Java_com_hse_bleradar_NativeRadar_releaseManifestField(env, null(), null(), selector)
+            .is_null()
+    {
+        return fail("a null env or jstring did not answer null");
+    }
+    if Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(null(), null(), jtext, jtext)
+        != ARTIFACT_MANIFEST_INVALID
+    {
+        return fail("artifactVerifyFile with a null env is not ARTIFACT_MANIFEST_INVALID");
+    }
+    let expected = if canonical.is_some() {
+        ARTIFACT_UNREADABLE
+    } else {
+        ARTIFACT_MANIFEST_INVALID
+    };
+    if Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(env, null(), null(), jtext) != expected
+    {
+        return fail("artifactVerifyFile with a null path did not answer the documented ordinal");
+    }
+    mock.reset();
+    Ok(())
+}
+
 #[test]
 fn every_export_agrees_with_its_core_and_never_panics() {
     let iterations = env_u64("BLERADAR_JNI_CAMPAIGN_ITERATIONS", DEFAULT_ITERATIONS);
     let seed = env_u64("BLERADAR_JNI_CAMPAIGN_SEED", DEFAULT_SEED);
     let mut rng = Rng(seed | 1);
+    let mock = common::MockEnv::new();
     for iteration in 0..iterations {
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             check_stateless(&mut rng)?;
             check_tracking(&mut rng)?;
-            check_update(&mut rng)
+            check_update(&mut rng)?;
+            check_device_policy(&mut rng)?;
+            check_manifest(&mut rng, &mock)
         }));
         match outcome {
             Err(_) => panic!("seed={seed} iteration={iteration}: a JNI export panicked"),

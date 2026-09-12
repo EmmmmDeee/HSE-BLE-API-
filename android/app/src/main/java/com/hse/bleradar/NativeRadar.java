@@ -18,6 +18,14 @@ package com.hse.bleradar;
  * than a Java re-implementation. Fetching the bytes and handing the verified APK
  * to the OS {@code PackageInstaller} remain the platform boundary — see
  * {@code docs/AUTO_UPDATE.md}.
+ *
+ * <p>Since ABI 10 the façade also carries the string bridge:
+ * {@link #releaseManifestCanonical}, {@link #releaseManifestError},
+ * {@link #releaseManifestField} and {@link #artifactVerifyFile} are the only
+ * natives that take or return objects. The Rust side reads them through the
+ * audited {@code env} module of {@code crates/bleradar-jni}, so release-manifest
+ * validation and artifact integrity are decided by the verified core as well;
+ * a {@code null} argument always yields the documented "invalid" answer.
  */
 public final class NativeRadar {
 
@@ -84,7 +92,35 @@ public final class NativeRadar {
     public static final int DOWNLOAD_INSUFFICIENT_STORAGE = 4;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 8;
+    public static final int EXPECTED_ABI_VERSION = 10;
+
+    /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
+    public static final int MANIFEST_FIELD_VERSION_CODE = 0;
+    /** {@link #releaseManifestField(String, int)} selector: the display version name. */
+    public static final int MANIFEST_FIELD_VERSION_NAME = 1;
+    /** {@link #releaseManifestField(String, int)} selector: the HTTPS artifact URL. */
+    public static final int MANIFEST_FIELD_URL = 2;
+    /** {@link #releaseManifestField(String, int)} selector: the exact artifact size in bytes, as decimal text. */
+    public static final int MANIFEST_FIELD_SIZE_BYTES = 3;
+    /** {@link #releaseManifestField(String, int)} selector: the artifact SHA-256, 64 lowercase hex characters. */
+    public static final int MANIFEST_FIELD_SHA256 = 4;
+    /** {@link #releaseManifestField(String, int)} selector: the minimum SDK level, as decimal text. */
+    public static final int MANIFEST_FIELD_MIN_SDK = 5;
+    /** {@link #releaseManifestField(String, int)} selector: {@code "true"} or {@code "false"}. */
+    public static final int MANIFEST_FIELD_MANDATORY = 6;
+    /** {@link #releaseManifestField(String, int)} selector: the release notes (possibly empty). */
+    public static final int MANIFEST_FIELD_NOTES = 7;
+
+    /** {@link #artifactVerifyFile(String, String)} result: exact declared size and SHA-256; installable. */
+    public static final int ARTIFACT_VERIFIED = 0;
+    /** {@link #artifactVerifyFile(String, String)} result: the manifest text was null or Rust rejected it. */
+    public static final int ARTIFACT_MANIFEST_INVALID = 1;
+    /** {@link #artifactVerifyFile(String, String)} result: the path was null or the file could not be opened or read. */
+    public static final int ARTIFACT_UNREADABLE = 2;
+    /** {@link #artifactVerifyFile(String, String)} result: the file is shorter or longer than the declared size. */
+    public static final int ARTIFACT_SIZE_MISMATCH = 3;
+    /** {@link #artifactVerifyFile(String, String)} result: the size matched but the SHA-256 did not. */
+    public static final int ARTIFACT_HASH_MISMATCH = 4;
 
     private static volatile boolean loaded;
     private static volatile Throwable loadError;
@@ -364,4 +400,61 @@ public final class NativeRadar {
 
     /** Build-time sanity check; should equal {@link #EXPECTED_ABI_VERSION}. */
     public static native int abiVersion();
+
+    /**
+     * The Rust-owned pruning policy for the live device map: {@code true} exactly
+     * when {@code freshnessOrdinal} is {@link #FRESHNESS_STALE}. Any other value,
+     * including an unknown ordinal, keeps the device, so an encoding drift can
+     * never silently empty the map.
+     */
+    public static native boolean deviceShouldPrune(int freshnessOrdinal);
+
+    /**
+     * The Rust-owned device ranking, packed into one {@code long} so that sorting
+     * a snapshot ascending by this key orders devices live before recent before
+     * stale, then most recently seen first, then highest confidence first, then
+     * strongest RSSI first. Inputs are clamped (uptime to 40 bits, confidence to
+     * 0–100, RSSI to -127..20 dBm; a non-finite RSSI ranks weakest) and the key
+     * is always non-negative. Sample the key once per device before sorting so
+     * the comparator sees an immutable ordering while the scan callback keeps
+     * mutating the volatile {@link Blip} fields.
+     */
+    public static native long deviceRankKey(
+            int freshnessOrdinal,
+            long lastSeenUptimeMillis,
+            int confidencePercent,
+            double rssiDbm);
+
+    /**
+     * The canonical form of a release manifest the Rust update core accepts
+     * ({@code bleradar_core::update::ReleaseManifest::parse} then
+     * {@code serialize}), or {@code null} when {@code text} is {@code null} or
+     * rejected. The four natives below are the only ones that take or return
+     * objects; they cross the boundary through the audited string bridge in
+     * {@code crates/bleradar-jni/src/env.rs}, and a {@code null} argument is
+     * always answered with the documented "invalid" sentinel, never a crash.
+     */
+    public static native String releaseManifestCanonical(String text);
+
+    /**
+     * Why the Rust core rejects {@code text} (its {@code UpdateError}
+     * rendering), or {@code null} when the text is accepted.
+     */
+    public static native String releaseManifestError(String text);
+
+    /**
+     * One field of a manifest Rust accepts, selected by a {@code MANIFEST_FIELD_*}
+     * constant and rendered as canonical text (numbers as decimal, the hash as
+     * lowercase hex, {@code mandatory} as {@code true}/{@code false}), or
+     * {@code null} for a rejected text or an unknown selector.
+     */
+    public static native String releaseManifestField(String text, int field);
+
+    /**
+     * Streams the file at {@code path} through the Rust core's
+     * {@code ArtifactVerifier} against {@code manifestText}: one of the
+     * {@code ARTIFACT_*} constants. This is the only path by which a downloaded
+     * artifact becomes installable.
+     */
+    public static native int artifactVerifyFile(String path, String manifestText);
 }

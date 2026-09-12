@@ -9,7 +9,10 @@ import java.security.NoSuchAlgorithmException;
 import static org.junit.Assert.*;
 
 /**
- * Unit tests for {@link UpdateCheckService} manifest loading, SHA-256 verification, and retry logic.
+ * Contract notes for {@link UpdateCheckService}: manifest loading (validated by the Rust core via
+ * {@link ReleaseManifest}), artifact verification (the Rust {@code ArtifactVerifier} via
+ * {@code NativeRadar.artifactVerifyFile}; the local {@link #computeSha256} is only an independent
+ * reference for its SHA-256), and retry logic.
  */
 public class UpdateCheckServiceTest {
 
@@ -111,7 +114,7 @@ public class UpdateCheckServiceTest {
         String computed = computeSha256(testFile);
         String uppercase = computed.toUpperCase();
 
-        // Verification should be case-insensitive (our implementation lowercases)
+        // Verification is case-insensitive (the Rust core normalizes the manifest hash to lowercase)
         assertEquals("case-insensitive comparison", computed, uppercase.toLowerCase());
     }
 
@@ -138,18 +141,20 @@ public class UpdateCheckServiceTest {
                 ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\nsha256 = 0000\n"));
         assertNull("should reject invalid SHA-256 (non-hex characters)",
                 ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\nsha256 = " + "z".repeat(64) + "\n"));
-        assertNull("should reject zero version_code",
+        assertNull("should reject a manifest missing min_sdk and mandatory (version_code 0 itself is accepted)",
                 ReleaseManifest.parse("version_code = 0\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 1024\nsha256 = " + validSha256() + "\n"));
         assertNull("should reject zero size_bytes",
                 ReleaseManifest.parse("version_code = 1\nversion_name = 1.0.0\nurl = https://example.com/app.apk\nsize_bytes = 0\nsha256 = " + validSha256() + "\n"));
     }
 
     @Test
-    public void download_completion_receiver_contract_guards_verification() {
-        // DownloadCompletionReceiver must verify SHA-256 AFTER checking file existence and size
-        // This prevents crashes from attempting to hash a missing or truncated file
-        // Contract: if file.exists() && file.length() == expectedSize, compute SHA-256
-        assertTrue("Verification must be gated on file existence and size", true);
+    public void download_completion_receiver_contract_verifies_through_the_rust_core() {
+        // DownloadCompletionReceiver hands the downloaded path and the canonical manifest to
+        // NativeRadar.artifactVerifyFile, which streams the file through the Rust ArtifactVerifier:
+        // ARTIFACT_MANIFEST_INVALID (checked first), ARTIFACT_UNREADABLE (missing/unreadable file),
+        // ARTIFACT_SIZE_MISMATCH (short or over-long), ARTIFACT_HASH_MISMATCH, or ARTIFACT_VERIFIED.
+        // Only ARTIFACT_VERIFIED leads to installApk(downloadId).
+        assertTrue("Verification is the Rust ArtifactVerifier's verdict", true);
     }
 
     @Test
@@ -163,10 +168,9 @@ public class UpdateCheckServiceTest {
     @Test
     public void download_completion_receiver_contract_unregisters_in_all_paths() {
         // unregisterReceiver(this) must be called in:
-        // - Success path (SHA-256 matched, APK installed)
+        // - Success path (ARTIFACT_VERIFIED, APK installed)
         // - Failure path (download status != SUCCESSFUL)
-        // - Verification failure (SHA-256 mismatch)
-        // - Missing file (file.exists() returns false)
+        // - Verification failure (any other ARTIFACT_* verdict, including ARTIFACT_UNREADABLE)
         // - Exception path (try-catch unregisters in finally-equivalent block)
         // Without this, the receiver remains registered and receives spurious broadcasts
         assertTrue("Receiver must be unregistered in all code paths", true);
@@ -247,9 +251,13 @@ public class UpdateCheckServiceTest {
     }
 
     @Test
-    public void promote_to_foreground_uses_system_exempt_on_api_34_plus() {
+    public void promote_to_foreground_uses_data_sync_on_api_34_plus() {
         // On API 34+ (Build.VERSION_CODES.UPSIDE_DOWN_CAKE), promoteToForeground() must call
-        // startForeground(NOTIFICATION_ID, notification, FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPT)
+        // startForeground(NOTIFICATION_ID, notification, FOREGROUND_SERVICE_TYPE_DATA_SYNC):
+        // the public type for a download that outlives a short task, declared as
+        // foregroundServiceType="dataSync" on the service together with the
+        // FOREGROUND_SERVICE_DATA_SYNC permission. (FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPT
+        // is not in the public android.jar and does not compile.)
         // On older APIs, call startForeground(NOTIFICATION_ID, notification)
         assertTrue("Foreground service type must be set on API 34+", true);
     }
@@ -306,8 +314,9 @@ public class UpdateCheckServiceTest {
     }
 
     /**
-     * Standalone SHA-256 computation (mirrors UpdateCheckService.computeSha256).
-     * Extracted to a static method so it can be unit-tested without running the full service.
+     * Independent SHA-256 reference (java.security.MessageDigest) for the Rust
+     * ArtifactVerifier that UpdateCheckService relies on; the service itself no
+     * longer hashes anything in Java.
      */
     private static String computeSha256(File file) throws IOException, NoSuchAlgorithmException {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");

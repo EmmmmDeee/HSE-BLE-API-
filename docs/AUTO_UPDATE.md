@@ -22,12 +22,15 @@ actual OS install only once the engine has reached [`UpdateStage::Verified`].
 ## Reaching it from the Android app (the JNI boundary)
 
 So the decision core is not merely *implemented* but *reachable* from the app,
-its four **pure decision** functions are exported through the same
+its four **pure decision** functions — and, since ABI 10, the manifest parser
+and the streaming artifact verifier — are exported through the same
 dependency-free JNI façade as the signal/tracking math
 (`crates/bleradar-jni/src/lib.rs` ↔
 `android/app/src/main/java/com/hse/bleradar/NativeRadar.java`, enforced exact by
-`cargo xtask check-jni-contract`). Each is a total function over JNI primitives,
-so the live `verify-jni-live` JVM harness exercises every one against the real
+`cargo xtask check-jni-contract`). The decisions are total functions over JNI
+primitives; the manifest/artifact natives take and return Java strings through
+the audited bridge in `crates/bleradar-jni/src/env.rs`. The live
+`verify-jni-live` JVM harness exercises every one against the real
 `libbleradar_jni.so`:
 
 | `NativeRadar` native | Rust core | Returns |
@@ -36,21 +39,26 @@ so the live `verify-jni-live` JVM harness exercises every one against the real
 | `shouldCheckForUpdate(nowSeconds, lastCheckSeconds, minIntervalSeconds)` | [`should_check_for_update`] | `boolean` |
 | `downloadReadiness(network, batteryPercent, charging, freeStorageBytes, allowMetered, minBatteryPercent, storageHeadroomBytes, artifactSizeBytes)` | [`download_readiness`] | a `DOWNLOAD_*` ordinal (`0` Ready, `1` NoNetwork, `2` MeteredBlocked, `3` LowBattery, `4` InsufficientStorage); `network` is a `NETWORK_*` ordinal |
 | `retryBackoffDelaySeconds(attempt, baseDelaySeconds, maxDelaySeconds)` | [`RetryPolicy::backoff_delay_secs`] | `long` seconds |
+| `releaseManifestCanonical(text)` / `releaseManifestError(text)` / `releaseManifestField(text, field)` | [`ReleaseManifest::parse`] / [`ReleaseManifest::serialize`] | the canonical manifest text, or `null` when rejected; the rejection reason, or `null` when accepted; one field as canonical text (a `MANIFEST_FIELD_*` selector), or `null` |
+| `artifactVerifyFile(path, manifestText)` | [`ArtifactVerifier`], streamed over the file | an `ARTIFACT_*` ordinal (`0` Verified, `1` ManifestInvalid — checked before the file is touched, `2` Unreadable, `3` SizeMismatch, `4` HashMismatch) |
 
 The app therefore makes every self-update *safety* decision — when to poll,
-whether a release is a safe upgrade, whether conditions permit a download, and
-how long to back off — in the exact verified Rust, never a Java
-re-implementation. Adding the surface bumped the JNI ABI 7 → 8
-(`EXPECTED_ABI_VERSION`/`abiVersion()`), so a stale `.so` is rejected at load.
+whether a release is a safe upgrade, whether conditions permit a download, how
+long to back off, whether a manifest is acceptable at all, and whether a
+downloaded artifact is exactly the intended one — in the exact verified Rust,
+never a Java re-implementation. `ReleaseManifest.java` is a thin holder over
+the canonical form Rust emits (Java parses nothing; the manifest is persisted in
+that form), and `UpdateCheckService` installs only what `artifactVerifyFile`
+reports as `ARTIFACT_VERIFIED`. Adding the decision surface bumped the JNI ABI
+7 → 8 and the manifest/artifact surface 9 → 10 (`EXPECTED_ABI_VERSION` /
+`abiVersion()`), so a stale `.so` is rejected at load.
 
-The **stateful** surface — the streaming [`ArtifactVerifier`] and the
-[`UpdateSession`] state machine — is deliberately *not* bridged: exposing owned
-native state across JNI needs a handle-lifetime design that is a larger,
-separate surface than the stateless decisions, and the pure decision core is
-what the app needs to *decide* and *pace* an update. A caller that also wants the
-engine's restart-safe bookkeeping on the device can persist the manifest and
-stage itself, or that handle surface can be added later; artifact authenticity
-is enforced regardless by the OS installer.
+The [`UpdateSession`] state machine is the one part still *not* bridged:
+exposing owned native state across JNI needs a handle-lifetime design that is
+a larger, separate surface, and the app keeps its own restart-safe bookkeeping
+(the canonical manifest, the `DownloadManager` id and the retry count in
+`SharedPreferences`) around the bridged decisions. Artifact authenticity is
+enforced regardless by the OS installer.
 
 ## The decision surface
 

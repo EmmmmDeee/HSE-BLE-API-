@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Permission set intentionally mirrors the subset of the retained oracle
-  APK's own manifest (read-only, via `aapt dump badging` on
+  The BLE permission set mirrors the subset of the retained oracle APK's own
+  manifest (read-only, via `aapt dump badging` on
   BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk) that this rebuild's
-  BLE-only scope actually uses; see docs/ANDROID_APP.md for the exact
-  diff (Wi-Fi/internet permissions are deliberately omitted — out of scope
-  for this build, not silently dropped).
+  BLE-only scope actually uses (Wi-Fi permissions are deliberately omitted —
+  out of scope for this build, not silently dropped). INTERNET, network
+  state, install, alarm, boot, and the dataSync foreground type serve only
+  the automatic-update service; see docs/ANDROID_APP.md and docs/AUTO_UPDATE.md.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.hse.bleradar">
@@ -23,6 +24,7 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -60,17 +62,8 @@
 
         <service
             android:name="com.hse.bleradar.UpdateCheckService"
-            android:exported="false" />
-
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="com.hse.bleradar.fileprovider"
             android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
+            android:foregroundServiceType="dataSync" />
 
         <receiver
             android:name="com.hse.bleradar.UpdateRetryReceiver"

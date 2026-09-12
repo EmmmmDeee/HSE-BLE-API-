@@ -22,11 +22,14 @@ bleradar-core = { path = "../bleradar-core" }
 # This crate cannot inherit `[workspace.lints]` verbatim: the JNI C-ABI export
 # boundary (`#[unsafe(no_mangle)] pub extern "system" fn Java_...`) requires
 # the `unsafe(no_mangle)` attribute, which the 2024-edition "unsafe attributes"
-# lint classifies as `unsafe_code` even though no pointer is ever dereferenced
-# (every exported function ignores its `JNIEnv`/`jclass` parameters and only
-# reads/returns primitives). `missing_docs` and `clippy::all` are restated
-# verbatim from `[workspace.lints]` so this crate stays otherwise identical to
-# every other workspace member; see `src/lib.rs` for the narrowed rationale.
+# lint classifies as `unsafe_code`. Every primitive export ignores its
+# `JNIEnv`/`jclass` parameters and only reads/returns primitives; the one
+# place that reads through `JNIEnv` is the audited `src/env.rs` string bridge
+# (four specification-fixed function-table slots, verified against `jni.h` and
+# a real JVM by `cargo xtask verify-jni-live`). `missing_docs` and
+# `clippy::all` are restated verbatim from `[workspace.lints]` so this crate
+# stays otherwise identical to every other workspace member; see `src/lib.rs`
+# for the narrowed rationale.
 [lints.rust]
 unsafe_code = "allow"
 missing_docs = "warn"
