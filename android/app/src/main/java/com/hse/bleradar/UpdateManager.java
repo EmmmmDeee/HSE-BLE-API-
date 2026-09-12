@@ -57,6 +57,32 @@ public final class UpdateManager {
     }
 
     /**
+     * Returns the timestamp of the last update check in milliseconds, or 0 if never checked.
+     */
+    public long getLastCheckTimeMs() {
+        long lastCheckSeconds = prefs.getLong(KEY_LAST_CHECK_TIME, 0);
+        return lastCheckSeconds * 1000;
+    }
+
+    /**
+     * Returns the estimated next check time in milliseconds based on CHECK_INTERVAL (86400 seconds).
+     */
+    public long getNextCheckTimeMs() {
+        long lastCheckSeconds = prefs.getLong(KEY_LAST_CHECK_TIME, 0);
+        if (lastCheckSeconds == 0) {
+            return System.currentTimeMillis(); // No previous check; next check is now
+        }
+        return (lastCheckSeconds + 86400) * 1000; // Last check + 24 hours
+    }
+
+    /**
+     * Returns the current retry count for failed update checks.
+     */
+    public int getRetryCount() {
+        return prefs.getInt("retryCount", 0);
+    }
+
+    /**
      * Assesses whether a released version is a safe upgrade.
      *
      * <p>Calls {@link NativeRadar#updateDecision(long, long, int, int)} to

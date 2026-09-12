@@ -39,6 +39,7 @@ final class BleScanEngine {
     private final int trackingProfile;
     private BluetoothLeScanner scanner;
     private volatile boolean scanning;
+    private volatile long scanStartUptimeMillis = 0;
 
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override
@@ -118,6 +119,7 @@ final class BleScanEngine {
         try {
             scanner.startScan(null, settings, scanCallback);
             scanning = true;
+            scanStartUptimeMillis = SystemClock.uptimeMillis();
             return true;
         } catch (SecurityException error) {
             Log.w(TAG, "Scan permission revoked at call time", error);
@@ -140,6 +142,17 @@ final class BleScanEngine {
 
     boolean isScanning() {
         return scanning;
+    }
+
+    /**
+     * Returns milliseconds elapsed since scanning started, or 0 if not currently scanning.
+     * Used for UI status display and API reporting.
+     */
+    long getUptimeMillis() {
+        if (!scanning || scanStartUptimeMillis == 0) {
+            return 0;
+        }
+        return SystemClock.uptimeMillis() - scanStartUptimeMillis;
     }
 
     /** A defensive copy of every device observed within the current session. */
