@@ -84,7 +84,7 @@ public final class NativeRadar {
     public static final int DOWNLOAD_INSUFFICIENT_STORAGE = 4;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 8;
+    public static final int EXPECTED_ABI_VERSION = 9;
 
     private static volatile boolean loaded;
     private static volatile Throwable loadError;
@@ -364,4 +364,28 @@ public final class NativeRadar {
 
     /** Build-time sanity check; should equal {@link #EXPECTED_ABI_VERSION}. */
     public static native int abiVersion();
+
+    /**
+     * The Rust-owned pruning policy for the live device map: {@code true} exactly
+     * when {@code freshnessOrdinal} is {@link #FRESHNESS_STALE}. Any other value,
+     * including an unknown ordinal, keeps the device, so an encoding drift can
+     * never silently empty the map.
+     */
+    public static native boolean deviceShouldPrune(int freshnessOrdinal);
+
+    /**
+     * The Rust-owned device ranking, packed into one {@code long} so that sorting
+     * a snapshot ascending by this key orders devices live before recent before
+     * stale, then most recently seen first, then highest confidence first, then
+     * strongest RSSI first. Inputs are clamped (uptime to 40 bits, confidence to
+     * 0–100, RSSI to -127..20 dBm; a non-finite RSSI ranks weakest) and the key
+     * is always non-negative. Sample the key once per device before sorting so
+     * the comparator sees an immutable ordering while the scan callback keeps
+     * mutating the volatile {@link Blip} fields.
+     */
+    public static native long deviceRankKey(
+            int freshnessOrdinal,
+            long lastSeenUptimeMillis,
+            int confidencePercent,
+            double rssiDbm);
 }

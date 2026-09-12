@@ -1442,6 +1442,7 @@ public final class JniSmoke {{
                         == distanceWithoutTxPower,
                 "implausible txPowerDbm (TX_POWER_NOT_PRESENT sentinel) was not ignored");
         verifyUpdateDecisionSurface();
+        verifyDeviceMapPolicySurface();
     }}
 
     /**
@@ -1503,6 +1504,43 @@ public final class JniSmoke {{
                         && NativeRadar.retryBackoffDelaySeconds(4, 10L, 60L) == 60L
                         && NativeRadar.retryBackoffDelaySeconds(9, 10L, 60L) == 60L,
                 "retry backoff should be exponential and capped");
+    }}
+
+    /**
+     * Exercises the device-map policy natives (ABI 9+) across the real
+     * JVM->.so boundary: the prune decision's ordinal contract and the packed
+     * rank key's tier order, sentinel handling, and clamping.
+     */
+    private static void verifyDeviceMapPolicySurface() {{
+        require(
+                NativeRadar.deviceShouldPrune(NativeRadar.FRESHNESS_STALE),
+                "a stale device must be pruned");
+        require(
+                !NativeRadar.deviceShouldPrune(NativeRadar.FRESHNESS_LIVE)
+                        && !NativeRadar.deviceShouldPrune(NativeRadar.FRESHNESS_RECENT)
+                        && !NativeRadar.deviceShouldPrune(99),
+                "only the stale ordinal may prune");
+        long live = NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 50, -70.0);
+        long recent = NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_RECENT, 1000L, 50, -70.0);
+        long stale = NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_STALE, 1000L, 50, -70.0);
+        require(live >= 0 && live < recent && recent < stale, "rank key must order live < recent < stale");
+        require(
+                NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 2000L, 0, -100.0) < live,
+                "a more recently seen device must rank first");
+        require(
+                NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 90, -100.0) < live,
+                "a more confident device must rank first at equal recency");
+        require(
+                NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 50, -60.0) < live,
+                "a stronger signal must rank first at equal recency and confidence");
+        require(
+                NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 50, Double.NaN)
+                        == NativeRadar.deviceRankKey(NativeRadar.FRESHNESS_LIVE, 1000L, 50, -127.0),
+                "a non-finite RSSI must rank as the weakest signal");
+        require(
+                NativeRadar.deviceRankKey(-5, -5L, -5, -1e9) >= 0
+                        && NativeRadar.deviceRankKey(99, Long.MAX_VALUE, 999, 1e9) >= 0,
+                "rank key must clamp extremes and stay non-negative");
     }}
 
     private static void verifyFailurePath() {{

@@ -1,12 +1,13 @@
 //! Differential campaign over every exported JNI symbol
 //! (`docs/AUTONOMOUS_DECISIONS.md` #65).
 //!
-//! The Android app calls the 25 `Java_com_hse_bleradar_NativeRadar_*` exports
-//! (the signal/tracking surface plus the four automatic-update decision
-//! bridges — `updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
-//! `retryBackoffDelaySeconds`) on every scan result or update check, and the
-//! release profile they ship with aborts the process on any panic. Each export
-//! ignores its `JNIEnv`/`jclass` arguments,
+//! The Android app calls the 27 `Java_com_hse_bleradar_NativeRadar_*` exports
+//! (the signal/tracking surface, the four automatic-update decision bridges —
+//! `updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
+//! `retryBackoffDelaySeconds` — and the two device-map policy bridges —
+//! `deviceShouldPrune`, `deviceRankKey`) on every scan result, snapshot, or
+//! update check, and the release profile they ship with aborts the process on
+//! any panic. Each export ignores its `JNIEnv`/`jclass` arguments,
 //! so this test calls the exported functions themselves with null pointers
 //! and checks, over random and adversarial inputs (NaN, infinities, signed
 //! zeros, subnormals, `f64::MAX`, arbitrary bit patterns, `i32`/`i64`
@@ -29,6 +30,7 @@
 //! Scale with `BLERADAR_JNI_CAMPAIGN_ITERATIONS`, reseed with
 //! `BLERADAR_JNI_CAMPAIGN_SEED`; a failure prints the seed and the inputs.
 
+use std::cmp::Reverse;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use bleradar_core::{
@@ -45,6 +47,8 @@ use bleradar_jni::{
     Java_com_hse_bleradar_NativeRadar_calibrationProfileRssiAt1mDbm,
     Java_com_hse_bleradar_NativeRadar_defaultCalibrationProfile,
     Java_com_hse_bleradar_NativeRadar_defaultTrackingProfile,
+    Java_com_hse_bleradar_NativeRadar_deviceRankKey,
+    Java_com_hse_bleradar_NativeRadar_deviceShouldPrune,
     Java_com_hse_bleradar_NativeRadar_distanceLowerBoundM,
     Java_com_hse_bleradar_NativeRadar_distanceUpperBoundM,
     Java_com_hse_bleradar_NativeRadar_downloadReadiness,
@@ -66,14 +70,15 @@ use bleradar_jni::{
     Java_com_hse_bleradar_NativeRadar_updateDecision, TrackingSnapshotJniInput,
     ble_distance_m_or_nan, calibration_profile_path_loss_exponent_or_nan,
     calibration_profile_rssi_at_1m_dbm_or_nan, default_calibration_profile_ordinal,
-    default_tracking_profile_ordinal, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
-    download_readiness_ordinal, filtered_rssi_or_nan, proximity_label_ordinal,
-    retry_backoff_delay_secs, should_check_for_update_flag, signal_confidence_percent_or_negative,
-    signal_trend_ordinal, tracking_confidence_percent_or_negative,
-    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
-    tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
-    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
-    tracking_trend_ordinal, update_decision_ordinal,
+    default_tracking_profile_ordinal, device_rank_key, device_should_prune,
+    distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan, download_readiness_ordinal,
+    filtered_rssi_or_nan, proximity_label_ordinal, retry_backoff_delay_secs,
+    should_check_for_update_flag, signal_confidence_percent_or_negative, signal_trend_ordinal,
+    tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
+    tracking_distance_m_or_nan, tracking_distance_proximity_ordinal,
+    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
+    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
+    update_decision_ordinal,
 };
 
 const DEFAULT_ITERATIONS: u64 = 20_000;
@@ -991,6 +996,98 @@ fn check_update(rng: &mut Rng) -> Result<(), String> {
     Ok(())
 }
 
+/// A freshness ordinal: usually a valid `0..=2`, sometimes any `i32`.
+fn freshness(rng: &mut Rng) -> i32 {
+    if rng.below(4) == 0 {
+        int(rng)
+    } else {
+        rng.below(3) as i32
+    }
+}
+
+/// A device as `BleScanEngine.snapshot()` presents it to `deviceRankKey`:
+/// freshness ordinal, last-seen uptime, confidence percent, filtered RSSI —
+/// each drawn from the adversarial generators so every clamp edge is hit.
+fn device(rng: &mut Rng) -> (i32, i64, i32, f64) {
+    (freshness(rng), age(rng), int(rng), value(rng, -130.0, 30.0))
+}
+
+/// Independent reference for the ranking the bridge packs into one `i64`:
+/// freshness ascending, then last-seen descending, then confidence descending,
+/// then whole-dBm RSSI descending, each over the key's documented clamped domain
+/// (a non-finite RSSI is the weakest signal).
+fn reference_rank(device: (i32, i64, i32, f64)) -> (i32, Reverse<i64>, Reverse<i32>, Reverse<i64>) {
+    let rssi = if device.3.is_finite() {
+        (device.3 as i64).clamp(-127, 20)
+    } else {
+        -127
+    };
+    (
+        device.0.clamp(0, 2),
+        Reverse(device.1.clamp(0, (1 << 40) - 1)),
+        Reverse(device.2.clamp(0, 100)),
+        Reverse(rssi),
+    )
+}
+
+/// Differential check over the two device-map policy exports: the prune
+/// decision is exactly "ordinal == Stale" (the encoding `trackingFreshness`
+/// emits) and a proper `jboolean`; the rank key equals its core, is never
+/// negative, and orders two random devices — which often share fields so every
+/// tie-break tier is reached — exactly as the independent reference does.
+fn check_device_policy(rng: &mut Rng) -> Result<(), String> {
+    let ordinal = freshness(rng);
+    let prune = Java_com_hse_bleradar_NativeRadar_deviceShouldPrune(null(), null(), ordinal);
+    if prune > 1 {
+        return Err(format!(
+            "deviceShouldPrune returned non-boolean {prune} [freshness={ordinal}]"
+        ));
+    }
+    let prune = prune != 0;
+    if prune != device_should_prune(ordinal)
+        || prune != (ordinal == freshness_ordinal(FreshnessClass::Stale))
+    {
+        return Err(format!(
+            "deviceShouldPrune export/core/reference disagree [freshness={ordinal}]"
+        ));
+    }
+
+    let left = device(rng);
+    let mut right = device(rng);
+    if rng.below(2) == 0 {
+        right.0 = left.0;
+    }
+    if rng.below(2) == 0 {
+        right.1 = left.1;
+    }
+    if rng.below(2) == 0 {
+        right.2 = left.2;
+    }
+    let key = |d: (i32, i64, i32, f64)| {
+        Java_com_hse_bleradar_NativeRadar_deviceRankKey(null(), null(), d.0, d.1, d.2, d.3)
+    };
+    let (left_key, right_key) = (key(left), key(right));
+    for (label, d, k) in [("left", left, left_key), ("right", right, right_key)] {
+        if k != device_rank_key(d.0, d.1, d.2, d.3) {
+            return Err(format!(
+                "deviceRankKey export/core disagree [{label}={d:?}]"
+            ));
+        }
+        if k < 0 {
+            return Err(format!(
+                "deviceRankKey returned negative {k} [{label}={d:?}]"
+            ));
+        }
+    }
+    if left_key.cmp(&right_key) != reference_rank(left).cmp(&reference_rank(right)) {
+        return Err(format!(
+            "deviceRankKey order disagrees with the reference \
+             [left={left:?} key={left_key} right={right:?} key={right_key}]"
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn every_export_agrees_with_its_core_and_never_panics() {
     let iterations = env_u64("BLERADAR_JNI_CAMPAIGN_ITERATIONS", DEFAULT_ITERATIONS);
@@ -1000,7 +1097,8 @@ fn every_export_agrees_with_its_core_and_never_panics() {
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             check_stateless(&mut rng)?;
             check_tracking(&mut rng)?;
-            check_update(&mut rng)
+            check_update(&mut rng)?;
+            check_device_policy(&mut rng)
         }));
         match outcome {
             Err(_) => panic!("seed={seed} iteration={iteration}: a JNI export panicked"),

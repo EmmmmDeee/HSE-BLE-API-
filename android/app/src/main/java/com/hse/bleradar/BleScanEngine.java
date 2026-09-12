@@ -15,6 +15,8 @@ import android.util.Log;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -155,27 +157,28 @@ final class BleScanEngine {
         return SystemClock.uptimeMillis() - scanStartUptimeMillis;
     }
 
-    /** A defensive copy of every device observed within the current session. */
+    /**
+     * A defensive copy of every live device, ranked by the Rust-owned
+     * {@link NativeRadar#deviceRankKey} policy (live before recent before stale,
+     * then most recent, then most confident, then strongest).
+     */
     List<Blip> snapshot() {
-        long now = SystemClock.uptimeMillis();
-        refreshFreshness(now);
-        pruneStale(now);
+        pruneStale(SystemClock.uptimeMillis());
         List<Blip> snapshot = new ArrayList<>(blipsByAddress.values());
-        snapshot.sort((left, right) -> {
-            int byFreshnessClass = Integer.compare(left.freshness, right.freshness);
-            if (byFreshnessClass != 0) {
-                return byFreshnessClass;
-            }
-            int byFreshness = Long.compare(right.lastSeenUptimeMillis, left.lastSeenUptimeMillis);
-            if (byFreshness != 0) {
-                return byFreshness;
-            }
-            int byConfidence = Integer.compare(right.confidencePercent, left.confidencePercent);
-            if (byConfidence != 0) {
-                return byConfidence;
-            }
-            return Double.compare(right.lastRssiDbm, left.lastRssiDbm);
-        });
+        if (!NativeRadar.isAvailable()) {
+            // Without the native core every device is reported LIVE with zero
+            // confidence, so recency is the only signal left to rank on.
+            snapshot.sort((left, right) -> Long.compare(right.lastSeenUptimeMillis, left.lastSeenUptimeMillis));
+            return snapshot;
+        }
+        // Keys are sampled once so the sort sees an immutable ordering while the
+        // scan callback keeps mutating the volatile Blip fields concurrently.
+        Map<Blip, Long> rankKeys = new IdentityHashMap<>();
+        for (Blip blip : snapshot) {
+            rankKeys.put(blip, NativeRadar.deviceRankKey(
+                    blip.freshness, blip.lastSeenUptimeMillis, blip.confidencePercent, blip.lastRssiDbm));
+        }
+        snapshot.sort(Comparator.comparingLong(rankKeys::get));
         return snapshot;
     }
 
@@ -318,24 +321,20 @@ final class BleScanEngine {
         }
     }
 
-    private void refreshFreshness(long nowUptimeMillis) {
-        if (!NativeRadar.isAvailable()) {
-            return;
-        }
-        for (Blip blip : blipsByAddress.values()) {
-            long ageMs = Math.max(0L, nowUptimeMillis - blip.lastSeenUptimeMillis);
-            blip.freshness = computeFreshness(blip, ageMs);
-        }
-    }
-
+    /**
+     * Re-classifies every device's freshness as of {@code nowUptimeMillis} and
+     * drops the ones the Rust pruning policy rejects, in one pass over the map.
+     */
     private void pruneStale(long nowUptimeMillis) {
+        boolean nativeAvailable = NativeRadar.isAvailable();
         blipsByAddress.entrySet().removeIf(entry -> {
             Blip blip = entry.getValue();
             long ageMs = Math.max(0L, nowUptimeMillis - blip.lastSeenUptimeMillis);
-            if (NativeRadar.isAvailable()) {
-                return computeFreshness(blip, ageMs) == NativeRadar.FRESHNESS_STALE;
+            if (!nativeAvailable) {
+                return ageMs > STALE_RETENTION_WINDOW_MILLIS;
             }
-            return ageMs > STALE_RETENTION_WINDOW_MILLIS;
+            blip.freshness = computeFreshness(blip, ageMs);
+            return NativeRadar.deviceShouldPrune(blip.freshness);
         });
     }
 

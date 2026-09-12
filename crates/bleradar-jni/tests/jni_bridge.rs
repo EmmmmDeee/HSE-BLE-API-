@@ -4,14 +4,15 @@
 use bleradar_jni::{
     TrackingSnapshotJniInput, ble_distance_m_or_nan, calibration_profile_path_loss_exponent_or_nan,
     calibration_profile_rssi_at_1m_dbm_or_nan, default_calibration_profile_ordinal,
-    default_tracking_profile_ordinal, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
-    download_readiness_ordinal, filtered_rssi_or_nan, proximity_label_ordinal,
-    retry_backoff_delay_secs, should_check_for_update_flag, signal_confidence_percent_or_negative,
-    signal_trend_ordinal, tracking_confidence_percent_or_negative,
-    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
-    tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
-    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
-    tracking_trend_ordinal, update_decision_ordinal,
+    default_tracking_profile_ordinal, device_rank_key, device_should_prune,
+    distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan, download_readiness_ordinal,
+    filtered_rssi_or_nan, proximity_label_ordinal, retry_backoff_delay_secs,
+    should_check_for_update_flag, signal_confidence_percent_or_negative, signal_trend_ordinal,
+    tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
+    tracking_distance_m_or_nan, tracking_distance_proximity_ordinal,
+    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
+    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
+    update_decision_ordinal,
 };
 
 #[test]
@@ -361,5 +362,216 @@ fn retry_backoff_delay_secs_agrees_with_the_core_policy() {
         let expected = policy.backoff_delay_secs(attempt) as i64;
         let actual = retry_backoff_delay_secs(attempt as i32, 30, 3600);
         assert_eq!(actual, expected, "attempt {attempt}");
+    }
+}
+
+#[test]
+fn device_should_prune_only_the_stale_ordinal() {
+    assert!(!device_should_prune(0)); // Live
+    assert!(!device_should_prune(1)); // Recent
+    assert!(device_should_prune(2)); // Stale
+    // Unknown ordinals keep the device: an encoding drift can never empty the map.
+    assert!(!device_should_prune(-1));
+    assert!(!device_should_prune(3));
+    assert!(!device_should_prune(i32::MIN));
+    assert!(!device_should_prune(i32::MAX));
+}
+
+#[test]
+fn device_should_prune_matches_the_tracking_freshness_encoding() {
+    // The only ordinal that prunes is the one `tracking_freshness_ordinal`
+    // emits for `FreshnessClass::Stale`, so the two exports cannot drift apart.
+    let stale = TrackingSnapshotJniInput {
+        previous_filtered_dbm: -70.0,
+        current_rssi_dbm: -70.0,
+        rssi_spread_db: 1.0,
+        sample_count: 4,
+        calibration_profile_ordinal: 0,
+        tracking_profile_ordinal: 0,
+        age_ms: 3_600_000,
+        tx_power_dbm: f64::NAN,
+    };
+    let live = TrackingSnapshotJniInput { age_ms: 0, ..stale };
+    assert!(device_should_prune(tracking_freshness_ordinal(stale)));
+    assert!(!device_should_prune(tracking_freshness_ordinal(live)));
+}
+
+#[test]
+fn device_rank_key_orders_live_recent_confident_strong_first() {
+    let live = device_rank_key(0, 1_000, 50, -70.0);
+    let recent = device_rank_key(1, 1_000, 50, -70.0);
+    let stale = device_rank_key(2, 1_000, 50, -70.0);
+    assert!(live < recent && recent < stale);
+    // Freshness dominates every other field.
+    assert!(device_rank_key(0, 0, 0, -127.0) < device_rank_key(1, i64::MAX, 100, 20.0));
+    // Within a class the most recently seen device ranks first, and recency
+    // outranks both confidence and signal strength.
+    assert!(device_rank_key(0, 2_000, 50, -70.0) < live);
+    assert!(device_rank_key(0, 1_001, 0, -127.0) < device_rank_key(0, 1_000, 100, 20.0));
+    // At equal recency higher confidence ranks first and outranks strength.
+    assert!(device_rank_key(0, 1_000, 51, -127.0) < device_rank_key(0, 1_000, 50, 20.0));
+    // At equal recency and confidence the stronger signal ranks first.
+    assert!(device_rank_key(0, 1_000, 50, -60.0) < device_rank_key(0, 1_000, 50, -61.0));
+    assert!(device_rank_key(0, 1_000, 50, -60.0) < live);
+    // Sub-dBm differences are below the radio's resolution and tie.
+    assert_eq!(
+        device_rank_key(0, 1_000, 50, -60.2),
+        device_rank_key(0, 1_000, 50, -60.7)
+    );
+}
+
+#[test]
+fn device_rank_key_is_non_negative_and_clamps_every_field() {
+    for key in [
+        device_rank_key(i32::MIN, i64::MIN, i32::MIN, f64::NAN),
+        device_rank_key(i32::MAX, i64::MAX, i32::MAX, f64::INFINITY),
+        device_rank_key(0, 0, 0, 0.0),
+        device_rank_key(2, (1 << 40) - 1, 100, 20.0),
+        device_rank_key(2, (1 << 40) - 1, 0, -127.0),
+        device_rank_key(0, 0, 0, f64::NEG_INFINITY),
+    ] {
+        assert!(key >= 0, "{key}");
+    }
+    // Out-of-range fields collapse onto the boundary value, never past it.
+    assert_eq!(
+        device_rank_key(9, 1, 1, -70.0),
+        device_rank_key(2, 1, 1, -70.0)
+    );
+    assert_eq!(
+        device_rank_key(-3, 1, 1, -70.0),
+        device_rank_key(0, 1, 1, -70.0)
+    );
+    assert_eq!(
+        device_rank_key(0, i64::MAX, 1, -70.0),
+        device_rank_key(0, (1 << 40) - 1, 1, -70.0)
+    );
+    assert_eq!(
+        device_rank_key(0, -5, 1, -70.0),
+        device_rank_key(0, 0, 1, -70.0)
+    );
+    assert_eq!(
+        device_rank_key(0, 1, 250, -70.0),
+        device_rank_key(0, 1, 100, -70.0)
+    );
+    assert_eq!(
+        device_rank_key(0, 1, -7, -70.0),
+        device_rank_key(0, 1, 0, -70.0)
+    );
+    assert_eq!(
+        device_rank_key(0, 1, 1, 55.0),
+        device_rank_key(0, 1, 1, 20.0)
+    );
+    assert_eq!(
+        device_rank_key(0, 1, 1, -200.0),
+        device_rank_key(0, 1, 1, -127.0)
+    );
+    // A non-finite RSSI ranks as the weakest possible signal.
+    for rssi in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
+        assert_eq!(
+            device_rank_key(0, 1, 1, rssi),
+            device_rank_key(0, 1, 1, -127.0)
+        );
+    }
+    // Adjacent in-range values in every field produce distinct keys.
+    assert_ne!(
+        device_rank_key(0, 1, 1, -70.0),
+        device_rank_key(0, 1, 1, -71.0)
+    );
+    assert_ne!(
+        device_rank_key(0, 1, 1, -70.0),
+        device_rank_key(0, 1, 2, -70.0)
+    );
+    assert_ne!(
+        device_rank_key(0, 1, 1, -70.0),
+        device_rank_key(0, 2, 1, -70.0)
+    );
+    assert_ne!(
+        device_rank_key(0, 1, 1, -70.0),
+        device_rank_key(1, 1, 1, -70.0)
+    );
+}
+
+/// The ranking `BleScanEngine.snapshot()` implemented as a four-level Java
+/// comparator before it moved into Rust: freshness ascending, then last-seen
+/// descending, then confidence descending, then RSSI descending — restated
+/// over the key's documented clamped, whole-dBm domain.
+fn reference_order(left: (i32, i64, i32, f64), right: (i32, i64, i32, f64)) -> std::cmp::Ordering {
+    use std::cmp::Reverse;
+    fn bucket(field: (i32, i64, i32, f64)) -> (i32, Reverse<i64>, Reverse<i32>, Reverse<i64>) {
+        let rssi = if field.3.is_finite() {
+            (field.3 as i64).clamp(-127, 20)
+        } else {
+            -127
+        };
+        (
+            field.0.clamp(0, 2),
+            Reverse(field.1.clamp(0, (1 << 40) - 1)),
+            Reverse(field.2.clamp(0, 100)),
+            Reverse(rssi),
+        )
+    }
+    bucket(left).cmp(&bucket(right))
+}
+
+fn xorshift(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+fn sample_device(state: &mut u64) -> (i32, i64, i32, f64) {
+    let freshness = match xorshift(state) % 8 {
+        0 => -1,
+        1 => 3,
+        n => (n % 3) as i32,
+    };
+    let last_seen = match xorshift(state) % 8 {
+        0 => -1,
+        1 => i64::MAX,
+        2 => (1 << 40) - 1,
+        3 => 1 << 40,
+        _ => (xorshift(state) % 100_000) as i64,
+    };
+    let confidence = match xorshift(state) % 8 {
+        0 => -1,
+        1 => 101,
+        _ => (xorshift(state) % 101) as i32,
+    };
+    let rssi = match xorshift(state) % 10 {
+        0 => f64::NAN,
+        1 => 30.0,
+        2 => -150.0,
+        3 => f64::INFINITY,
+        _ => -127.0 + (xorshift(state) % 1_470) as f64 / 10.0,
+    };
+    (freshness, last_seen, confidence, rssi)
+}
+
+#[test]
+fn device_rank_key_agrees_with_the_reference_comparator_on_random_pairs() {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    for _ in 0..100_000 {
+        let left = sample_device(&mut state);
+        let mut right = sample_device(&mut state);
+        // Share fields often so every tie-break tier is exercised.
+        if xorshift(&mut state) % 2 == 0 {
+            right.0 = left.0;
+        }
+        if xorshift(&mut state) % 2 == 0 {
+            right.1 = left.1;
+        }
+        if xorshift(&mut state) % 2 == 0 {
+            right.2 = left.2;
+        }
+        let left_key = device_rank_key(left.0, left.1, left.2, left.3);
+        let right_key = device_rank_key(right.0, right.1, right.2, right.3);
+        assert_eq!(
+            left_key.cmp(&right_key),
+            reference_order(left, right),
+            "{left:?} (key {left_key}) vs {right:?} (key {right_key})"
+        );
     }
 }

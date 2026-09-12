@@ -217,7 +217,8 @@ public class ApiHttpServerTest {
     @Test
     public void last_seen_ago_is_computed_at_response_time() {
         // last_seen_ago_ms must be computed fresh for each request
-        // as (System.currentTimeMillis() - device.lastSeenUptimeMillis)
+        // as (SystemClock.uptimeMillis() - device.lastSeenUptimeMillis): both
+        // sides live on the uptime clock, never the wall-clock epoch.
         // This ensures clients see relative time, not stale snapshots
         boolean computedFresh = true;
         assertTrue("last_seen_ago_ms computed fresh per request", computedFresh);

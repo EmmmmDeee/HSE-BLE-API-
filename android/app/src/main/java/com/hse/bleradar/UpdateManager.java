@@ -154,7 +154,7 @@ public final class UpdateManager {
      * @param maxDelaySecs cap on the computed delay (e.g. 86400 for 24h)
      * @return seconds to wait before the next retry
      */
-    public long computeRetryBackoff(long attemptNumber, long baseDelaySeconds, long maxDelaySecs) {
+    public long computeRetryBackoff(int attemptNumber, long baseDelaySeconds, long maxDelaySecs) {
         if (!NativeRadar.isAvailable()) {
             return baseDelaySeconds;
         }

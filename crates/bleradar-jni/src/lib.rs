@@ -464,6 +464,74 @@ pub fn retry_backoff_delay_secs(attempt: i32, base_delay_secs: i64, max_delay_se
     }
 }
 
+// ===== Device snapshot ranking and pruning policy =====
+//
+// The Android app keeps its address-keyed device map in Java (JNI cannot read
+// Java strings or return object arrays without dereferencing `JNIEnv`, which
+// this crate never does), but the *policy* decisions over that map — which
+// devices to drop and how to rank the survivors — are pure functions over
+// primitives, so they live here and run the same code the workspace tests.
+
+/// Pure, unit-testable core of `NativeRadar.deviceShouldPrune(int)`.
+///
+/// A device is dropped from the live map exactly when its freshness class is
+/// [`FreshnessClass::Stale`] (ordinal `2`, matching
+/// [`tracking_freshness_ordinal`]). Any other ordinal — including an unknown
+/// one — keeps the device, so an encoding drift can never silently empty the map.
+#[must_use]
+pub const fn device_should_prune(freshness_ordinal: i32) -> bool {
+    freshness_ordinal == 2
+}
+
+/// Pure, unit-testable core of `NativeRadar.deviceRankKey(int, long, int, double)`.
+///
+/// Packs the app's device ranking into one `i64` such that sorting ascending
+/// by the key orders devices: live before recent before stale; then most
+/// recently seen first; then highest confidence first; then strongest RSSI
+/// first. Layout, most significant first:
+///
+/// | bits  | field                                  |
+/// |-------|----------------------------------------|
+/// | 62–61 | freshness ordinal, clamped to `0..=2`  |
+/// | 60–21 | `2^40 - 1 - last_seen_uptime_ms` (40b) |
+/// | 20–14 | `100 - confidence_percent` (7b)        |
+/// | 13–0  | `RSSI_KEY_CEILING_DBM - rssi_dbm` (14b)|
+///
+/// Uptime is clamped to 40 bits (about 34.8 years of `SystemClock.uptimeMillis`),
+/// confidence to `0..=100`, and RSSI to `-127..=20` dBm, so every field is
+/// non-negative and the packed key is always non-negative. A non-finite RSSI
+/// ranks as the weakest signal.
+#[must_use]
+pub fn device_rank_key(
+    freshness_ordinal: i32,
+    last_seen_uptime_ms: i64,
+    confidence_percent: i32,
+    rssi_dbm: f64,
+) -> i64 {
+    const UPTIME_BITS: u32 = 40;
+    const UPTIME_MAX: i64 = (1 << UPTIME_BITS) - 1;
+    const CONFIDENCE_BITS: u32 = 7;
+    const RSSI_BITS: u32 = 14;
+    const RSSI_KEY_CEILING_DBM: i64 = 20;
+    const RSSI_KEY_FLOOR_DBM: i64 = -127;
+
+    let freshness = i64::from(freshness_ordinal.clamp(0, 2));
+    let recency = UPTIME_MAX - last_seen_uptime_ms.clamp(0, UPTIME_MAX);
+    let confidence = i64::from(100 - confidence_percent.clamp(0, 100));
+    let rssi = if rssi_dbm.is_finite() {
+        // Truncation is intentional: sub-dBm precision is below the sensor's.
+        (rssi_dbm as i64).clamp(RSSI_KEY_FLOOR_DBM, RSSI_KEY_CEILING_DBM)
+    } else {
+        RSSI_KEY_FLOOR_DBM
+    };
+    let weakness = RSSI_KEY_CEILING_DBM - rssi;
+
+    (freshness << (UPTIME_BITS + CONFIDENCE_BITS + RSSI_BITS))
+        | (recency << (CONFIDENCE_BITS + RSSI_BITS))
+        | (confidence << RSSI_BITS)
+        | weakness
+}
+
 /// `NativeRadar.filteredRssi(double, double, double): double` — see
 /// [`filtered_rssi_or_nan`].
 #[unsafe(no_mangle)]
@@ -926,17 +994,53 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_retryBackoffDelaySecond
     retry_backoff_delay_secs(attempt, base_delay_secs, max_delay_secs)
 }
 
+/// `NativeRadar.deviceShouldPrune(int): boolean` — see [`device_should_prune`].
+///
+/// # Safety note
+/// Ignores `_env`/`_class`; never dereferences them.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceShouldPrune(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    freshness_ordinal: i32,
+) -> u8 {
+    u8::from(device_should_prune(freshness_ordinal))
+}
+
+/// `NativeRadar.deviceRankKey(int, long, int, double): long` — see
+/// [`device_rank_key`].
+///
+/// # Safety note
+/// Ignores `_env`/`_class`; never dereferences them.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceRankKey(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    freshness_ordinal: i32,
+    last_seen_uptime_ms: i64,
+    confidence_percent: i32,
+    rssi_dbm: f64,
+) -> i64 {
+    device_rank_key(
+        freshness_ordinal,
+        last_seen_uptime_ms,
+        confidence_percent,
+        rssi_dbm,
+    )
+}
+
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side
 /// calls once at startup to confirm the loaded `.so` matches the ABI this
 /// file documents, independent of the app's own version number.
 ///
 /// Bumped to `8` when the automatic-update decision surface
 /// (`updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
-/// `retryBackoffDelaySeconds`) was added to the ABI.
+/// `retryBackoffDelaySeconds`) was added to the ABI, and to `9` when the
+/// device-map policy surface (`deviceShouldPrune`, `deviceRankKey`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    8
+    9
 }
