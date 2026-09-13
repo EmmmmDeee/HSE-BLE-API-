@@ -9,13 +9,13 @@
 //! * `/` serves the committed dashboard bytes; the three documents carry the
 //!   documented keys, `native_available` is `true` (the cross-compiled
 //!   library loaded on the device), the device list is empty;
-//! * `POST /api/scan/start` is accepted (an adapter is present) or refused
-//!   with a documented reason; when accepted, the service is in the
-//!   foreground with the scanning notification, a stop pauses it with the
-//!   idle notification and keeps it, and a `kill -9` of the app process is
-//!   followed by the `START_STICKY` restart that resumes the scan;
+//! * with the image's Bluetooth adapter enabled, `POST /api/scan/start` is
+//!   accepted, the service is in the foreground with the scanning
+//!   notification, a stop pauses it with the idle notification and keeps
+//!   it, and a `kill -9` of the app process is followed by the
+//!   `START_STICKY` restart that resumes the scan;
 //! * `am force-stop` ends the app and, with it, the API;
-//! * the crash log carries nothing for the app.
+//! * the crash and main logs carry no Java or native crash of the app.
 //!
 //! Needs KVM (the emulator is started with `-accel on`), so it runs in CI's
 //! `android-emulator` job; a sandbox without `/dev/kvm` cannot run it.
@@ -45,14 +45,12 @@ const API_TIMEOUT: Duration = Duration::from_secs(90);
 const RESTART_TIMEOUT: Duration = Duration::from_secs(90);
 const ADB_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
-/// The notification titles `res/values/strings.xml` gives the two states.
-const SCANNING_TITLE: &str = "BLE Radar is scanning";
-const IDLE_TITLE: &str = "BLE Radar is idle";
-/// The refusals a start may answer on a device without a usable adapter.
-const ADAPTER_REFUSALS: [&str; 2] = [
-    r#"{"error":"Bluetooth is off"}"#,
-    r#"{"error":"Bluetooth LE scanner unavailable"}"#,
-];
+/// The notification texts (`setContentText`) `res/values/strings.xml`
+/// gives the two states; the title is the app name.
+const SCANNING_TEXT: &str = "BLE Radar is scanning";
+const IDLE_TEXT: &str = "BLE Radar is idle";
+/// How long the adapter may take to report enabled after `svc bluetooth enable`.
+const BLUETOOTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What the command needs from the caller.
 pub struct Config<'a> {
@@ -120,30 +118,40 @@ pub fn service_is_foreground(dumpsys: &str, service: &str) -> Option<bool> {
     service_record(dumpsys, service).map(|record| record.contains("isForeground=true"))
 }
 
-/// Every `android.title` in `dumpsys notification --noredact` output.
-pub fn notification_titles(dumpsys: &str) -> Vec<String> {
+/// Every `android.title` and `android.text` in `dumpsys notification
+/// --noredact` output, in order (the service's state string is the text).
+pub fn notification_strings(dumpsys: &str) -> Vec<String> {
     dumpsys
         .lines()
         .filter_map(|line| {
-            let rest = line.trim().strip_prefix("android.title=String (")?;
+            let line = line.trim();
+            let rest = line
+                .strip_prefix("android.title=String (")
+                .or_else(|| line.strip_prefix("android.text=String ("))?;
             Some(rest.strip_suffix(')').unwrap_or(rest).to_string())
         })
         .collect()
 }
 
-/// The `FATAL EXCEPTION` headers in a crash log that belong to `package`
-/// (the `Process:` line follows within a few lines).
+/// The crash headers in a log that belong to `package`: a Java `FATAL
+/// EXCEPTION` (its `Process:` line follows within a few lines), a native
+/// `Fatal signal` naming the package's process, or a tombstone header
+/// (`>>> package <<<`).
 pub fn crash_headers<'a>(logcat: &'a str, package: &str) -> Vec<&'a str> {
     let lines: Vec<&str> = logcat.lines().collect();
     let process = format!("Process: {package}");
+    let native_owner = format!("({package}");
+    let tombstone = format!(">>> {package} <<<");
     lines
         .iter()
         .enumerate()
         .filter(|(index, line)| {
-            line.contains("FATAL EXCEPTION")
+            (line.contains("FATAL EXCEPTION")
                 && lines[*index..(*index + 4).min(lines.len())]
                     .iter()
-                    .any(|following| following.contains(&process))
+                    .any(|following| following.contains(&process)))
+                || (line.contains("Fatal signal") && line.contains(&native_owner))
+                || line.contains(&tombstone)
         })
         .map(|(_, line)| *line)
         .collect()
@@ -291,7 +299,7 @@ fn wait_for_service_state(adb: &Adb, title: &str) -> Result<Duration, String> {
     while started.elapsed() < PROMOTION_TIMEOUT {
         let services = adb.shell_lenient(&format!("dumpsys activity services {PACKAGE}"));
         let foreground = service_is_foreground(&services, SERVICE);
-        let titles = notification_titles(&adb.shell_lenient("dumpsys notification --noredact"));
+        let titles = notification_strings(&adb.shell_lenient("dumpsys notification --noredact"));
         if foreground == Some(true) && titles.iter().any(|candidate| candidate == title) {
             return Ok(started.elapsed());
         }
@@ -381,15 +389,25 @@ fn create_avd(
     Ok(text)
 }
 
-fn delete_avd(sdk_root: &Path, avdmanager: &Path, avd_home: &Path) {
-    let _ = Command::new(avdmanager)
+/// Deletes the AVD; a failure is reported, not swallowed, so a runner never
+/// silently accumulates multi-gigabyte AVDs.
+fn delete_avd(sdk_root: &Path, avdmanager: &Path, avd_home: &Path) -> Result<(), String> {
+    let output = Command::new(avdmanager)
         .args(["delete", "avd", "--name", AVD_NAME])
         .env("ANDROID_SDK_ROOT", sdk_root)
         .env("ANDROID_HOME", sdk_root)
         .env("ANDROID_AVD_HOME", avd_home)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .output()
+        .map_err(|e| format!("failed to spawn avdmanager delete: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "avdmanager delete avd failed with {}: {}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
 }
 
 fn launch_emulator(
@@ -483,6 +501,26 @@ fn wait_until_online(adb: &Adb, timeout: Duration) -> Result<(), String> {
     ))
 }
 
+/// Waits for `bluetooth_on` to read `1`; the time it took.
+fn wait_for_bluetooth(adb: &Adb) -> Result<Duration, String> {
+    let started = Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < BLUETOOTH_TIMEOUT {
+        last = adb
+            .shell_lenient("settings get global bluetooth_on")
+            .trim()
+            .to_string();
+        if last == "1" {
+            return Ok(started.elapsed());
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    Err(format!(
+        "bluetooth_on stayed `{last}` for {}s after `svc bluetooth enable`: the pinned image no longer exposes an adapter, which this proof requires (a refused start would skip the foreground and restart checks)",
+        BLUETOOTH_TIMEOUT.as_secs()
+    ))
+}
+
 fn shutdown(adb: &Adb, emulator: &mut Child) {
     let _ = adb.run(&["emu", "kill"]);
     let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
@@ -530,10 +568,13 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
     wait_until_online(adb, Duration::from_secs(60))?;
     report.push(format!("adb root: {}", root.trim()));
     let _ = adb.shell_lenient("input keyevent 82");
-    let bluetooth = adb.shell_lenient("svc bluetooth enable; settings get global bluetooth_on");
+    // The adapter transition is asynchronous: wait for the enabled state so a
+    // start is never refused for an adapter that was still coming up.
+    let _ = adb.shell_lenient("svc bluetooth enable");
+    let bluetooth_after = wait_for_bluetooth(adb)?;
     report.push(format!(
-        "bluetooth_on after `svc bluetooth enable`: {}",
-        bluetooth.trim()
+        "bluetooth_on=1 {:.1}s after `svc bluetooth enable`",
+        bluetooth_after.as_secs_f64()
     ));
 
     println!("== adb install -r -g {} ==", config.apk.display());
@@ -625,21 +666,15 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
     println!("== scan control ==");
     let start = post(port, "/api/scan/start")?;
     let start_text = body_text(&start);
-    let scanning = match start.status {
-        200 if start_text == SCAN_STARTED_JSON => true,
-        409 if ADAPTER_REFUSALS.contains(&start_text.as_str()) => false,
-        other => {
-            return Err(format!(
-                "POST /api/scan/start answered {other} {start_text}; expected 200 {SCAN_STARTED_JSON} or 409 with an adapter refusal"
-            ));
-        }
-    };
-    report.push(format!(
-        "POST /api/scan/start: {} {start_text}",
-        start.status
-    ));
+    if start.status != 200 || start_text != SCAN_STARTED_JSON {
+        return Err(format!(
+            "POST /api/scan/start answered {} {start_text}; expected 200 {SCAN_STARTED_JSON} (the adapter was enabled above, so a refusal is a regression)",
+            start.status
+        ));
+    }
+    report.push(format!("POST /api/scan/start: 200 {start_text}"));
 
-    if scanning {
+    {
         let status = body_text(&get(port, "/api/status")?);
         if !json_has(&status, "scanning", "true") {
             return Err(format!("status does not report the scan: {status}"));
@@ -647,9 +682,9 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         // The start answers from the handler thread while the queued
         // startForegroundService command is still on its way to the main
         // thread, so the promotion is awaited rather than sampled once.
-        let promoted = wait_for_service_state(adb, SCANNING_TITLE)?;
+        let promoted = wait_for_service_state(adb, SCANNING_TEXT)?;
         report.push(format!(
-            "scanning: status {status}; RadarScanService isForeground=true with \"{SCANNING_TITLE}\" {:.1}s after the start",
+            "scanning: status {status}; RadarScanService isForeground=true with \"{SCANNING_TEXT}\" {:.1}s after the start",
             promoted.as_secs_f64()
         ));
 
@@ -665,9 +700,9 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         if !json_has(&paused, "scanning", "false") {
             return Err(format!("status does not report the pause: {paused}"));
         }
-        wait_for_service_state(adb, IDLE_TITLE)?;
+        wait_for_service_state(adb, IDLE_TEXT)?;
         report.push(format!(
-            "paused: POST /api/scan/stop {stop_text}; the service stays in the foreground with \"{IDLE_TITLE}\""
+            "paused: POST /api/scan/stop {stop_text}; the service stays in the foreground with \"{IDLE_TEXT}\""
         ));
 
         let resumed = post(port, "/api/scan/start")?;
@@ -711,25 +746,10 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             "kill -9 {pid}: the system restarted the service (pid {new_pid}) and the scan resumed {:.1}s later",
             after.as_secs_f64()
         ));
-    } else {
-        // Without an adapter the service is only bound by the activity; a
-        // stop is a no-op answered with the live state.
-        let stop = post(port, "/api/scan/stop")?;
-        if stop.status != 200 || body_text(&stop) != SCAN_STOPPED_JSON {
-            return Err(format!(
-                "POST /api/scan/stop answered {} {}",
-                stop.status,
-                body_text(&stop)
-            ));
-        }
-        report.push(
-            "no adapter on this image: the start was refused as documented, a stop answers the idle state; the foreground and restart paths were not exercised"
-                .to_string(),
-        );
     }
 
     println!("== crash log ==");
-    let crashes = adb.shell_lenient("logcat -d -b crash -v brief");
+    let crashes = adb.shell_lenient("logcat -d -b crash -b main -v brief");
     let headers = crash_headers(&crashes, PACKAGE);
     if !headers.is_empty() {
         return Err(format!(
@@ -744,7 +764,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         .filter(|line| line.contains("UpdateCheckService") || line.contains("UpdateManager"))
         .count();
     report.push(format!(
-        "logcat: no FATAL EXCEPTION for {PACKAGE}; {update_lines} update-check line(s)"
+        "logcat: no Java or native crash of {PACKAGE}; {update_lines} update-check line(s)"
     ));
 
     println!("== am force-stop: the API must end with the app ==");
@@ -792,52 +812,60 @@ pub fn run(config: &Config) -> Result<(), String> {
     println!("{}", created.trim());
 
     println!("== booting the emulator (headless, -accel on) ==");
-    let mut emulator = launch_emulator(config.sdk_root, &emulator_exe, &avd_home, &log)?;
     let adb = Adb {
         exe: adb_exe,
         serial: format!("emulator-{CONSOLE_PORT}"),
     };
     let mut report = Report::new();
-    let outcome = wait_for_boot(&adb, &mut emulator, &log).and_then(|boot| {
-        report.push(format!(
-            "boot: {:.0}s ({})",
-            boot.as_secs_f64(),
-            config.image_package
-        ));
-        println!("guest booted after {:.0}s", boot.as_secs_f64());
-        exercise(&adb, config, &mut report)
-    });
-    if outcome.is_err() {
-        println!("== diagnostics ==");
-        println!("-- report so far --");
-        for line in &report {
-            println!("  {line}");
+    let outcome = match launch_emulator(config.sdk_root, &emulator_exe, &avd_home, &log) {
+        Err(error) => Err(error),
+        Ok(mut emulator) => {
+            let outcome = wait_for_boot(&adb, &mut emulator, &log).and_then(|boot| {
+                report.push(format!(
+                    "boot: {:.0}s ({})",
+                    boot.as_secs_f64(),
+                    config.image_package
+                ));
+                println!("guest booted after {:.0}s", boot.as_secs_f64());
+                exercise(&adb, config, &mut report)
+            });
+            if outcome.is_err() {
+                println!("== diagnostics ==");
+                println!("-- report so far --");
+                for line in &report {
+                    println!("  {line}");
+                }
+                println!("-- logcat lines about the app (last 120) --");
+                let logcat = adb.shell_lenient("logcat -d -v time");
+                let lines: Vec<&str> = logcat
+                    .lines()
+                    .filter(|line| {
+                        [
+                            "bleradar",
+                            "RadarScanService",
+                            "ApiHttpServer",
+                            "BleScanEngine",
+                            "UpdateCheckService",
+                            "AndroidRuntime",
+                        ]
+                        .iter()
+                        .any(|needle| line.contains(needle))
+                    })
+                    .collect();
+                println!("{}", lines[lines.len().saturating_sub(120)..].join("\n"));
+                println!("-- emulator log (last 40 lines) --");
+                println!("{}", tail(&log, 40));
+            }
+            println!("== shutting the emulator down ==");
+            shutdown(&adb, &mut emulator);
+            outcome
         }
-        println!("-- logcat lines about the app (last 120) --");
-        let logcat = adb.shell_lenient("logcat -d -v time");
-        let lines: Vec<&str> = logcat
-            .lines()
-            .filter(|line| {
-                [
-                    "bleradar",
-                    "RadarScanService",
-                    "ApiHttpServer",
-                    "BleScanEngine",
-                    "UpdateCheckService",
-                    "AndroidRuntime",
-                ]
-                .iter()
-                .any(|needle| line.contains(needle))
-            })
-            .collect();
-        println!("{}", lines[lines.len().saturating_sub(120)..].join("\n"));
-        println!("-- emulator log (last 40 lines) --");
-        println!("{}", tail(&log, 40));
-    }
-    println!("== shutting the emulator down ==");
-    shutdown(&adb, &mut emulator);
-    delete_avd(config.sdk_root, &avdmanager, &avd_home);
+    };
+    // The AVD is deleted on every exit after its creation; the proof's own
+    // outcome is reported first, a cleanup failure after it.
+    let cleanup = delete_avd(config.sdk_root, &avdmanager, &avd_home);
     outcome?;
+    cleanup?;
     println!("== verify-android-emulator: report ==");
     for line in &report {
         println!("  {line}");
@@ -900,15 +928,18 @@ mod tests {
     }
 
     #[test]
-    fn notification_titles_and_crashes_are_extracted() {
-        let dumpsys = "  NotificationRecord(0x1: pkg=com.hse.bleradar user=UserHandle{0} id=1)\n      extras={\n        android.title=String (BLE Radar is scanning)\n        android.text=String (…)\n      }\n";
+    fn notification_strings_and_crashes_are_extracted() {
+        // The service titles its notification with the app name and puts the
+        // state in the text, so both fields are read.
+        let dumpsys = "  NotificationRecord(0x1: pkg=com.hse.bleradar user=UserHandle{0} id=1)\n      extras={\n        android.title=String (HSE BLE Radar)\n        android.text=String (BLE Radar is scanning)\n      }\n";
         assert_eq!(
-            notification_titles(dumpsys),
-            vec![SCANNING_TITLE.to_string()]
+            notification_strings(dumpsys),
+            vec!["HSE BLE Radar".to_string(), SCANNING_TEXT.to_string()]
         );
-        let crash = "--------- beginning of crash\nE/AndroidRuntime( 1234): FATAL EXCEPTION: main\nE/AndroidRuntime( 1234): Process: com.hse.bleradar, PID: 1234\nE/AndroidRuntime( 1234): java.lang.IllegalStateException: boom\n";
-        assert_eq!(crash_headers(crash, PACKAGE).len(), 1);
-        assert!(crash_headers(crash, "com.other").is_empty());
+        let crash = "--------- beginning of crash\nE/AndroidRuntime( 1234): FATAL EXCEPTION: main\nE/AndroidRuntime( 1234): Process: com.hse.bleradar, PID: 1234\nE/AndroidRuntime( 1234): java.lang.IllegalStateException: boom\nF/libc    ( 4321): Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0 in tid 4321 (com.hse.bleradar), pid 4321 (com.hse.bleradar)\nF/DEBUG   ( 4400): pid: 4321, tid: 4321, name: com.hse.bleradar  >>> com.hse.bleradar <<<\nF/libc    ( 5555): Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid 5555 (com.other), pid 5555 (com.other)\n";
+        let headers = crash_headers(crash, PACKAGE);
+        assert_eq!(headers.len(), 3, "{headers:?}");
+        assert_eq!(crash_headers(crash, "com.other").len(), 1);
         assert!(crash_headers("", PACKAGE).is_empty());
     }
 
