@@ -41,6 +41,8 @@ final class BleScanEngine implements SnapshotSource {
     private final int trackingProfile;
     private BluetoothLeScanner scanner;
     private volatile boolean scanning;
+    /** Set by {@link #close()}: the owning service is gone, every later start is refused. */
+    private boolean closed;
     private volatile long scanStartUptimeMillis = 0;
 
     private final ScanCallback scanCallback = new ScanCallback() {
@@ -109,6 +111,10 @@ final class BleScanEngine implements SnapshotSource {
      *     thread ({@code onStartCommand}) may both request it.
      */
     synchronized boolean start() {
+        if (closed) {
+            Log.w(TAG, "Engine closed with its service; not starting scan");
+            return false;
+        }
         if (scanning) {
             return true;
         }
@@ -138,6 +144,17 @@ final class BleScanEngine implements SnapshotSource {
             Log.w(TAG, "Scan permission revoked at call time", error);
             return false;
         }
+    }
+
+    /**
+     * Stops scanning and refuses every later {@link #start()}: the service is
+     * being destroyed, and a request its HTTP handler is still serving must
+     * not leave a scan running in a dead instance (observed on the emulator
+     * when the activity relaunched while the API was asked to start).
+     */
+    synchronized void close() {
+        stop();
+        closed = true;
     }
 
     synchronized void stop() {

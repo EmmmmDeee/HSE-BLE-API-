@@ -128,7 +128,10 @@ public final class RadarScanService extends Service implements ScanControl {
             httpServer.stop();
         }
         if (engine != null) {
-            engine.stop();
+            // Close, not stop: a request the HTTP handler is still serving
+            // (the activity's unbind and an API start can be milliseconds
+            // apart) must not leave a scan running in this dead instance.
+            engine.close();
         }
         super.onDestroy();
     }

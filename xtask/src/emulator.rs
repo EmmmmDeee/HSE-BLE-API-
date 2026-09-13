@@ -252,21 +252,67 @@ impl Adb {
 
 // ===== HTTP through the forward =====
 
+/// How often a request is retried when the guest's server is between
+/// instances (the activity relaunching unbinds and rebinds the service, and
+/// the new instance rebinds the port a moment later).
+const REQUEST_ATTEMPTS: u32 = 5;
+
+fn with_retry(
+    label: &str,
+    mut attempt: impl FnMut() -> Result<HttpResponse, String>,
+) -> Result<HttpResponse, String> {
+    let mut last = String::new();
+    for _ in 0..REQUEST_ATTEMPTS {
+        match attempt() {
+            Ok(response) => return Ok(response),
+            Err(error) => last = error,
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    Err(format!(
+        "{label}: no answer in {REQUEST_ATTEMPTS} attempts (last: {last})"
+    ))
+}
+
 fn get(port: u16, target: &str) -> Result<HttpResponse, String> {
-    apilive::http_request(
-        port,
-        format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes(),
-    )
+    with_retry(&format!("GET {target}"), || {
+        apilive::http_request(
+            port,
+            format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+    })
 }
 
 fn post(port: u16, target: &str) -> Result<HttpResponse, String> {
-    apilive::http_request(
-        port,
-        format!(
-            "POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    with_retry(&format!("POST {target}"), || {
+        apilive::http_request(
+            port,
+            format!(
+                "POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
         )
-        .as_bytes(),
-    )
+    })
+}
+
+/// Polls `GET /api/status` until it carries `"key":<literal>`.
+fn wait_for_status(port: u16, key: &str, literal: &str) -> Result<String, String> {
+    let started = Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < PROMOTION_TIMEOUT {
+        if let Ok(response) = get(port, "/api/status") {
+            last = body_text(&response);
+            if json_has(&last, key, literal) {
+                return Ok(last);
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    Err(format!(
+        "within {}s /api/status never reported \"{key}\":{literal} (last: {last})",
+        PROMOTION_TIMEOUT.as_secs()
+    ))
 }
 
 /// Polls `GET /api/status` until it answers `200`; the elapsed time.
@@ -664,8 +710,19 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
     report.push(format!("GET /api/updates: {}", body_text(&updates)));
 
     println!("== scan control ==");
-    let start = post(port, "/api/scan/start")?;
-    let start_text = body_text(&start);
+    // A service instance the activity's relaunch is destroying refuses a
+    // start (its engine is closed); the instance the relaunch creates takes
+    // the next one, so an "unavailable" refusal is retried briefly.
+    let mut start = post(port, "/api/scan/start")?;
+    let mut start_text = body_text(&start);
+    for _ in 0..REQUEST_ATTEMPTS {
+        if !(start.status == 409 && start_text.contains("scanner unavailable")) {
+            break;
+        }
+        thread::sleep(Duration::from_secs(1));
+        start = post(port, "/api/scan/start")?;
+        start_text = body_text(&start);
+    }
     if start.status != 200 || start_text != SCAN_STARTED_JSON {
         return Err(format!(
             "POST /api/scan/start answered {} {start_text}; expected 200 {SCAN_STARTED_JSON} (the adapter was enabled above, so a refusal is a regression)",
@@ -675,10 +732,9 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
     report.push(format!("POST /api/scan/start: 200 {start_text}"));
 
     {
-        let status = body_text(&get(port, "/api/status")?);
-        if !json_has(&status, "scanning", "true") {
-            return Err(format!("status does not report the scan: {status}"));
-        }
+        // The instance that answered may be the one an activity relaunch is
+        // replacing; the scan is awaited on whichever instance serves next.
+        let status = wait_for_status(port, "scanning", "true")?;
         // The start answers from the handler thread while the queued
         // startForegroundService command is still on its way to the main
         // thread, so the promotion is awaited rather than sampled once.
@@ -696,10 +752,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
                 stop.status
             ));
         }
-        let paused = body_text(&get(port, "/api/status")?);
-        if !json_has(&paused, "scanning", "false") {
-            return Err(format!("status does not report the pause: {paused}"));
-        }
+        wait_for_status(port, "scanning", "false")?;
         wait_for_service_state(adb, IDLE_TEXT)?;
         report.push(format!(
             "paused: POST /api/scan/stop {stop_text}; the service stays in the foreground with \"{IDLE_TEXT}\""

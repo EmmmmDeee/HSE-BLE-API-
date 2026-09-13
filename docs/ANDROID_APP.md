@@ -237,7 +237,7 @@ build also packages `src/main/assets/` (`aapt2 link -A`; no earlier APK
 carried the bundled `release_manifest.txt` — COR-029), `verify-android-live`
 requires both asset entries and runs lint's `NewApi` check (which found the
 API-33 `readAllBytes()` call on this minSdk-26 app — COR-028), and the
-committed APK is the #93 build (SHA-256 `bde7ad84…e9e6`, 406,094 bytes; the
+committed APK is the #93 build (SHA-256 `f67958c8…afca`, 406,094 bytes; the
 native library byte-identical to the #87 build). The SDK set that build uses
 is pinned once, in `xtask/src/main.rs` (`PINNED_*`), printed by
 `cargo xtask android-sdk-packages` for CI's `sdkmanager`, and preferred by

@@ -86,7 +86,7 @@ decision #91 sources (exit 0; APK SHA-256 `3559634d…353e`, 406,094 bytes;
 from the decision #92 sources (exit 0 in 11 s warm; APK SHA-256
 `9e179cb1…db2f`, 406,094 bytes; `classes.dex` 70,468 bytes with scan
 control added), and from the decision #93 sources (exit 0; APK SHA-256
-`bde7ad84…e9e6`, 406,094 bytes; `classes.dex` 70,652 bytes with the
+`f67958c8…afca`, 406,094 bytes; `classes.dex` 70,848 bytes with the
 request-body cap and the idempotent accepted start):
 
 | Check | Outcome |
