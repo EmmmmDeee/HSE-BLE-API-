@@ -1036,13 +1036,20 @@ pub fn run(config: &Config) -> Result<(), String> {
         .env("ANDROID_SDK_ROOT", config.sdk_root)
         .env("ANDROID_HOME", config.sdk_root)
         .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .map(|output| {
+            // The launcher prints its banner on stderr on some versions.
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
         .unwrap_or_default();
     report.push(format!(
         "emulator: {}; netsimd {}",
         version
             .lines()
-            .find(|line| line.contains("version"))
+            .find(|line| line.to_ascii_lowercase().contains("version"))
             .unwrap_or("(version unknown)")
             .trim(),
         if config.sdk_root.join("emulator/netsimd").is_file() {

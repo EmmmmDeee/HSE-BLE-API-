@@ -413,8 +413,13 @@ to the committed dashboard, the three documents with their keys and
 `RadarScanService` promoted to the foreground and its "BLE Radar is scanning"
 notification, `POST /api/scan/stop` keeping the foreground with "BLE Radar is
 idle", a restarted service with the scan resumed after `kill -9` of the app
-process, no Java or native crash of the package in logcat, and the API
-unreachable after `am force-stop`; the AVD is deleted on every exit. It needs
+process, the first launch's update check finished (its decision logged, no
+service record or notification left), the API unreachable after
+`am force-stop`, and — after a relaunch and a new scan — no scan and no
+foreground service surviving `pm revoke … BLUETOOTH_SCAN` (the report names
+the branch the platform took; on the first run the sticky restart found the
+permissions revoked and stopped the service), with no Java or native crash
+of the package in logcat; the AVD is deleted on every exit. It needs
 `/dev/kvm`, the SDK's `emulator`, `platform-tools` and the pinned image
 (`cargo xtask android-sdk-install --emulator` installs them: licenses
 accepted, `sdkmanager` retried, every package and the tools checked)
