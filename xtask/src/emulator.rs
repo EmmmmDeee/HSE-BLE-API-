@@ -713,6 +713,9 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
                 body_text(&resumed)
             ));
         }
+        // Wait for that start's own promotion so the kill below tests the
+        // sticky restart, not a race with a start command still queued.
+        wait_for_service_state(adb, SCANNING_TEXT)?;
 
         println!("== kill -9 the app process: START_STICKY must resume the scan ==");
         let pid: u32 = adb
@@ -720,6 +723,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             .trim()
             .parse()
             .map_err(|e| format!("pidof {PACKAGE} gave no pid: {e}"))?;
+        report.push(format!("app process before the kill: pid {pid}"));
         adb.shell(&format!("kill -9 {pid}"))?;
         let killed = Instant::now();
         let mut restarted: Option<(u32, Duration)> = None;
@@ -837,6 +841,15 @@ pub fn run(config: &Config) -> Result<(), String> {
                 }
                 println!("-- logcat lines about the app (last 120) --");
                 let logcat = adb.shell_lenient("logcat -d -v time");
+                // Lines naming the app, its classes, or any pid the report
+                // recorded for it (`( 1234)` as logcat prints the field).
+                let pids: Vec<String> = report
+                    .iter()
+                    .filter_map(|line| line.rsplit("pid ").next())
+                    .filter_map(|tail| tail.split(|c: char| !c.is_ascii_digit()).next())
+                    .filter(|digits| !digits.is_empty())
+                    .map(|digits| format!("({digits:>5})"))
+                    .collect();
                 let lines: Vec<&str> = logcat
                     .lines()
                     .filter(|line| {
@@ -850,6 +863,7 @@ pub fn run(config: &Config) -> Result<(), String> {
                         ]
                         .iter()
                         .any(|needle| line.contains(needle))
+                            || pids.iter().any(|pid| line.contains(pid.as_str()))
                     })
                     .collect();
                 println!("{}", lines[lines.len().saturating_sub(120)..].join("\n"));
