@@ -123,3 +123,36 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Render the dashboard in headless Chromium against a mock of the JSON contract
         run: cargo xtask verify-dashboard-live
+
+  android-emulator:
+    # The committed APK on a real Android runtime: a headless emulator boots
+    # the pinned x86_64 Google APIs image (its ARM translation runs the
+    # shipped arm64 library), the APK is installed with its runtime
+    # permissions granted, the app is launched, and the loopback API is
+    # driven through adb forward — the dashboard bytes, the documents, scan
+    # control, the foreground service and its notification, the START_STICKY
+    # restart after kill -9, and the API ending with am force-stop
+    # (docs/AUTONOMOUS_DECISIONS.md #93). Needs KVM, which the runner exposes
+    # once the udev rule below opens /dev/kvm to the runner user.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install pinned JDK (avdmanager runs on it)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Open /dev/kvm to the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install the emulator, platform-tools and the pinned system image
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          printf 'y\n%.0s' $(seq 1 30) | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" --install $(cargo xtask android-sdk-packages --emulator)
+      - name: Install the committed APK on a headless emulator and exercise the app
+        run: cargo xtask verify-android-emulator

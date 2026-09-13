@@ -542,7 +542,7 @@ pub struct Outcome {
 /// an error carrying the stderr written so far. Output is collected on
 /// threads and waited for with a bound, so a grandchild that inherits a
 /// pipe (a browser's renderer) can never hang the caller.
-fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<Outcome, String> {
+pub fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<Outcome, String> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
