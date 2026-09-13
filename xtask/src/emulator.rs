@@ -11,8 +11,8 @@
 //!   library loaded on the device), the device list is empty;
 //! * with the image's Bluetooth adapter enabled, `POST /api/scan/start` is
 //!   accepted, the service is in the foreground with the scanning
-//!   notification, a virtual advertiser added through netsimd's HTTP frontend
-//!   (`POST /v1/devices`) is listed by `/api/devices` with its Rust-computed row and
+//!   notification, a virtual advertiser added through netsimd's gRPC frontend
+//!   (`CreateDevice`) is listed by `/api/devices` with its Rust-computed row and
 //!   pruned by the core's freshness policy once removed, a stop pauses the
 //!   scan with the idle notification and keeps the service, and a `kill -9`
 //!   of the app process is followed by the `START_STICKY` restart that
@@ -31,8 +31,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -40,6 +39,7 @@ use std::time::{Duration, Instant};
 
 use crate::apilive::{self, HttpResponse};
 use crate::dashboard::{self, SCAN_STARTED_JSON, SCAN_STOPPED_JSON};
+use crate::grpc;
 
 /// The app's package, as `AndroidManifest.xml` declares it.
 pub const PACKAGE: &str = "com.hse.bleradar";
@@ -70,8 +70,8 @@ const SCANNING_TEXT: &str = "BLE Radar is scanning";
 const IDLE_TEXT: &str = "BLE Radar is idle";
 /// How long the adapter may take to report enabled after `svc bluetooth enable`.
 const BLUETOOTH_TIMEOUT: Duration = Duration::from_secs(30);
-/// The virtual advertiser `POST /v1/devices` on netsimd adds to the guest's
-/// radio medium: its device name (carried in the advertisement) and address.
+/// The virtual advertiser netsimd's `CreateDevice` adds to the guest's radio
+/// medium: its device name (carried in the advertisement) and address.
 const BEACON_NAME: &str = "bleradar-beacon";
 const BEACON_ADDRESS: &str = "11:22:33:44:55:66";
 /// How long the scan may take to list the beacon after its creation.
@@ -79,11 +79,11 @@ const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the row may outlive the beacon: the Standard tracking profile
 /// keeps a device "recent" for 30 s before it is stale and pruned.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(75);
-/// netsimd's HTTP frontend answers in milliseconds; the read timeout also
-/// ends an answer the server does not close and does not size.
+/// netsimd's frontend answers in milliseconds; a call that has not ended
+/// its stream by then is a wrong port or a dead daemon.
 const NETSIM_TIMEOUT: Duration = Duration::from_secs(10);
-/// netsimd's default `web.port`, used when no discovery file names one.
-const NETSIM_DEFAULT_WEB_PORT: u16 = 7681;
+/// The gRPC frontend's service, `proto/netsim/frontend.proto`.
+const NETSIM_SERVICE: &str = "/netsim.frontend.FrontendService/";
 
 /// What the command needs from the caller.
 pub struct Config<'a> {
@@ -251,27 +251,83 @@ pub fn netsim_ini_port(ini: &str, key: &str) -> Option<u16> {
         .find_map(|port| port.trim().parse().ok())
 }
 
-/// The id of the first chip in a `CreateDeviceResponse` JSON document
-/// (`{"device":{...,"chips":[{"id":N,...}]}}`), needed to delete it.
-pub fn beacon_chip_id(response_json: &str) -> Option<u32> {
-    let chips = response_json.find("\"chips\"")?;
-    json_integer(&response_json[chips..], "id").and_then(|id| u32::try_from(id).ok())
+/// The `CreateDeviceRequest` (`proto/netsim/frontend.proto`, wire format)
+/// that adds the advertiser: one device carrying one `BLUETOOTH_BEACON`
+/// chip advertising at low latency and high power with the device name in
+/// the packet. Field numbers follow `model.proto`.
+pub fn beacon_create_request() -> Vec<u8> {
+    let mut settings = Vec::new();
+    grpc::field_varint(1, 2, &mut settings); // advertise_mode = LOW_LATENCY
+    grpc::field_varint(3, 3, &mut settings); // tx_power_level = HIGH
+    grpc::field_varint(5, 1, &mut settings); // scannable
+    let mut adv_data = Vec::new();
+    grpc::field_varint(1, 1, &mut adv_data); // include_device_name
+    let mut ble_beacon = Vec::new();
+    grpc::field_bytes(1, BEACON_ADDRESS.as_bytes(), &mut ble_beacon);
+    grpc::field_bytes(3, &settings, &mut ble_beacon);
+    grpc::field_bytes(4, &adv_data, &mut ble_beacon);
+    let mut chip = Vec::new();
+    grpc::field_varint(1, 4, &mut chip); // kind = BLUETOOTH_BEACON
+    grpc::field_bytes(2, BEACON_ADDRESS.as_bytes(), &mut chip);
+    grpc::field_bytes(3, format!("{BEACON_NAME}-chip").as_bytes(), &mut chip);
+    grpc::field_bytes(6, &ble_beacon, &mut chip);
+    let mut device = Vec::new();
+    grpc::field_bytes(1, BEACON_NAME.as_bytes(), &mut device);
+    grpc::field_bytes(4, &chip, &mut device);
+    let mut request = Vec::new();
+    grpc::field_bytes(1, &device, &mut request);
+    request
 }
 
-/// The `CreateDeviceRequest` (protobuf JSON) that adds the advertiser: one
-/// device carrying one `BLUETOOTH_BEACON` chip advertising at low latency
-/// and high power with the device name in the packet.
-pub fn beacon_create_body() -> String {
-    format!(
-        concat!(
-            "{{\"device\":{{\"name\":\"{name}\",\"chips\":[{{\"kind\":\"BLUETOOTH_BEACON\",",
-            "\"name\":\"{name}-chip\",\"address\":\"{address}\",\"bleBeacon\":{{\"address\":\"{address}\",",
-            "\"settings\":{{\"advertiseMode\":\"LOW_LATENCY\",\"txPowerLevel\":\"HIGH\",\"scannable\":true}},",
-            "\"advData\":{{\"includeDeviceName\":true}}}}}}]}}}}"
-        ),
-        name = BEACON_NAME,
-        address = BEACON_ADDRESS
-    )
+/// One device of netsimd's model, read from a `Device` message: its id,
+/// name and chips (kind, id, name).
+#[derive(Debug, PartialEq, Eq)]
+pub struct NetsimDevice {
+    /// `Device.id`.
+    pub id: u64,
+    /// `Device.name`.
+    pub name: String,
+    /// `(Chip.kind, Chip.id, Chip.name)` per chip.
+    pub chips: Vec<(u64, u64, String)>,
+}
+
+/// Reads a `Device` message (`model.proto`: id 1, name 2, chips 6; `Chip`:
+/// kind 1, id 2, name 3).
+pub fn netsim_device(message: &[u8]) -> Result<NetsimDevice, String> {
+    let mut device = NetsimDevice {
+        id: 0,
+        name: String::new(),
+        chips: Vec::new(),
+    };
+    for (field, value) in grpc::fields(message)? {
+        match (field, value) {
+            (1, grpc::Value::Varint(id)) => device.id = id,
+            (2, grpc::Value::Bytes(name)) => {
+                device.name = String::from_utf8_lossy(name).into_owned()
+            }
+            (6, grpc::Value::Bytes(chip)) => {
+                let kind = grpc::varint_field(chip, 1)?.unwrap_or(0);
+                let id = grpc::varint_field(chip, 2)?.unwrap_or(0);
+                let name = grpc::message_field(chip, 3)?
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                    .unwrap_or_default();
+                device.chips.push((kind, id, name));
+            }
+            _ => {}
+        }
+    }
+    Ok(device)
+}
+
+/// The devices of a `ListDeviceResponse` (`devices` = field 1).
+pub fn netsim_devices(message: &[u8]) -> Result<Vec<NetsimDevice>, String> {
+    grpc::fields(message)?
+        .into_iter()
+        .filter_map(|(field, value)| match value {
+            grpc::Value::Bytes(device) if field == 1 => Some(netsim_device(device)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The keys a document must carry, checked against what it does.
@@ -502,12 +558,12 @@ fn api_unreachable(port: u16, timeout: Duration) -> bool {
     failures >= 3
 }
 
-/// netsimd's HTTP frontend: the emulator starts netsimd for its virtual
-/// radios (the guest's Bluetooth controller lives there) and the daemon
-/// serves the same device model its gRPC frontend and `netsim-cli` use as
-/// JSON on its web port — `GET /v1/devices`, `POST /v1/devices` with a
-/// `CreateDeviceRequest`, `DELETE /v1/devices` with a `DeleteChipRequest`
-/// (the emulator package ships netsimd but no CLI, as the first run found).
+/// netsimd's gRPC frontend: the emulator starts netsimd for its virtual
+/// radios (the guest's Bluetooth controller lives there), and the daemon's
+/// only control surface in the emulator package is that frontend — no CLI
+/// ships with it and its web server is not started, as the first runs
+/// found — so the proof speaks HTTP/2 + protobuf to it directly
+/// (`xtask/src/grpc.rs`): `ListDevice`, `CreateDevice`, `DeleteChip`.
 struct Netsim {
     port: u16,
     /// Where the port came from, for the report.
@@ -517,11 +573,11 @@ struct Netsim {
 }
 
 impl Netsim {
-    /// Settles on the web port that answers `GET /v1/devices`: the one a
-    /// discovery file names first, then every port the netsimd process
-    /// listens on, then netsimd's default — a stale file from another
-    /// instance is never trusted, and a failure shows the file, the
-    /// daemon's command line and its sockets.
+    /// Settles on the frontend port that answers `ListDevice`: the one the
+    /// discovery file names (`grpc.port`), then every socket the netsimd
+    /// process listens on — a stale file from another instance is never
+    /// trusted, and a failure shows the file, the daemon's command line and
+    /// its sockets.
     fn connect() -> Result<Self, String> {
         let ini = find_netsim_ini();
         let ini_text = ini
@@ -529,20 +585,14 @@ impl Netsim {
             .and_then(|path| fs::read_to_string(path).ok())
             .unwrap_or_default();
         let mut candidates: Vec<(u16, &str)> = Vec::new();
-        if let Some(port) = netsim_ini_port(&ini_text, "web.port") {
-            candidates.push((port, "the discovery file's web.port"));
+        if let Some(port) = netsim_ini_port(&ini_text, "grpc.port") {
+            candidates.push((port, "the discovery file's grpc.port"));
         }
         let sockets = listening_sockets();
         for port in netsimd_ports(&sockets) {
             if !candidates.iter().any(|(known, _)| *known == port) {
                 candidates.push((port, "a socket the netsimd process listens on"));
             }
-        }
-        if !candidates
-            .iter()
-            .any(|(known, _)| *known == NETSIM_DEFAULT_WEB_PORT)
-        {
-            candidates.push((NETSIM_DEFAULT_WEB_PORT, "netsimd's default web port"));
         }
         let mut failures = Vec::new();
         for (port, source) in candidates {
@@ -557,8 +607,12 @@ impl Netsim {
             }
         }
         Err(format!(
-            "netsimd's HTTP frontend answers `GET /v1/devices` on none of the candidate ports:\n{}\n-- discovery file {} --\n{}\n-- netsimd command line --\n{}\n-- listening sockets --\n{}",
-            failures.join("\n"),
+            "netsimd's frontend answers `ListDevice` on none of the candidate ports:\n{}\n-- discovery file {} --\n{}\n-- netsimd command line --\n{}\n-- listening sockets --\n{}",
+            if failures.is_empty() {
+                "(no candidate: no discovery file port and no netsimd socket)".to_string()
+            } else {
+                failures.join("\n")
+            },
             ini.as_ref().map_or("(none found)".to_string(), |path| path
                 .display()
                 .to_string()),
@@ -574,7 +628,7 @@ impl Netsim {
 
     fn describe(&self) -> String {
         format!(
-            "HTTP frontend at 127.0.0.1:{} ({}; discovery file {})",
+            "gRPC frontend at 127.0.0.1:{} ({}; discovery file {})",
             self.port,
             self.source,
             self.ini
@@ -583,90 +637,86 @@ impl Netsim {
         )
     }
 
-    /// One request to the frontend; the answer must be a `200`.
-    fn request(&self, method: &str, body: &str) -> Result<String, String> {
-        let request = format!(
-            "{method} /v1/devices HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let response = netsim_exchange(self.port, request.as_bytes())?;
-        let text = String::from_utf8_lossy(&response.body).into_owned();
-        if response.status != 200 {
+    /// One unary call; the single response message it must carry.
+    fn call(&self, method: &str, request: &[u8]) -> Result<Vec<u8>, String> {
+        let path = format!("{NETSIM_SERVICE}{method}");
+        let outcome = grpc::unary(self.port, &path, request, NETSIM_TIMEOUT)?;
+        if let Some(code) = outcome.reset {
             return Err(format!(
-                "{method} /v1/devices answered {}: {}",
-                response.status,
-                text.trim()
+                "{method}: the stream was reset (error {code}); headers {:?}",
+                outcome.headers_lossy()
             ));
         }
-        Ok(text)
+        if let Some((code, debug)) = &outcome.goaway {
+            return Err(format!(
+                "{method}: GOAWAY {code} {debug:?}; headers {:?}",
+                outcome.headers_lossy()
+            ));
+        }
+        match outcome.messages.len() {
+            1 => Ok(outcome.messages.into_iter().next().unwrap_or_default()),
+            count => Err(format!(
+                "{method}: {count} response messages (expected one); headers {:?}",
+                outcome.headers_lossy()
+            )),
+        }
     }
 
-    /// The device list, as netsimd's JSON.
+    /// `ListDevice`: the daemon's devices, readable.
     fn devices(&self) -> Result<String, String> {
-        self.request("GET", "")
+        let response = self.call("ListDevice", &[])?;
+        let devices = netsim_devices(&response)?;
+        Ok(devices
+            .iter()
+            .map(|device| {
+                format!(
+                    "{} (id {}): {}",
+                    device.name,
+                    device.id,
+                    device
+                        .chips
+                        .iter()
+                        .map(|(kind, id, name)| format!("chip kind {kind} id {id} {name:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; "))
     }
 
-    /// Creates the advertiser (`CreateDeviceRequest` as JSON); the id of its
-    /// beacon chip.
-    fn create_beacon(&self) -> Result<u32, String> {
-        let body = beacon_create_body();
-        let created = self.request("POST", &body)?;
-        beacon_chip_id(&created)
-            .ok_or_else(|| format!("the CreateDeviceResponse carries no chip id: {created}"))
+    /// `CreateDevice` with the advertiser; the id of its beacon chip.
+    fn create_beacon(&self) -> Result<u64, String> {
+        let response = self.call("CreateDevice", &beacon_create_request())?;
+        let device = grpc::message_field(&response, 1)?
+            .ok_or("the CreateDeviceResponse carries no device")?;
+        let created = netsim_device(device)?;
+        created
+            .chips
+            .first()
+            .map(|(_, id, _)| *id)
+            .ok_or_else(|| format!("the created device carries no chip: {created:?}"))
     }
 
-    /// Removes the chip, which ends the advertising.
-    fn delete_chip(&self, chip_id: u32) -> Result<(), String> {
-        self.request("DELETE", &format!("{{\"id\":{chip_id}}}"))
-            .map(|_| ())
-    }
-}
-
-/// One HTTP exchange with netsimd, read until the declared body is in, the
-/// server closes, or the read timeout ends an unsized, kept-open answer.
-fn netsim_exchange(port: u16, request: &[u8]) -> Result<HttpResponse, String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .map_err(|e| format!("connecting to 127.0.0.1:{port}: {e}"))?;
-    stream
-        .set_read_timeout(Some(NETSIM_TIMEOUT))
-        .map_err(|e| format!("setting the read timeout: {e}"))?;
-    stream
-        .set_write_timeout(Some(NETSIM_TIMEOUT))
-        .map_err(|e| format!("setting the write timeout: {e}"))?;
-    stream
-        .write_all(request)
-        .map_err(|e| format!("sending the request: {e}"))?;
-    let mut raw = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-            let head = String::from_utf8_lossy(&raw[..split]).into_owned();
-            let declared = head.lines().find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.trim()
-                    .eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().ok())
-                    .flatten()
-            });
-            if declared.is_some_and(|length| raw.len() >= split + 4 + length) {
-                break;
-            }
+    /// `DeleteChip`, which ends the advertising.
+    fn delete_chip(&self, chip_id: u64) -> Result<(), String> {
+        let mut request = Vec::new();
+        grpc::field_varint(2, chip_id, &mut request); // DeleteChipRequest.id = 2
+        let path = format!("{NETSIM_SERVICE}DeleteChip");
+        let outcome = grpc::unary(self.port, &path, &request, NETSIM_TIMEOUT)?;
+        // `google.protobuf.Empty` may come as an empty message or none at all;
+        // a reset or GOAWAY is the failure.
+        if let Some(code) = outcome.reset {
+            return Err(format!(
+                "DeleteChip: the stream was reset (error {code}); headers {:?}",
+                outcome.headers_lossy()
+            ));
         }
-        match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => raw.extend_from_slice(&buffer[..n]),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                break;
-            }
-            Err(e) => return Err(format!("reading netsimd's answer: {e}")),
+        if let Some((code, debug)) = &outcome.goaway {
+            return Err(format!("DeleteChip: GOAWAY {code} {debug:?}"));
         }
+        Ok(())
     }
-    apilive::parse_http_response(&raw)
 }
 
 /// `ss -ltnp` (or nothing, where `ss` is absent): every listening TCP
@@ -1113,7 +1163,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             promoted.as_secs_f64()
         ));
 
-        println!("== a virtual advertiser: POST /v1/devices on netsimd's HTTP frontend ==");
+        println!("== a virtual advertiser: CreateDevice on netsimd's gRPC frontend ==");
         // The guest's Bluetooth controller is virtual (netsimd, started by
         // the emulator); a beacon created there advertises on the same
         // medium, so the scan must report it — the one way to observe the
@@ -1711,23 +1761,55 @@ mod tests {
         assert_eq!(netsim_ini_port("web.port=7681\n", "grpc.port"), None);
         assert_eq!(netsim_ini_port("", "web.port"), None);
 
-        let created = r#"{"device":{"id":3,"name":"bleradar-beacon","visible":true,"chips":[{"id":7,"kind":"BLUETOOTH_BEACON","name":"bleradar-beacon-chip"}]}}"#;
-        assert_eq!(beacon_chip_id(created), Some(7));
-        assert_eq!(beacon_chip_id(r#"{"device":{"id":3,"chips":[]}}"#), None);
-        assert_eq!(beacon_chip_id("{}"), None);
-
-        let ss = "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process\n\
-                  LISTEN 0      4096   127.0.0.1:5037     0.0.0.0:*     users:((\"adb\",pid=2733,fd=8))\n\
-                  LISTEN 0      128    127.0.0.1:8877     0.0.0.0:*     users:((\"netsimd\",pid=3200,fd=12))\n\
-                  LISTEN 0      128    [::1]:7681         [::]:*        users:((\"netsimd\",pid=3200,fd=13))\n";
-        assert_eq!(netsimd_ports(ss), vec![8877, 7681]);
-        assert!(netsimd_ports("").is_empty());
-
-        let body = beacon_create_body();
+        // The request decodes back to the documented fields.
+        let request = beacon_create_request();
+        let device = grpc::message_field(&request, 1).unwrap().unwrap();
         assert_eq!(
-            body,
-            r#"{"device":{"name":"bleradar-beacon","chips":[{"kind":"BLUETOOTH_BEACON","name":"bleradar-beacon-chip","address":"11:22:33:44:55:66","bleBeacon":{"address":"11:22:33:44:55:66","settings":{"advertiseMode":"LOW_LATENCY","txPowerLevel":"HIGH","scannable":true},"advData":{"includeDeviceName":true}}}]}}"#
+            grpc::message_field(device, 1).unwrap(),
+            Some(b"bleradar-beacon".as_slice())
         );
-        assert_eq!(body.matches('{').count(), body.matches('}').count());
+        let chip = grpc::message_field(device, 4).unwrap().unwrap();
+        assert_eq!(
+            grpc::varint_field(chip, 1).unwrap(),
+            Some(4),
+            "BLUETOOTH_BEACON"
+        );
+        assert_eq!(
+            grpc::message_field(chip, 2).unwrap(),
+            Some(b"11:22:33:44:55:66".as_slice())
+        );
+        let ble = grpc::message_field(chip, 6).unwrap().unwrap();
+        let settings = grpc::message_field(ble, 3).unwrap().unwrap();
+        assert_eq!(
+            grpc::varint_field(settings, 1).unwrap(),
+            Some(2),
+            "LOW_LATENCY"
+        );
+        assert_eq!(grpc::varint_field(settings, 3).unwrap(), Some(3), "HIGH");
+        let adv = grpc::message_field(ble, 4).unwrap().unwrap();
+        assert_eq!(grpc::varint_field(adv, 1).unwrap(), Some(1));
+
+        // A Device message reads back with its chips; a ListDeviceResponse lists them.
+        let mut chip = Vec::new();
+        grpc::field_varint(1, 4, &mut chip);
+        grpc::field_varint(2, 7, &mut chip);
+        grpc::field_bytes(3, b"bleradar-beacon-chip", &mut chip);
+        let mut device = Vec::new();
+        grpc::field_varint(1, 3, &mut device);
+        grpc::field_bytes(2, b"bleradar-beacon", &mut device);
+        grpc::field_bytes(6, &chip, &mut device);
+        assert_eq!(
+            netsim_device(&device).unwrap(),
+            NetsimDevice {
+                id: 3,
+                name: "bleradar-beacon".to_string(),
+                chips: vec![(4, 7, "bleradar-beacon-chip".to_string())]
+            }
+        );
+        let mut list = Vec::new();
+        grpc::field_bytes(1, &device, &mut list);
+        grpc::field_bytes(1, &device, &mut list);
+        assert_eq!(netsim_devices(&list).unwrap().len(), 2);
+        assert!(netsim_devices(&[]).unwrap().is_empty());
     }
 }

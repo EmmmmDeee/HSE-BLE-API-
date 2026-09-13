@@ -17,6 +17,7 @@ mod dashboard;
 mod dex;
 mod elf;
 mod emulator;
+mod grpc;
 mod sha256;
 mod vendor;
 mod zip_reader;
