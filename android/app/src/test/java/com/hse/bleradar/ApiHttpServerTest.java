@@ -220,7 +220,8 @@ public class ApiHttpServerTest {
         // granted, Bluetooth off, scanner unavailable, background start
         // refused by Android. POST /api/scan/stop -> requestStop(): 200 with
         // the live state; the service stays alive (paused) so the API remains
-        // reachable. Request bodies are skipped, never read. A collaborator
+        // reachable. A request body is consumed and discarded (no route reads
+        // one), so a client that sent one is answered, not reset. A collaborator
         // that throws is answered 500 (COR-032) rather than ending the
         // process. Executed proof: cargo xtask verify-api-live drives every
         // outcome through a scripted ScanControl with real requests.

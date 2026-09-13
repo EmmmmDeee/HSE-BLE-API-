@@ -59,6 +59,14 @@ public final class RadarScanService extends Service implements ScanControl {
     private ApiHttpServer httpServer;
     /** Whether {@link #promoteToForeground} is in effect (so a pause can refresh the notification). */
     private volatile boolean foreground;
+    /**
+     * The most recent request: {@code true} after a start (the activity's or
+     * the API's), {@code false} after a stop. {@link #onStartCommand} honours
+     * it so a stop that overtakes the {@code startForegroundService} it
+     * follows — both can arrive from the HTTP handler thread within
+     * milliseconds — is not undone when that start command is delivered.
+     */
+    private volatile boolean scanRequested;
 
     /** Binder handed to {@link MainActivity} to reach this service's live state. */
     public final class LocalBinder extends Binder {
@@ -95,7 +103,12 @@ public final class RadarScanService extends Service implements ScanControl {
             stopSelf(startId);
             return START_NOT_STICKY;
         }
-        boolean started = engine.start();
+        // A sticky restart (null intent) always resumes the scan the process
+        // died with; an explicit start is skipped when a stop has overtaken it,
+        // so the promotion below then leaves the foreground again at once.
+        boolean wanted = intent == null || scanRequested;
+        boolean started = wanted && engine.start();
+        scanRequested = started;
         promoteToForeground(started);
         return START_STICKY;
     }
@@ -125,11 +138,13 @@ public final class RadarScanService extends Service implements ScanControl {
      * @return {@code true} if scanning is now active.
      */
     boolean startScanning() {
+        scanRequested = true;
         return engine.start();
     }
 
     /** Stops scanning, removes the notification, and leaves the started/foreground state. */
     void stopScanning() {
+        scanRequested = false;
         engine.stop();
         foreground = false;
         stopForeground(Service.STOP_FOREGROUND_REMOVE);
@@ -151,6 +166,7 @@ public final class RadarScanService extends Service implements ScanControl {
         if (!BleScanEngine.isBluetoothEnabled(this)) {
             return ScanControl.START_BLUETOOTH_OFF;
         }
+        scanRequested = true;
         try {
             startForegroundService(new Intent(this, RadarScanService.class));
         } catch (IllegalStateException restricted) {
@@ -172,6 +188,7 @@ public final class RadarScanService extends Service implements ScanControl {
      */
     @Override
     public void requestStop() {
+        scanRequested = false;
         engine.stop();
         if (foreground) {
             promoteToForeground(false, false);

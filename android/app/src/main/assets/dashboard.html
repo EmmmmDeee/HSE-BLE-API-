@@ -487,7 +487,10 @@ footer a { color: var(--info); }
 
   // The scanning pill and the two buttons: Start is offered while idle, Stop
   // while scanning; a disabled button is how the DOM proofs read the state.
+  // The last state applied is what a refused control request falls back to.
+  var lastScanning = false;
   function applyScanState(scanning) {
+    lastScanning = scanning;
     el.scan.textContent = scanning ? 'Scanning' : 'Idle';
     el.scan.setAttribute('data-on', String(scanning));
     el.start.disabled = scanning;
@@ -517,8 +520,7 @@ footer a { color: var(--info); }
       });
     }).catch(function (error) {
       showError('Scan ' + action + ' refused: ' + String(error && error.message ? error.message : error));
-      el.start.disabled = false;
-      el.stop.disabled = false;
+      applyScanState(lastScanning);
     });
   }
   el.start.addEventListener('click', function () { control('start'); });

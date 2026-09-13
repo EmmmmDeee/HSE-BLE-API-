@@ -172,9 +172,16 @@ authority.
   handler thread. `POST /api/scan/stop` (`requestStop`) pauses the scan but,
   unlike the app's Stop, keeps the service started and in the foreground
   with the idle notification, so the API stays reachable and a later start
-  needs no activity; only the app's Stop ends the service. The activity's
-  status line shows the dashboard URL while the API is bound, and its 400 ms
-  refresh reflects a pause or start made through the API.
+  needs no activity; only the app's Stop ends the service. Because a start
+  and a stop can arrive from the handler thread milliseconds apart, the
+  service records the latest request (`scanRequested`) and `onStartCommand`
+  starts the engine only for a sticky restart (`null` intent) or while a
+  start is still wanted — a stop that overtakes the queued
+  `startForegroundService` is never undone; the mandatory promotion then
+  leaves the foreground again at once. The activity's status line shows the
+  dashboard URL from the moment the service is bound (it re-renders on
+  connect and disconnect), and its 400 ms refresh reflects a pause or start
+  made through the API.
 - `START_STICKY` now means recovery: if the process is killed while scanning,
   the system restarts the service with a `null` intent, `onStartCommand` runs
   again, and scanning resumes with its notification (COR-018). A user Stop
@@ -228,7 +235,7 @@ build also packages `src/main/assets/` (`aapt2 link -A`; no earlier APK
 carried the bundled `release_manifest.txt` — COR-029), `verify-android-live`
 requires both asset entries and runs lint's `NewApi` check (which found the
 API-33 `readAllBytes()` call on this minSdk-26 app — COR-028), and the
-committed APK is the #92 build (SHA-256 `b1d051b2…b854`, 406,094 bytes; the
+committed APK is the #92 build (SHA-256 `9e179cb1…db2f`, 406,094 bytes; the
 native library byte-identical to the #87 build). The SDK set that build uses
 is pinned once, in `xtask/src/main.rs` (`PINNED_*`), printed by
 `cargo xtask android-sdk-packages` for CI's `sdkmanager`, and preferred by

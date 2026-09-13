@@ -61,6 +61,9 @@ public final class MainActivity extends android.app.Activity {
         public void onServiceConnected(ComponentName name, IBinder service) {
             boundService = ((RadarScanService.LocalBinder) service).getService();
             serviceBound = true;
+            // The API exists from this moment: re-render the status line so
+            // its dashboard URL appears even while the app stays idle.
+            refreshStatus();
             refreshUiLoop();
         }
 
@@ -68,8 +71,12 @@ public final class MainActivity extends android.app.Activity {
         public void onServiceDisconnected(ComponentName name) {
             boundService = null;
             serviceBound = false;
+            refreshStatus();
         }
     };
+
+    /** The last status text asked for, without the lines {@link #setStatus} appends. */
+    private CharSequence baseStatus = "";
 
     private final Runnable refreshTicker = this::refreshUiLoop;
 
@@ -251,6 +258,7 @@ public final class MainActivity extends android.app.Activity {
      * failure into apparent success.
      */
     private void setStatus(CharSequence status) {
+        baseStatus = status;
         StringBuilder text = new StringBuilder(status);
         String apiUrl = boundService == null ? null : boundService.apiUrl();
         if (apiUrl != null) {
@@ -264,6 +272,11 @@ public final class MainActivity extends android.app.Activity {
             text.append('\n').append(getString(R.string.status_native_unavailable, cause));
         }
         statusText.setText(text);
+    }
+
+    /** Re-renders the current status: the appended lines depend on the bound service. */
+    private void refreshStatus() {
+        setStatus(baseStatus);
     }
 
     private void refreshUiLoop() {

@@ -84,7 +84,7 @@ set chosen by xtask's discovery without a fallback notice), from the
 decision #91 sources (exit 0; APK SHA-256 `3559634d…353e`, 406,094 bytes;
 `classes.dex` 67,680 bytes with the server's seams and `Json` added), and
 from the decision #92 sources (exit 0 in 11 s warm; APK SHA-256
-`b1d051b2…b854`, 406,094 bytes; `classes.dex` 70,224 bytes with scan
+`9e179cb1…db2f`, 406,094 bytes; `classes.dex` 70,468 bytes with scan
 control added):
 
 | Check | Outcome |

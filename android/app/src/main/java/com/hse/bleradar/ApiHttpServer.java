@@ -72,8 +72,9 @@ import java.util.logging.Logger;
  * answers {@code 405}; a malformed request line answers {@code 400};
  * {@code /} answers {@code 500} if the packaged page could not be read, and
  * any route answers {@code 500} (the exception's class in {@code error}) if
- * a collaborator throws, so no request can end the app process. Request
- * bodies are skipped, never read.
+ * a collaborator throws, so no request can end the app process. A request
+ * body is consumed and discarded (no route reads one), so a client that
+ * sent one is answered rather than reset.
  *
  * <p>Binding to {@code 127.0.0.1} is the whole access-control model: nothing
  * off-device can reach the port, and remote use goes through an SSH tunnel.
@@ -208,8 +209,8 @@ public final class ApiHttpServer {
                 return;
             }
             // No route reads a body: drain the headers to reach the end of the
-            // request, then skip a declared body so a client that sent one is
-            // answered rather than reset.
+            // request, then consume and discard a declared body so a client
+            // that sent one is answered rather than reset.
             long bodyLength = 0;
             for (String header = reader.readLine(); header != null && !header.isEmpty(); header = reader.readLine()) {
                 int colon = header.indexOf(':');

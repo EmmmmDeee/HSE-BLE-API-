@@ -93,6 +93,11 @@ public class RadarScanServiceTest {
         // - requestStop() pauses the scan but keeps the service started and in
         //   the foreground with the idle notification; only stopScanning()
         //   (the app's Stop) leaves the foreground and stops the service
+        // - scanRequested records the latest request; onStartCommand starts
+        //   the engine only for a sticky restart (null intent) or while a
+        //   start is still wanted, so a stop that overtakes the queued
+        //   startForegroundService is never undone (the promotion then leaves
+        //   the foreground again at once)
         int accepted = ScanControl.START_ACCEPTED;
         assertEquals("START_ACCEPTED is the zero outcome", 0, accepted);
     }
