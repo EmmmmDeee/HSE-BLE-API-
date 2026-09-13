@@ -15,6 +15,18 @@ import static org.junit.Assert.*;
  *   <li>Remote monitoring without pairing to Android system services</li>
  *   <li>Integration with custom analysis tools</li>
  * </ul>
+ *
+ * <p>These methods are contract notes, not executed coverage (no JUnit runner
+ * exists in this tree; see decision #86). The executed proof of every note
+ * below is {@code cargo xtask verify-api-live}: ApiHttpServer references
+ * nothing in {@code android.*} — its collaborators are SnapshotSource
+ * (BleScanEngine), UpdateStatusSource (UpdateManager), AssetSource
+ * ({@code getAssets()::open}) and two LongSupplier clocks, JSON is written by
+ * Json, logging goes through java.util.logging — so xtask compiles the class
+ * without {@code android.jar}, runs it with fixture sources and the host native
+ * library, answers ten real HTTP requests (the three JSON documents
+ * byte-identical to the browser fixtures) and renders the dashboard from it in
+ * headless Chromium. The {@code gates} CI job runs that command on every push.
  */
 public class ApiHttpServerTest {
 
@@ -173,20 +185,6 @@ public class ApiHttpServerTest {
         // real browser by `cargo xtask verify-dashboard-live`.
         String contentType = "text/html; charset=utf-8";
         assertTrue("Root should serve HTML", contentType.startsWith("text/html"));
-    }
-
-    @Test
-    public void real_server_is_executed_on_the_host_jvm() {
-        // ApiHttpServer references nothing in android.*: its collaborators are
-        // SnapshotSource (BleScanEngine), UpdateStatusSource (UpdateManager),
-        // AssetSource (getAssets()::open) and two LongSupplier clocks, JSON is
-        // written by Json, logging goes through java.util.logging. That is what
-        // lets `cargo xtask verify-api-live` compile the class without
-        // android.jar, run it with fixture sources and the host native library,
-        // answer ten real HTTP requests (the three JSON documents byte-identical
-        // to the browser fixtures) and render the dashboard from it in headless
-        // Chromium — the executed proof behind every contract note in this file.
-        assertTrue("The real server runs under cargo xtask verify-api-live", true);
     }
 
     @Test
