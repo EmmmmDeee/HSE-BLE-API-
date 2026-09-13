@@ -11,9 +11,12 @@
 //!   library loaded on the device), the device list is empty;
 //! * with the image's Bluetooth adapter enabled, `POST /api/scan/start` is
 //!   accepted, the service is in the foreground with the scanning
-//!   notification, a stop pauses it with the idle notification and keeps
-//!   it, and a `kill -9` of the app process is followed by the
-//!   `START_STICKY` restart that resumes the scan;
+//!   notification, a virtual advertiser added with `netsim-cli beacon
+//!   create ble` is listed by `/api/devices` with its Rust-computed row and
+//!   pruned by the core's freshness policy once removed, a stop pauses the
+//!   scan with the idle notification and keeps the service, and a `kill -9`
+//!   of the app process is followed by the `START_STICKY` restart that
+//!   resumes the scan;
 //! * the update check the first launch starts ran to its decision and its
 //!   `dataSync` service finished (no record, no notification left);
 //! * `am force-stop` ends the app and, with it, the API;
@@ -66,6 +69,16 @@ const SCANNING_TEXT: &str = "BLE Radar is scanning";
 const IDLE_TEXT: &str = "BLE Radar is idle";
 /// How long the adapter may take to report enabled after `svc bluetooth enable`.
 const BLUETOOTH_TIMEOUT: Duration = Duration::from_secs(30);
+/// The virtual advertiser `netsim-cli beacon create ble` adds to the guest's
+/// radio medium: its device name (carried in the advertisement) and address.
+const BEACON_NAME: &str = "bleradar-beacon";
+const BEACON_ADDRESS: &str = "11:22:33:44:55:66";
+/// How long the scan may take to list the beacon after its creation.
+const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the row may outlive the beacon: the Standard tracking profile
+/// keeps a device "recent" for 30 s before it is stale and pruned.
+const PRUNE_TIMEOUT: Duration = Duration::from_secs(75);
+const NETSIM_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What the command needs from the caller.
 pub struct Config<'a> {
@@ -212,6 +225,24 @@ pub fn emulator_process_lines(ps: &str) -> Vec<String> {
         })
         .map(|line| line.trim().to_string())
         .collect()
+}
+
+/// The device object in a `/api/devices` document whose `"key":"value"`
+/// matches, from its `{` to its `}` (a device row nests nothing).
+pub fn device_row<'a>(devices_json: &'a str, key: &str, value: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":\"{value}\"");
+    let at = devices_json.find(&needle)?;
+    let start = devices_json[..at].rfind('{')?;
+    let end = at + devices_json[at..].find('}')?;
+    Some(&devices_json[start..=end])
+}
+
+/// The frontend gRPC port netsimd wrote into its discovery file
+/// (`grpc.port=<port>`), if the text carries one.
+pub fn netsim_grpc_port(ini: &str) -> Option<u16> {
+    ini.lines()
+        .filter_map(|line| line.trim().strip_prefix("grpc.port="))
+        .find_map(|port| port.trim().parse().ok())
 }
 
 /// The keys a document must carry, checked against what it does.
@@ -440,6 +471,96 @@ fn api_unreachable(port: u16, timeout: Duration) -> bool {
         thread::sleep(Duration::from_secs(1));
     }
     failures >= 3
+}
+
+/// `netsim-cli`, the emulator package's control of the virtual radios the
+/// guest's Bluetooth stack talks to (netsimd is started by the emulator).
+struct Netsim {
+    cli: PathBuf,
+    /// The frontend gRPC port from netsimd's discovery file, when found;
+    /// otherwise the CLI's own discovery is relied on.
+    port: Option<u16>,
+    /// Where the discovery file was found, for the report.
+    ini: Option<PathBuf>,
+}
+
+impl Netsim {
+    fn locate(sdk_root: &Path) -> Result<Self, String> {
+        let cli = sdk_root.join("emulator/netsim-cli");
+        if !cli.is_file() {
+            return Err(format!(
+                "{} is missing: the pinned emulator package no longer ships netsim-cli, which the virtual-advertiser check needs",
+                cli.display()
+            ));
+        }
+        let ini = find_netsim_ini();
+        let port = ini
+            .as_ref()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .and_then(|text| netsim_grpc_port(&text));
+        Ok(Self { cli, port, ini })
+    }
+
+    /// Runs `netsim-cli <args>` with a timeout; the combined output when it
+    /// exits 0.
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let mut command = Command::new(&self.cli);
+        if let Some(port) = self.port {
+            command.args(["--port", &port.to_string()]);
+        }
+        command.args(args);
+        let outcome = dashboard::run_with_timeout(command, NETSIM_TIMEOUT)?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&outcome.stdout),
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+        if !outcome.status.success() {
+            return Err(format!(
+                "netsim-cli {} exited with {}: {}",
+                args.join(" "),
+                outcome.status,
+                text.trim()
+            ));
+        }
+        Ok(text)
+    }
+
+    fn describe(&self) -> String {
+        match (&self.ini, self.port) {
+            (Some(ini), Some(port)) => format!("{} (grpc.port {port})", ini.display()),
+            (Some(ini), None) => format!("{} without a grpc.port line", ini.display()),
+            (None, _) => "no netsim.ini found; the CLI's own discovery".to_string(),
+        }
+    }
+}
+
+/// netsimd's discovery file (`netsim.ini` or `netsim_<instance>.ini`),
+/// searched a few levels under the runtime and temporary directories the
+/// emulator's process tree uses.
+fn find_netsim_ini() -> Option<PathBuf> {
+    let roots: Vec<PathBuf> = ["XDG_RUNTIME_DIR", "TMPDIR"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .chain(std::iter::once(PathBuf::from("/tmp")))
+        .collect();
+    fn search(dir: &Path, depth: usize) -> Option<PathBuf> {
+        let entries = fs::read_dir(dir).ok()?;
+        let mut subdirs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_file() && name.starts_with("netsim") && name.ends_with(".ini") {
+                return Some(path);
+            }
+            if path.is_dir() && depth > 0 {
+                subdirs.push(path);
+            }
+        }
+        subdirs.iter().find_map(|subdir| search(subdir, depth - 1))
+    }
+    roots.iter().find_map(|root| search(root, 2))
 }
 
 /// The app's process id, which must exist.
@@ -818,6 +939,86 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         report.push(format!(
             "scanning: status {status}; RadarScanService isForeground=true with \"{SCANNING_TEXT}\" {:.1}s after the start",
             promoted.as_secs_f64()
+        ));
+
+        println!("== a virtual advertiser: netsim-cli beacon create ble ==");
+        // The guest's Bluetooth controller is virtual (netsimd, started by
+        // the emulator); a beacon created there advertises on the same
+        // medium, so the scan must report it — the one way to observe the
+        // Rust-computed device row on a runtime without a radio.
+        let netsim = Netsim::locate(config.sdk_root)?;
+        report.push(format!("netsim: {}", netsim.describe()));
+        netsim.run(&[
+            "beacon",
+            "create",
+            "ble",
+            BEACON_NAME,
+            "--address",
+            BEACON_ADDRESS,
+            "--advertise-mode",
+            "low-latency",
+            "--tx-power-level",
+            "high",
+            "--include-device-name",
+        ])?;
+        let created = Instant::now();
+        let mut listed = None;
+        let mut last = String::new();
+        while created.elapsed() < BEACON_TIMEOUT {
+            let text = body_text(&get(port, "/api/devices")?);
+            // The advertiser's address as the guest reports it, else the
+            // name the advertisement carries.
+            if let Some(row) = device_row(&text, "address", BEACON_ADDRESS)
+                .or_else(|| device_row(&text, "name", BEACON_NAME))
+            {
+                listed = Some((row.to_string(), created.elapsed()));
+                break;
+            }
+            last = text;
+            thread::sleep(Duration::from_secs(1));
+        }
+        let (row, after) = listed.ok_or_else(|| {
+            format!(
+                "within {}s of `beacon create` /api/devices never listed {BEACON_ADDRESS} or {BEACON_NAME} (last: {last}); netsim-cli devices:\n{}",
+                BEACON_TIMEOUT.as_secs(),
+                netsim.run(&["devices"]).unwrap_or_else(|error| error)
+            )
+        })?;
+        // The row's values come from bleradar-core through the JNI façade:
+        // an RSSI, a finite distance, a proximity band.
+        if json_integer(&row, "rssi_dbm").is_none() {
+            return Err(format!("the beacon's row carries no rssi_dbm: {row}"));
+        }
+        if row.contains("\"distance_m\":null") || !row.contains("\"distance_m\":") {
+            return Err(format!(
+                "the beacon's row carries no distance (the Rust estimate never reached it): {row}"
+            ));
+        }
+        report.push(format!(
+            "beacon: listed {:.1}s after `netsim-cli beacon create ble`: {row}",
+            after.as_secs_f64()
+        ));
+
+        netsim.run(&["beacon", "remove", BEACON_NAME])?;
+        let removed = Instant::now();
+        let pruned = loop {
+            let text = body_text(&get(port, "/api/devices")?);
+            if device_row(&text, "address", BEACON_ADDRESS).is_none()
+                && device_row(&text, "name", BEACON_NAME).is_none()
+            {
+                break removed.elapsed();
+            }
+            if removed.elapsed() > PRUNE_TIMEOUT {
+                return Err(format!(
+                    "{}s after `beacon remove` the row is still listed (the Rust prune policy never dropped it): {text}",
+                    PRUNE_TIMEOUT.as_secs()
+                ));
+            }
+            thread::sleep(Duration::from_secs(2));
+        };
+        report.push(format!(
+            "beacon removed: the row was pruned {:.1}s later (the core's freshness policy, on the runtime)",
+            pruned.as_secs_f64()
         ));
 
         let stop = post(port, "/api/scan/stop")?;
@@ -1308,5 +1509,22 @@ mod tests {
         assert!(lines[1].contains("emulator -avd"));
         assert!(lines[2].contains("netsimd"));
         assert!(emulator_process_lines("PID COMMAND\n").is_empty());
+    }
+
+    #[test]
+    fn device_rows_and_the_netsim_port_are_found() {
+        let devices = r#"{"devices":[{"address":"AA:BB:CC:DD:EE:01","name":null,"distance_m":1.5,"rssi_dbm":-60,"proximity":"near"},{"address":"11:22:33:44:55:66","name":"bleradar-beacon","distance_m":0.8,"distance_lower_m":0.4,"distance_upper_m":1.6,"rssi_dbm":-52,"proximity":"immediate","trend":"steady","freshness":"live","confidence_percent":40,"last_seen_ago_ms":12}],"scanning":true,"native_available":true,"timestamp_ms":1}"#;
+        let row = device_row(devices, "address", "11:22:33:44:55:66").unwrap();
+        assert!(row.starts_with("{\"address\":\"11:22:33:44:55:66\""));
+        assert!(row.ends_with("\"last_seen_ago_ms\":12}"));
+        assert_eq!(json_integer(row, "rssi_dbm"), Some(-52));
+        assert_eq!(device_row(devices, "name", "bleradar-beacon"), Some(row));
+        assert!(device_row(devices, "address", "00:00:00:00:00:00").is_none());
+        assert!(device_row(r#"{"devices":[],"scanning":true}"#, "name", "x").is_none());
+
+        let ini = "web.port=7681\ngrpc.port=8877\nartifact.dir=/tmp/netsim\n";
+        assert_eq!(netsim_grpc_port(ini), Some(8877));
+        assert_eq!(netsim_grpc_port("web.port=7681\n"), None);
+        assert_eq!(netsim_grpc_port(""), None);
     }
 }
