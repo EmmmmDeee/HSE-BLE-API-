@@ -44,7 +44,6 @@ public final class MainActivity extends android.app.Activity {
 
     private static final int PERMISSION_REQUEST_CODE = 42;
     private static final long UI_REFRESH_INTERVAL_MILLIS = 400L;
-    private static final long CHECK_INTERVAL_SECONDS = 86400L; // 1 day
 
     private RadarView radarView;
     private TextView statusText;
@@ -129,7 +128,7 @@ public final class MainActivity extends android.app.Activity {
         UpdateManager updateManager = new UpdateManager(this);
         // The check is guarded by shouldCheckForUpdate, which respects the daily throttle,
         // so this call returns quickly on most app launches.
-        if (updateManager.shouldCheckForUpdate(CHECK_INTERVAL_SECONDS)) {
+        if (updateManager.shouldCheckForUpdate(UpdateManager.CHECK_INTERVAL_SECONDS)) {
             // Use startForegroundService on Android 8+ to ensure reliable service startup
             Intent intent = new Intent(this, UpdateCheckService.class);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

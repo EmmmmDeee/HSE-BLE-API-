@@ -21,6 +21,13 @@ public final class UpdateManager implements UpdateStatusSource {
 
     private static final String TAG = "UpdateManager";
     private static final int MIN_ANDROID_VERSION_FOR_LONG_VERSION_CODE = Build.VERSION_CODES.P;
+    /**
+     * Minimum seconds between two update checks (once a day): the one value
+     * behind {@link MainActivity}'s and {@link UpdateCheckService}'s throttle
+     * calls and the {@code next_check_ms} the API reports, so the three can
+     * never disagree.
+     */
+    static final long CHECK_INTERVAL_SECONDS = 86400L;
 
     private static final String PREFS_NAME = "UpdateCheckService";
     private static final String KEY_LAST_CHECK_TIME = "last_check_time_seconds";
@@ -45,7 +52,7 @@ public final class UpdateManager implements UpdateStatusSource {
      * <p>Uses {@link NativeRadar#shouldCheckForUpdate(long, long, long)} to
      * apply the documented throttle logic.
      *
-     * @param minIntervalSeconds minimum seconds between checks (e.g. 86400 for once per day)
+     * @param minIntervalSeconds minimum seconds between checks ({@link #CHECK_INTERVAL_SECONDS})
      * @return true if enough time has elapsed since the last check
      */
     public boolean shouldCheckForUpdate(long minIntervalSeconds) {
@@ -65,14 +72,15 @@ public final class UpdateManager implements UpdateStatusSource {
     }
 
     /**
-     * Returns the estimated next check time in milliseconds based on CHECK_INTERVAL (86400 seconds).
+     * Returns the estimated next check time in milliseconds: the last check
+     * plus {@link #CHECK_INTERVAL_SECONDS}, the interval the throttle applies.
      */
     public long getNextCheckTimeMs() {
         long lastCheckSeconds = prefs.getLong(KEY_LAST_CHECK_TIME, 0);
         if (lastCheckSeconds == 0) {
             return System.currentTimeMillis(); // No previous check; next check is now
         }
-        return (lastCheckSeconds + 86400) * 1000; // Last check + 24 hours
+        return (lastCheckSeconds + CHECK_INTERVAL_SECONDS) * 1000;
     }
 
     /**

@@ -49,7 +49,6 @@ import java.nio.charset.StandardCharsets;
 public final class UpdateCheckService extends Service {
 
     private static final String TAG = "UpdateCheckService";
-    private static final long CHECK_INTERVAL_SECONDS = 86400; // Daily
     private static final long BASE_BACKOFF_SECONDS = 300; // 5 minutes
     private static final long MAX_BACKOFF_SECONDS = 86400; // 24 hours
     private static final int MIN_BATTERY_PERCENT = 20;
@@ -231,7 +230,7 @@ public final class UpdateCheckService extends Service {
         }
 
         // Check if enough time has passed since the last check (skip for retries)
-        if (!isRetry && !updateManager.shouldCheckForUpdate(CHECK_INTERVAL_SECONDS)) {
+        if (!isRetry && !updateManager.shouldCheckForUpdate(UpdateManager.CHECK_INTERVAL_SECONDS)) {
             Log.d(TAG, "Not yet time for an update check; skipping");
             finish(startId);
             return START_NOT_STICKY;
