@@ -11,8 +11,8 @@
 //!   library loaded on the device), the device list is empty;
 //! * with the image's Bluetooth adapter enabled, `POST /api/scan/start` is
 //!   accepted, the service is in the foreground with the scanning
-//!   notification, a virtual advertiser added with `netsim-cli beacon
-//!   create ble` is listed by `/api/devices` with its Rust-computed row and
+//!   notification, a virtual advertiser added through netsimd's HTTP frontend
+//!   (`POST /v1/devices`) is listed by `/api/devices` with its Rust-computed row and
 //!   pruned by the core's freshness policy once removed, a stop pauses the
 //!   scan with the idle notification and keeps the service, and a `kill -9`
 //!   of the app process is followed by the `START_STICKY` restart that
@@ -31,7 +31,8 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -69,7 +70,7 @@ const SCANNING_TEXT: &str = "BLE Radar is scanning";
 const IDLE_TEXT: &str = "BLE Radar is idle";
 /// How long the adapter may take to report enabled after `svc bluetooth enable`.
 const BLUETOOTH_TIMEOUT: Duration = Duration::from_secs(30);
-/// The virtual advertiser `netsim-cli beacon create ble` adds to the guest's
+/// The virtual advertiser `POST /v1/devices` on netsimd adds to the guest's
 /// radio medium: its device name (carried in the advertisement) and address.
 const BEACON_NAME: &str = "bleradar-beacon";
 const BEACON_ADDRESS: &str = "11:22:33:44:55:66";
@@ -78,7 +79,11 @@ const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the row may outlive the beacon: the Standard tracking profile
 /// keeps a device "recent" for 30 s before it is stale and pruned.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(75);
-const NETSIM_TIMEOUT: Duration = Duration::from_secs(30);
+/// netsimd's HTTP frontend answers in milliseconds; the read timeout also
+/// ends an answer the server does not close and does not size.
+const NETSIM_TIMEOUT: Duration = Duration::from_secs(10);
+/// netsimd's default `web.port`, used when no discovery file names one.
+const NETSIM_DEFAULT_WEB_PORT: u16 = 7681;
 
 /// What the command needs from the caller.
 pub struct Config<'a> {
@@ -237,12 +242,36 @@ pub fn device_row<'a>(devices_json: &'a str, key: &str, value: &str) -> Option<&
     Some(&devices_json[start..=end])
 }
 
-/// The frontend gRPC port netsimd wrote into its discovery file
-/// (`grpc.port=<port>`), if the text carries one.
-pub fn netsim_grpc_port(ini: &str) -> Option<u16> {
+/// A port netsimd wrote into its discovery file (`<key>=<port>`, e.g.
+/// `web.port=7681`), if the text carries one.
+pub fn netsim_ini_port(ini: &str, key: &str) -> Option<u16> {
+    let prefix = format!("{key}=");
     ini.lines()
-        .filter_map(|line| line.trim().strip_prefix("grpc.port="))
+        .filter_map(|line| line.trim().strip_prefix(prefix.as_str()))
         .find_map(|port| port.trim().parse().ok())
+}
+
+/// The id of the first chip in a `CreateDeviceResponse` JSON document
+/// (`{"device":{...,"chips":[{"id":N,...}]}}`), needed to delete it.
+pub fn beacon_chip_id(response_json: &str) -> Option<u32> {
+    let chips = response_json.find("\"chips\"")?;
+    json_integer(&response_json[chips..], "id").and_then(|id| u32::try_from(id).ok())
+}
+
+/// The `CreateDeviceRequest` (protobuf JSON) that adds the advertiser: one
+/// device carrying one `BLUETOOTH_BEACON` chip advertising at low latency
+/// and high power with the device name in the packet.
+pub fn beacon_create_body() -> String {
+    format!(
+        concat!(
+            "{{\"device\":{{\"name\":\"{name}\",\"chips\":[{{\"kind\":\"BLUETOOTH_BEACON\",",
+            "\"name\":\"{name}-chip\",\"address\":\"{address}\",\"bleBeacon\":{{\"address\":\"{address}\",",
+            "\"settings\":{{\"advertiseMode\":\"LOW_LATENCY\",\"txPowerLevel\":\"HIGH\",\"scannable\":true}},",
+            "\"advData\":{{\"includeDeviceName\":true}}}}}}]}}}}"
+        ),
+        name = BEACON_NAME,
+        address = BEACON_ADDRESS
+    )
 }
 
 /// The keys a document must carry, checked against what it does.
@@ -473,104 +502,151 @@ fn api_unreachable(port: u16, timeout: Duration) -> bool {
     failures >= 3
 }
 
-/// `netsim-cli`, the emulator package's control of the virtual radios the
-/// guest's Bluetooth stack talks to (netsimd is started by the emulator).
+/// netsimd's HTTP frontend: the emulator starts netsimd for its virtual
+/// radios (the guest's Bluetooth controller lives there) and the daemon
+/// serves the same device model its gRPC frontend and `netsim-cli` use as
+/// JSON on its web port — `GET /v1/devices`, `POST /v1/devices` with a
+/// `CreateDeviceRequest`, `DELETE /v1/devices` with a `DeleteChipRequest`
+/// (the emulator package ships netsimd but no CLI, as the first run found).
 struct Netsim {
-    cli: PathBuf,
-    /// The frontend gRPC port from netsimd's discovery file, when found;
-    /// otherwise the CLI's own discovery is relied on.
-    port: Option<u16>,
-    /// Where the discovery file was found, for the report.
+    port: u16,
+    /// The discovery file the port came from, for the report.
     ini: Option<PathBuf>,
 }
 
 impl Netsim {
-    /// Finds the CLI in the emulator package (its name has varied between
-    /// releases) and settles on an endpoint that answers `devices`: the
-    /// port of a discovery file first, else the CLI's own discovery — a
-    /// stale file from another emulator instance is thereby never trusted.
-    fn locate(sdk_root: &Path) -> Result<Self, String> {
-        let emulator_dir = sdk_root.join("emulator");
-        let cli = ["netsim-cli", "netsim", "bin/netsim-cli", "bin/netsim"]
-            .iter()
-            .map(|name| emulator_dir.join(name))
-            .find(|candidate| candidate.is_file())
-            .ok_or_else(|| {
-                let shipped: Vec<String> = fs::read_dir(&emulator_dir)
-                    .map(|entries| {
-                        entries
-                            .flatten()
-                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                            .filter(|name| name.contains("netsim"))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                format!(
-                    "no netsim CLI under {}: the virtual-advertiser check needs it; netsim entries there: {:?}",
-                    emulator_dir.display(),
-                    shipped
-                )
-            })?;
+    /// Settles on the web port that answers `GET /v1/devices`: the one a
+    /// discovery file names first, then netsimd's default — a stale file
+    /// from another instance is never trusted.
+    fn connect() -> Result<Self, String> {
         let ini = find_netsim_ini();
-        let port = ini
+        let named = ini
             .as_ref()
             .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|text| netsim_grpc_port(&text));
-        let mut netsim = Self { cli, port, ini };
+            .and_then(|text| netsim_ini_port(&text, "web.port"));
+        let mut candidates: Vec<u16> = named.into_iter().collect();
+        if !candidates.contains(&NETSIM_DEFAULT_WEB_PORT) {
+            candidates.push(NETSIM_DEFAULT_WEB_PORT);
+        }
         let mut failures = Vec::new();
-        for attempt in [netsim.port, None] {
-            netsim.port = attempt;
-            match netsim.run(&["devices"]) {
+        for port in candidates {
+            let netsim = Self {
+                port,
+                ini: ini.clone(),
+            };
+            match netsim.devices() {
                 Ok(_) => return Ok(netsim),
-                Err(error) => failures.push(error),
-            }
-            if attempt.is_none() {
-                break;
+                Err(error) => failures.push(format!("127.0.0.1:{port}: {error}")),
             }
         }
         Err(format!(
-            "netsim-cli answers `devices` neither through {} nor through its own discovery:\n{}",
-            netsim.describe(),
+            "netsimd's HTTP frontend answers `GET /v1/devices` on none of the candidate ports ({}):\n{}",
+            match &ini {
+                Some(path) => format!("discovery file {}", path.display()),
+                None => "no discovery file found".to_string(),
+            },
             failures.join("\n")
         ))
     }
 
-    /// Runs `netsim-cli <args>` with a timeout; the combined output when it
-    /// exits 0.
-    fn run(&self, args: &[&str]) -> Result<String, String> {
-        let mut command = Command::new(&self.cli);
-        if let Some(port) = self.port {
-            command.args(["--port", &port.to_string()]);
+    fn describe(&self) -> String {
+        match &self.ini {
+            Some(ini) => format!(
+                "HTTP frontend at 127.0.0.1:{} (discovery file {})",
+                self.port,
+                ini.display()
+            ),
+            None => format!(
+                "HTTP frontend at 127.0.0.1:{} (the default port; no discovery file found)",
+                self.port
+            ),
         }
-        command.args(args);
-        let outcome = dashboard::run_with_timeout(command, NETSIM_TIMEOUT)?;
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&outcome.stdout),
-            String::from_utf8_lossy(&outcome.stderr)
+    }
+
+    /// One request to the frontend; the answer must be a `200`.
+    fn request(&self, method: &str, body: &str) -> Result<String, String> {
+        let request = format!(
+            "{method} /v1/devices HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
         );
-        if !outcome.status.success() {
+        let response = netsim_exchange(self.port, request.as_bytes())?;
+        let text = String::from_utf8_lossy(&response.body).into_owned();
+        if response.status != 200 {
             return Err(format!(
-                "netsim-cli {} exited with {}: {}",
-                args.join(" "),
-                outcome.status,
+                "{method} /v1/devices answered {}: {}",
+                response.status,
                 text.trim()
             ));
         }
         Ok(text)
     }
 
-    fn describe(&self) -> String {
-        let cli = self.cli.display();
-        match (&self.ini, self.port) {
-            (Some(ini), Some(port)) => format!("{cli}, {} (grpc.port {port})", ini.display()),
-            (Some(ini), None) => format!(
-                "{cli}, its own discovery ({} carried no usable grpc.port)",
-                ini.display()
-            ),
-            (None, _) => format!("{cli}, its own discovery (no netsim.ini found)"),
+    /// The device list, as netsimd's JSON.
+    fn devices(&self) -> Result<String, String> {
+        self.request("GET", "")
+    }
+
+    /// Creates the advertiser (`CreateDeviceRequest` as JSON); the id of its
+    /// beacon chip.
+    fn create_beacon(&self) -> Result<u32, String> {
+        let body = beacon_create_body();
+        let created = self.request("POST", &body)?;
+        beacon_chip_id(&created)
+            .ok_or_else(|| format!("the CreateDeviceResponse carries no chip id: {created}"))
+    }
+
+    /// Removes the chip, which ends the advertising.
+    fn delete_chip(&self, chip_id: u32) -> Result<(), String> {
+        self.request("DELETE", &format!("{{\"id\":{chip_id}}}"))
+            .map(|_| ())
+    }
+}
+
+/// One HTTP exchange with netsimd, read until the declared body is in, the
+/// server closes, or the read timeout ends an unsized, kept-open answer.
+fn netsim_exchange(port: u16, request: &[u8]) -> Result<HttpResponse, String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|e| format!("connecting to 127.0.0.1:{port}: {e}"))?;
+    stream
+        .set_read_timeout(Some(NETSIM_TIMEOUT))
+        .map_err(|e| format!("setting the read timeout: {e}"))?;
+    stream
+        .set_write_timeout(Some(NETSIM_TIMEOUT))
+        .map_err(|e| format!("setting the write timeout: {e}"))?;
+    stream
+        .write_all(request)
+        .map_err(|e| format!("sending the request: {e}"))?;
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+            let declared = head.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            });
+            if declared.is_some_and(|length| raw.len() >= split + 4 + length) {
+                break;
+            }
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&buffer[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(e) => return Err(format!("reading netsimd's answer: {e}")),
         }
     }
+    apilive::parse_http_response(&raw)
 }
 
 /// netsimd's discovery file (`netsim.ini` or `netsim_<instance>.ini`),
@@ -979,26 +1055,14 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             promoted.as_secs_f64()
         ));
 
-        println!("== a virtual advertiser: netsim-cli beacon create ble ==");
+        println!("== a virtual advertiser: POST /v1/devices on netsimd's HTTP frontend ==");
         // The guest's Bluetooth controller is virtual (netsimd, started by
         // the emulator); a beacon created there advertises on the same
         // medium, so the scan must report it — the one way to observe the
         // Rust-computed device row on a runtime without a radio.
-        let netsim = Netsim::locate(config.sdk_root)?;
+        let netsim = Netsim::connect()?;
         report.push(format!("netsim: {}", netsim.describe()));
-        netsim.run(&[
-            "beacon",
-            "create",
-            "ble",
-            BEACON_NAME,
-            "--address",
-            BEACON_ADDRESS,
-            "--advertise-mode",
-            "low-latency",
-            "--tx-power-level",
-            "high",
-            "--include-device-name",
-        ])?;
+        let chip_id = netsim.create_beacon()?;
         let created = Instant::now();
         let mut listed = None;
         let mut last = String::new();
@@ -1025,9 +1089,9 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         }
         let (row, after) = listed.ok_or_else(|| {
             format!(
-                "within {}s of `beacon create` /api/devices never listed {BEACON_ADDRESS} or {BEACON_NAME} (last: {last}); netsim-cli devices:\n{}",
+                "within {}s of the beacon's creation /api/devices never listed {BEACON_ADDRESS} or {BEACON_NAME} (last: {last}); netsimd's devices:\n{}",
                 BEACON_TIMEOUT.as_secs(),
-                netsim.run(&["devices"]).unwrap_or_else(|error| error)
+                netsim.devices().unwrap_or_else(|error| error)
             )
         })?;
         // The row's values come from bleradar-core through the JNI façade:
@@ -1041,11 +1105,11 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             ));
         }
         report.push(format!(
-            "beacon: listed {:.1}s after `netsim-cli beacon create ble`: {row}",
+            "beacon: listed {:.1}s after its creation: {row}",
             after.as_secs_f64()
         ));
 
-        netsim.run(&["beacon", "remove", BEACON_NAME])?;
+        netsim.delete_chip(chip_id)?;
         let removed = Instant::now();
         let pruned = loop {
             let response = get(port, "/api/devices")?;
@@ -1061,7 +1125,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             {
                 if after > PRUNE_TIMEOUT {
                     return Err(format!(
-                        "the row was gone only {:.1}s after `beacon remove` (bound {}s)",
+                        "the row was gone only {:.1}s after the beacon's removal (bound {}s)",
                         after.as_secs_f64(),
                         PRUNE_TIMEOUT.as_secs()
                     ));
@@ -1070,7 +1134,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             }
             if after > PRUNE_TIMEOUT {
                 return Err(format!(
-                    "{}s after `beacon remove` the row is still listed, or the document is not a healthy scanning one (status {}): {text}",
+                    "{}s after the beacon's removal the row is still listed, or the document is not a healthy scanning one (status {}): {text}",
                     PRUNE_TIMEOUT.as_secs(),
                     response.status
                 ));
@@ -1584,8 +1648,21 @@ mod tests {
         assert!(device_row(r#"{"devices":[],"scanning":true}"#, "name", "x").is_none());
 
         let ini = "web.port=7681\ngrpc.port=8877\nartifact.dir=/tmp/netsim\n";
-        assert_eq!(netsim_grpc_port(ini), Some(8877));
-        assert_eq!(netsim_grpc_port("web.port=7681\n"), None);
-        assert_eq!(netsim_grpc_port(""), None);
+        assert_eq!(netsim_ini_port(ini, "grpc.port"), Some(8877));
+        assert_eq!(netsim_ini_port(ini, "web.port"), Some(7681));
+        assert_eq!(netsim_ini_port("web.port=7681\n", "grpc.port"), None);
+        assert_eq!(netsim_ini_port("", "web.port"), None);
+
+        let created = r#"{"device":{"id":3,"name":"bleradar-beacon","visible":true,"chips":[{"id":7,"kind":"BLUETOOTH_BEACON","name":"bleradar-beacon-chip"}]}}"#;
+        assert_eq!(beacon_chip_id(created), Some(7));
+        assert_eq!(beacon_chip_id(r#"{"device":{"id":3,"chips":[]}}"#), None);
+        assert_eq!(beacon_chip_id("{}"), None);
+
+        let body = beacon_create_body();
+        assert_eq!(
+            body,
+            r#"{"device":{"name":"bleradar-beacon","chips":[{"kind":"BLUETOOTH_BEACON","name":"bleradar-beacon-chip","address":"11:22:33:44:55:66","bleBeacon":{"address":"11:22:33:44:55:66","settings":{"advertiseMode":"LOW_LATENCY","txPowerLevel":"HIGH","scannable":true},"advData":{"includeDeviceName":true}}}]}}"#
+        );
+        assert_eq!(body.matches('{').count(), body.matches('}').count());
     }
 }
