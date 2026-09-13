@@ -83,6 +83,9 @@ const PRUNE_TIMEOUT: Duration = Duration::from_secs(75);
 /// its stream by then is a wrong port or a dead daemon.
 const NETSIM_TIMEOUT: Duration = Duration::from_secs(10);
 /// The gRPC frontend's service, `proto/netsim/frontend.proto`.
+/// The gRPC frontend's service prefix in the netsim sources; the daemon's
+/// own binary is asked for the prefix it actually registers (a different
+/// generation names it differently) and this is the fallback.
 const NETSIM_SERVICE: &str = "/netsim.frontend.FrontendService/";
 
 /// What the command needs from the caller.
@@ -277,6 +280,32 @@ pub fn beacon_create_request() -> Vec<u8> {
     let mut request = Vec::new();
     grpc::field_bytes(1, &device, &mut request);
     request
+}
+
+/// The gRPC method paths a netsim binary embeds (`/netsim.<package>.<Service>/<Method>`,
+/// the string literals its generated stubs register), sorted and unique.
+pub fn grpc_method_paths(binary: &[u8]) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let needle = b"/netsim.";
+    let mut at = 0;
+    while let Some(offset) = binary[at..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        let start = at + offset;
+        let end = binary[start..]
+            .iter()
+            .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_')))
+            .map_or(binary.len(), |length| start + length);
+        let path = String::from_utf8_lossy(&binary[start..end]).into_owned();
+        // A path has exactly one "/" inside after the leading one: /pkg.Service/Method.
+        if path.matches('/').count() == 2 && !path.ends_with('/') && !paths.contains(&path) {
+            paths.push(path);
+        }
+        at = end.max(start + 1);
+    }
+    paths.sort();
+    paths
 }
 
 /// One device of netsimd's model, read from a `Device` message: its id,
@@ -572,6 +601,10 @@ struct Netsim {
     ini: Option<PathBuf>,
     /// What `GetVersion` answered.
     version: String,
+    /// The frontend service prefix (`/pkg.Service/`) the daemon registers.
+    service: String,
+    /// The frontend's method names read from the daemon's binary, if any.
+    methods: Vec<String>,
 }
 
 impl Netsim {
@@ -580,7 +613,24 @@ impl Netsim {
     /// process listens on — a stale file from another instance is never
     /// trusted, and a failure shows the file, the daemon's command line and
     /// its sockets.
-    fn connect() -> Result<Self, String> {
+    fn connect(sdk_root: &Path) -> Result<Self, String> {
+        // The service prefix and the method set from the daemon's own binary:
+        // the generated stubs embed every path they register.
+        let binary = sdk_root.join("emulator/netsimd");
+        let paths = fs::read(&binary)
+            .map(|bytes| grpc_method_paths(&bytes))
+            .unwrap_or_default();
+        let service = paths
+            .iter()
+            .find(|path| path.ends_with("/GetVersion"))
+            .map_or(NETSIM_SERVICE.to_string(), |path| {
+                path[..path.len() - "GetVersion".len()].to_string()
+            });
+        let methods: Vec<String> = paths
+            .iter()
+            .filter_map(|path| path.strip_prefix(service.as_str()))
+            .map(str::to_string)
+            .collect();
         let ini = find_netsim_ini();
         let ini_text = ini
             .as_ref()
@@ -603,6 +653,8 @@ impl Netsim {
                 source: source.to_string(),
                 ini: ini.clone(),
                 version: String::new(),
+                service: service.clone(),
+                methods: methods.clone(),
             };
             // GetVersion exists in every netsim release; the device list and
             // the beacon calls are checked, and named, where they are used.
@@ -617,11 +669,17 @@ impl Netsim {
             }
         }
         Err(format!(
-            "netsimd's frontend answers `GetVersion` on none of the candidate ports:\n{}\n-- discovery file {} --\n{}\n-- netsimd command line --\n{}\n-- listening sockets --\n{}",
+            "netsimd's frontend answers `{service}GetVersion` on none of the candidate ports:\n{}\n-- gRPC paths in {} --\n{}\n-- discovery file {} --\n{}\n-- netsimd command line --\n{}\n-- listening sockets --\n{}",
             if failures.is_empty() {
                 "(no candidate: no discovery file port and no netsimd socket)".to_string()
             } else {
                 failures.join("\n")
+            },
+            binary.display(),
+            if paths.is_empty() {
+                "(none)".to_string()
+            } else {
+                paths.join("\n")
             },
             ini.as_ref().map_or("(none found)".to_string(), |path| path
                 .display()
@@ -638,19 +696,25 @@ impl Netsim {
 
     fn describe(&self) -> String {
         format!(
-            "netsim {} through the gRPC frontend at 127.0.0.1:{} ({}; discovery file {})",
+            "netsim {} through the gRPC frontend {} at 127.0.0.1:{} ({}; discovery file {}); methods in the binary: {}",
             self.version,
+            self.service,
             self.port,
             self.source,
             self.ini
                 .as_ref()
-                .map_or("none found".to_string(), |path| path.display().to_string())
+                .map_or("none found".to_string(), |path| path.display().to_string()),
+            if self.methods.is_empty() {
+                "(none read)".to_string()
+            } else {
+                self.methods.join(" ")
+            }
         )
     }
 
     /// One unary call; the single response message it must carry.
     fn call(&self, method: &str, request: &[u8]) -> Result<Vec<u8>, String> {
-        let path = format!("{NETSIM_SERVICE}{method}");
+        let path = format!("{}{method}", self.service);
         let outcome = grpc::unary(self.port, &path, request, NETSIM_TIMEOUT)?;
         if let Some(code) = outcome.reset {
             return Err(format!(
@@ -727,7 +791,7 @@ impl Netsim {
     fn delete_chip(&self, chip_id: u64) -> Result<(), String> {
         let mut request = Vec::new();
         grpc::field_varint(2, chip_id, &mut request); // DeleteChipRequest.id = 2
-        let path = format!("{NETSIM_SERVICE}DeleteChip");
+        let path = format!("{}DeleteChip", self.service);
         let outcome = grpc::unary(self.port, &path, &request, NETSIM_TIMEOUT)?;
         // `google.protobuf.Empty` may come as an empty message or none at all;
         // a reset or GOAWAY is the failure.
@@ -1201,7 +1265,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         // the emulator); a beacon created there advertises on the same
         // medium, so the scan must report it — the one way to observe the
         // Rust-computed device row on a runtime without a radio.
-        let netsim = Netsim::connect()?;
+        let netsim = Netsim::connect(config.sdk_root)?;
         report.push(format!("netsim: {}", netsim.describe()));
         let chip_id = netsim.create_beacon()?;
         let created = Instant::now();
@@ -1858,5 +1922,16 @@ mod tests {
         grpc::field_bytes(1, &device, &mut list);
         assert_eq!(netsim_devices(&list).unwrap().len(), 2);
         assert!(netsim_devices(&[]).unwrap().is_empty());
+
+        let binary = b"junk\x00/netsim.frontend.FrontendService/GetVersion\x00more/netsim.frontend.FrontendService/CreateDevice\x00/netsim.packet_streamer.PacketStreamer/StreamPackets\x00/netsim.frontend.FrontendService/GetVersion\x00/netsim.broken/\x00";
+        assert_eq!(
+            grpc_method_paths(binary),
+            vec![
+                "/netsim.frontend.FrontendService/CreateDevice",
+                "/netsim.frontend.FrontendService/GetVersion",
+                "/netsim.packet_streamer.PacketStreamer/StreamPackets"
+            ]
+        );
+        assert!(grpc_method_paths(b"nothing here").is_empty());
     }
 }
