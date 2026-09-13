@@ -24,9 +24,10 @@ import static org.junit.Assert.*;
  * ({@code getAssets()::open}) and two LongSupplier clocks, JSON is written by
  * Json, logging goes through java.util.logging — so xtask compiles the class
  * without {@code android.jar}, runs it with fixture sources and the host native
- * library, answers ten real HTTP requests (the three JSON documents
+ * library, answers 27 real HTTP requests (the three JSON documents
  * byte-identical to the browser fixtures) and renders the dashboard from it in
- * headless Chromium. The {@code gates} CI job runs that command on every push.
+ * headless Chromium. The {@code gates} CI job runs that command on every
+ * pull request and every push to {@code main}.
  */
 public class ApiHttpServerTest {
 

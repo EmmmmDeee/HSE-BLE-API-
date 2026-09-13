@@ -39,7 +39,8 @@ import java.util.logging.Logger;
  * dashboard from it in headless Chromium. {@link RadarScanService} wires the
  * device implementations in.
  *
- * <p>Endpoints (all {@code GET}; JSON unless noted):
+ * <p>Endpoints (the documents are {@code GET}, scan control is {@code POST};
+ * JSON unless noted):
  * <ul>
  *   <li>{@code /api/devices} — every live device from
  *       {@link SnapshotSource#snapshot()}, in its ranked order: {@code address},
@@ -74,7 +75,9 @@ import java.util.logging.Logger;
  * any route answers {@code 500} (the exception's class in {@code error}) if
  * a collaborator throws, so no request can end the app process. A request
  * body is consumed and discarded (no route reads one), so a client that
- * sent one is answered rather than reset.
+ * sent one is answered rather than reset; a body declared larger than
+ * {@link #MAX_REQUEST_BODY_BYTES} answers {@code 413} at once instead of
+ * tying a handler thread to a client that may never send it.
  *
  * <p>Binding to {@code 127.0.0.1} is the whole access-control model: nothing
  * off-device can reach the port, and remote use goes through an SSH tunnel.
@@ -90,6 +93,12 @@ public final class ApiHttpServer {
     private static final int HANDLER_THREADS = 2;
     /** Frees a handler thread from a client that connects but never sends its request. */
     private static final int REQUEST_TIMEOUT_MS = 5_000;
+    /**
+     * The largest declared request body a handler will consume; no route
+     * reads one, so anything larger is refused ({@code 413}) before the
+     * handler thread would wait on it.
+     */
+    static final long MAX_REQUEST_BODY_BYTES = 64 * 1024;
     private static final String JSON = "application/json";
     private static final String HTML = "text/html; charset=utf-8";
 
@@ -222,12 +231,16 @@ public final class ApiHttpServer {
                     }
                 }
             }
+            OutputStream out = socket.getOutputStream();
+            if (bodyLength > MAX_REQUEST_BODY_BYTES) {
+                writeResponse(out, 413, "Payload Too Large", JSON, errorJson("Request body too large"));
+                return;
+            }
             for (long skipped = 0; skipped < bodyLength; skipped++) {
                 if (reader.read() < 0) {
                     break;
                 }
             }
-            OutputStream out = socket.getOutputStream();
             String[] parts = requestLine.split(" ");
             if (parts.length != 3) {
                 writeResponse(out, 400, "Bad Request", JSON, errorJson("Bad request"));

@@ -16,6 +16,7 @@ mod apilive;
 mod dashboard;
 mod dex;
 mod elf;
+mod emulator;
 mod sha256;
 mod vendor;
 mod zip_reader;
@@ -88,6 +89,7 @@ fn main() -> ExitCode {
         "prepare-bionic-sysroot" => cmd_prepare_bionic_sysroot(&rest),
         "verify-dashboard-live" => cmd_verify_dashboard_live(),
         "verify-api-live" => cmd_verify_api_live(),
+        "verify-android-emulator" => cmd_verify_android_emulator(),
         "android-sdk-packages" => cmd_android_sdk_packages(&rest),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
@@ -133,7 +135,8 @@ fn print_usage() {
          \x20 prepare-bionic-sysroot <dir>  extract the Bionic runtime (linker64 + libc/libm/libdl/libc++) from the installed android-24 arm64 system image into <dir>, for BIONIC_SYSROOT\n\
          \x20 verify-dashboard-live      render the web dashboard (assets/dashboard.html) in headless Chromium against a mock of the JSON contract and check the DOM\n\
          \x20 verify-api-live            run the app's real ApiHttpServer on the host JVM with fixture sources, check every HTTP contract by real requests (JSON byte-identical to the browser fixtures) and render the dashboard from it in headless Chromium\n\
-         \x20 android-sdk-packages [--system-image]  print the pinned sdkmanager package set the Android proofs are built with (CI installs exactly this)\n\
+         \x20 verify-android-emulator    install the committed APK on a headless Android emulator (KVM) and exercise the app's real lifecycle through the loopback API\n\
+         \x20 android-sdk-packages [--system-image|--emulator]  print the pinned sdkmanager package set the Android proofs are built with (CI installs exactly this)\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/jni-contract/test/doc/checks/audit/deny)"
@@ -1139,31 +1142,61 @@ const PINNED_NDK_VERSION: &str = "27.3.13750724";
 /// accepted, `BIONIC_SYSROOT` being the override.
 const PINNED_SYSTEM_IMAGE_API: u32 = 24;
 const PINNED_SYSTEM_IMAGE_TAG: &str = "default";
+/// The x86_64 Google APIs image `verify-android-emulator` boots: API 34 is
+/// the manifest's `targetSdkVersion` (foreground-service types, the
+/// notification permission), and the image's ARM translation runs the
+/// shipped arm64 library, so the committed APK is what gets installed.
+const PINNED_EMULATOR_IMAGE_API: u32 = 34;
+const PINNED_EMULATOR_IMAGE_TAG: &str = "google_apis";
+const PINNED_EMULATOR_IMAGE_ABI: &str = "x86_64";
 
-/// The `sdkmanager` package identifiers of the pinned set: the build set
-/// (platform, build-tools, NDK), or the system image alone.
-fn android_sdk_packages(system_image: bool) -> Vec<String> {
-    if system_image {
-        vec![format!(
-            "system-images;android-{PINNED_SYSTEM_IMAGE_API};{PINNED_SYSTEM_IMAGE_TAG};arm64-v8a"
-        )]
-    } else {
-        vec![
+/// Which pinned package set `android-sdk-packages` prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SdkPackageSet {
+    /// The build set: platform, build-tools, NDK.
+    Build,
+    /// The arm64 system image the qemu proofs extract a Bionic runtime from.
+    SystemImage,
+    /// The emulator, platform-tools (`adb`) and the x86_64 image the
+    /// emulator proof boots.
+    Emulator,
+}
+
+/// The `sdkmanager` package identifiers of one pinned set.
+fn android_sdk_packages(set: SdkPackageSet) -> Vec<String> {
+    match set {
+        SdkPackageSet::Build => vec![
             format!("platforms;android-{PINNED_PLATFORM_API}"),
             format!("build-tools;{PINNED_BUILD_TOOLS_VERSION}"),
             format!("ndk;{PINNED_NDK_VERSION}"),
-        ]
+        ],
+        SdkPackageSet::SystemImage => vec![format!(
+            "system-images;android-{PINNED_SYSTEM_IMAGE_API};{PINNED_SYSTEM_IMAGE_TAG};arm64-v8a"
+        )],
+        SdkPackageSet::Emulator => vec![
+            "emulator".to_string(),
+            "platform-tools".to_string(),
+            emulator_image_package(),
+        ],
     }
+}
+
+/// The `sdkmanager` package of the image the emulator proof boots.
+fn emulator_image_package() -> String {
+    format!(
+        "system-images;android-{PINNED_EMULATOR_IMAGE_API};{PINNED_EMULATOR_IMAGE_TAG};{PINNED_EMULATOR_IMAGE_ABI}"
+    )
 }
 
 /// Prints the pinned package set on one line, ready for `sdkmanager --install`.
 fn cmd_android_sdk_packages(args: &[String]) -> Result<(), String> {
-    let system_image = match args {
-        [] => false,
-        [flag] if flag == "--system-image" => true,
-        _ => return Err("usage: android-sdk-packages [--system-image]".to_string()),
+    let set = match args {
+        [] => SdkPackageSet::Build,
+        [flag] if flag == "--system-image" => SdkPackageSet::SystemImage,
+        [flag] if flag == "--emulator" => SdkPackageSet::Emulator,
+        _ => return Err("usage: android-sdk-packages [--system-image|--emulator]".to_string()),
     };
-    println!("{}", android_sdk_packages(system_image).join(" "));
+    println!("{}", android_sdk_packages(set).join(" "));
     Ok(())
 }
 
@@ -1778,7 +1811,7 @@ fn discover_build_tools(sdk_root: &Path) -> Result<PathBuf, String> {
         format!(
             "no build-tools/<version> under {} contains aapt2/d8/zipalign/apksigner (install the pinned set: sdkmanager {})",
             build_tools_dir.display(),
-            android_sdk_packages(false).join(" ")
+            android_sdk_packages(SdkPackageSet::Build).join(" ")
         )
     })?;
     println!(
@@ -1830,7 +1863,7 @@ fn discover_platform_jar(sdk_root: &Path) -> Result<PathBuf, String> {
         format!(
             "no platforms/android-<N>/android.jar found under {} (install the pinned set: sdkmanager {})",
             platforms_dir.display(),
-            android_sdk_packages(false).join(" ")
+            android_sdk_packages(SdkPackageSet::Build).join(" ")
         )
     })?;
     println!(
@@ -1868,7 +1901,7 @@ fn discover_ndk_root_in(sdk_root: &Path) -> Result<PathBuf, String> {
             format!(
                 "no usable ndk/<version> found under {} (install the pinned set: sdkmanager {})",
                 ndk_dir.display(),
-                android_sdk_packages(false).join(" ")
+                android_sdk_packages(SdkPackageSet::Build).join(" ")
             )
         })?;
     println!(
@@ -2544,6 +2577,25 @@ fn cmd_verify_api_live() -> Result<(), String> {
     apilive::run(&root)
 }
 
+/// Installs the committed APK on a headless Android emulator and exercises
+/// the app's real lifecycle through the loopback API; see
+/// `xtask/src/emulator.rs`. A live command that needs KVM, the emulator,
+/// platform-tools and the pinned x86_64 system image
+/// (`android-sdk-packages --emulator`), so it is not part of `gates`; CI runs
+/// it in the `android-emulator` job.
+fn cmd_verify_android_emulator() -> Result<(), String> {
+    let root = repo_root()?;
+    let sdk_root = discover_sdk_root()?;
+    let apk = root.join(APK_OUTPUT_NAME);
+    let image = emulator_image_package();
+    emulator::run(&emulator::Config {
+        root: &root,
+        sdk_root: &sdk_root,
+        apk: &apk,
+        image_package: &image,
+    })
+}
+
 /// Executes the immutable v0.3.0 native oracle under `qemu-aarch64` against a
 /// real Android Bionic runtime and checks that its pure-contract outputs (WiFi
 /// channel<->frequency + band + distance + security/is_enterprise, geodesy, and
@@ -3019,7 +3071,7 @@ fn discover_arm64_system_image(sdk_root: &Path) -> Result<PathBuf, String> {
     Err(format!(
         "pinned system image missing at {}; install it with sdkmanager \"{}\" or set BIONIC_SYSROOT",
         image.display(),
-        android_sdk_packages(true)[0]
+        android_sdk_packages(SdkPackageSet::SystemImage)[0]
     ))
 }
 
@@ -3229,7 +3281,7 @@ mod tests {
     #[test]
     fn android_sdk_packages_prints_the_pinned_set() {
         assert_eq!(
-            android_sdk_packages(false),
+            android_sdk_packages(SdkPackageSet::Build),
             vec![
                 "platforms;android-36",
                 "build-tools;37.0.0",
@@ -3237,9 +3289,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            android_sdk_packages(true),
+            android_sdk_packages(SdkPackageSet::SystemImage),
             vec!["system-images;android-24;default;arm64-v8a"]
         );
+        assert_eq!(
+            android_sdk_packages(SdkPackageSet::Emulator),
+            vec![
+                "emulator",
+                "platform-tools",
+                "system-images;android-34;google_apis;x86_64"
+            ]
+        );
+        assert!(cmd_android_sdk_packages(&["--nope".to_string()]).is_err());
     }
 
     #[test]

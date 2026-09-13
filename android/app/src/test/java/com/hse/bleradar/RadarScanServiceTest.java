@@ -93,11 +93,12 @@ public class RadarScanServiceTest {
         // - requestStop() pauses the scan but keeps the service started and in
         //   the foreground with the idle notification; only stopScanning()
         //   (the app's Stop) leaves the foreground and stops the service
-        // - scanRequested records the latest request; onStartCommand starts
-        //   the engine only for a sticky restart (null intent) or while a
-        //   start is still wanted, so a stop that overtakes the queued
-        //   startForegroundService is never undone (the promotion then leaves
-        //   the foreground again at once)
+        // - stopOvertookStart is set by a stop and cleared by a start request;
+        //   onStartCommand skips the engine start only when it is set, so a
+        //   stop that overtakes the queued startForegroundService is never
+        //   undone (the promotion then leaves the foreground again at once),
+        //   while a sticky restart — whose start command may carry a
+        //   redelivered intent — always resumes (observed on the emulator)
         int accepted = ScanControl.START_ACCEPTED;
         assertEquals("START_ACCEPTED is the zero outcome", 0, accepted);
     }
@@ -122,10 +123,13 @@ public class RadarScanServiceTest {
     }
 
     @Test
-    public void engine_is_stopped_on_destroy() {
-        // RadarScanService.onDestroy() calls engine.stop() to clean up
-        // the BLE scanner session. Without this, the scanner would linger
-        // and may be held by the dead service instance
+    public void engine_is_closed_on_destroy() {
+        // RadarScanService.onDestroy() calls engine.close(): the scan stops
+        // and every later start() is refused, so a request the HTTP handler
+        // is still serving cannot leave a scan running in the dead instance
+        // (the activity's relaunch unbinds and destroys the bound-only
+        // service while the API start is in flight — observed on the
+        // emulator, COR-035)
         String methodName = "onDestroy";
         assertNotNull("onDestroy lifecycle method must exist", methodName);
     }

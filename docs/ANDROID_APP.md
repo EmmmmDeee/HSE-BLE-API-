@@ -174,11 +174,13 @@ authority.
   with the idle notification, so the API stays reachable and a later start
   needs no activity; only the app's Stop ends the service. Because a start
   and a stop can arrive from the handler thread milliseconds apart, the
-  service records the latest request (`scanRequested`) and `onStartCommand`
-  starts the engine only for a sticky restart (`null` intent) or while a
-  start is still wanted — a stop that overtakes the queued
-  `startForegroundService` is never undone; the mandatory promotion then
-  leaves the foreground again at once. The activity's status line shows the
+  service records a stop that overtook a queued start (`stopOvertookStart`,
+  set by a stop and cleared by a start request) and `onStartCommand` skips
+  the engine start only then — the mandatory promotion leaves the foreground
+  again at once — while every other start command, the sticky restart's
+  included whether its intent is `null` or a redelivered start, resumes the
+  scan (a "start still wanted" flag keyed on the intent's nullness ended the
+  restarted service on the emulator; decision #93). The activity's status line shows the
   dashboard URL from the moment the service is bound (it re-renders on
   connect and disconnect), and its 400 ms refresh reflects a pause or start
   made through the API.
@@ -200,10 +202,15 @@ authority.
   visual only. Without the native library the engine keeps a 30 s retention
   window and orders by recency alone, and REQ-ANDROID-003 makes that visible.
 - Evidence classification: the contract above is compile-verified (`javac`
-  against `android-36`, `d8`, DEX inspection) and packaged in the committed
-  APK; first-launch, process-kill, and permission-revocation behaviour on a
-  device remain unobserved (MIG-003), so REQ-ANDROID-002/003 stay
-  `IMPLEMENTED_UNVERIFIED` in `docs/REQUIREMENTS_LEDGER.md` until then.
+  against `android-36`, `d8`, DEX inspection), packaged in the committed
+  APK, and — since decision #93 — exercised on a headless API 34 emulator by
+  `cargo xtask verify-android-emulator` on every pull request: the first
+  launch, the promotion with "BLE Radar is scanning" 2.5 s after an API
+  start, the pause that keeps the foreground idle, the sticky restart after
+  `kill -9` (the scan resumed 2.2 s later) and the clean force-stop are
+  observed, so REQ-ANDROID-002 is `VERIFIED` in `docs/REQUIREMENTS_LEDGER.md`.
+  Still unobserved: a permission revocation, and the no-native-library status
+  line (REQ-ANDROID-003) on a non-`arm64-v8a` device (MIG-003).
 
 ## Verification
 
@@ -214,8 +221,9 @@ authority.
 | The `bleradar-jni` test suite (unit tests, `jni_bridge`, the export campaign) cross-compiled for `aarch64-linux-android` and executed under `qemu-aarch64` against a Bionic runtime — the shipped architecture and libc | `cargo xtask verify-jni-target` (`cargo xtask prepare-bionic-sysroot <dir>` + `BIONIC_SYSROOT` to reuse an extracted runtime) | NDK, `qemu-user-static`, `debugfs` and the `android-24` arm64-v8a system image, or `BIONIC_SYSROOT` | yes (`android-apk` job, runtime cached) |
 | Cross-compile, package, sign, and inspect the APK (entries including `assets/dashboard.html` and `assets/release_manifest.txt`, DEX classes, exports), and lint's `NewApi` check that no library call exceeds the manifest's `minSdkVersion` | `cargo xtask build-apk`, `cargo xtask verify-android-live` | Android SDK build-tools, platform `android.jar`, `cmdline-tools` (`lint`), NDK, JDK | yes (`android-apk` job installs the pinned platform, build-tools and NDK) |
 | The web dashboard renders live data in a real browser engine: headless Chromium loads the committed `assets/dashboard.html` from a mock of the JSON contract and the rendered DOM must show every device in server order (escaped), more than one completed poll, and the error banner when `/api/devices` answers `500` or the wrong shape, when `/api/status` answers the wrong shape, and (with the table still rendered) when `/api/updates` answers `500`; first, the JSON field names `ApiHttpServer.*Json()` writes must equal the mock's keys and cover every property the page reads | `cargo xtask verify-dashboard-live` (the contract lock also runs as an xtask unit test inside `gates`) | a Chromium/Chrome binary (`BLERADAR_CHROMIUM`, `PATH`, or Playwright's cache) | yes (`web-dashboard` job; the runner image ships Google Chrome) |
-| The app's real `ApiHttpServer` runs on the host JVM with fixture sources, a scripted `ScanControl` and the host `bleradar-jni` library: 26 real HTTP requests must be answered as documented (the dashboard bytes, the three JSON documents byte-identical to the browser fixtures, `404`/`405`/`400`, `no-store`, exact `Content-Length`; scan control — a pause reflected by every document, an accepted start, the four documented refusals as `409`, a throwing control answered `500` with the server still up, a 64 KiB request body skipped), then headless Chromium must render the committed dashboard from that server with Start disabled and Stop offered | `cargo xtask verify-api-live` | a JDK (`javac`/`java`) and a Chromium/Chrome binary | yes (`gates` job, after `verify-jni-live`) |
-| Install, scan, and differential comparison against the oracle on a device | — | an ARM64 Android/Bionic device or emulator, and the original signing key for update identity | no (MIG-003, EXT-006) |
+| The app's real `ApiHttpServer` runs on the host JVM with fixture sources, a scripted `ScanControl` and the host `bleradar-jni` library: 27 real HTTP requests must be answered as documented (the dashboard bytes, the three JSON documents byte-identical to the browser fixtures, `404`/`405`/`400`, `no-store`, exact `Content-Length`; scan control — a pause reflected by every document, an accepted start, the four documented refusals as `409`, a throwing control answered `500` with the server still up, a 64 KiB request body consumed, a body declared beyond the 64 KiB cap refused with `413` at once), then headless Chromium must render the committed dashboard from that server with Start disabled and Stop offered | `cargo xtask verify-api-live` | a JDK (`javac`/`java`) and a Chromium/Chrome binary | yes (`gates` job, after `verify-jni-live`) |
+| The committed APK on a real Android runtime: a throw-away AVD from the pinned API 34 `google_apis` x86_64 image (its ARM translation runs the arm64-only package) boots headless on KVM; the adapter is enabled and awaited, the APK installed with the runtime permissions granted, the activity launched, the loopback API forwarded; `GET /` must be the committed page byte for byte, the documents must carry their keys with `native_available` true, a start must answer `200` with `RadarScanService` promoted and its notification "BLE Radar is scanning", a stop must keep the foreground with "BLE Radar is idle", `kill -9` must be followed by a restarted service with the scan resumed, logcat must carry no crash of the package, and `am force-stop` must end the API; the AVD is deleted on every exit | `cargo xtask verify-android-emulator` (`cargo xtask android-sdk-packages --emulator` prints the SDK packages) | KVM (`/dev/kvm`), the SDK's `emulator`, `platform-tools` and the pinned system image, a JDK for `avdmanager` | yes (`android-emulator` job; 2 min 33 s on the first green run — decision #93) |
+| BLE scan of real advertisers, the update download/install path, and differential comparison against the oracle on a physical device | — | an ARM64 Android device with a radio (the emulator's adapter reports no devices), and the original signing key for update identity | no (MIG-003, narrowed by the emulator proof; EXT-006) |
 
 `ANDROID_HOME`/`ANDROID_SDK_ROOT` locate the SDK for the last two commands
 (`xtask/src/main.rs::discover_sdk_root`). The committed
@@ -235,7 +243,7 @@ build also packages `src/main/assets/` (`aapt2 link -A`; no earlier APK
 carried the bundled `release_manifest.txt` — COR-029), `verify-android-live`
 requires both asset entries and runs lint's `NewApi` check (which found the
 API-33 `readAllBytes()` call on this minSdk-26 app — COR-028), and the
-committed APK is the #92 build (SHA-256 `9e179cb1…db2f`, 406,094 bytes; the
+committed APK is the #93 build (SHA-256 `f67958c8…afca`, 406,094 bytes; the
 native library byte-identical to the #87 build). The SDK set that build uses
 is pinned once, in `xtask/src/main.rs` (`PINNED_*`), printed by
 `cargo xtask android-sdk-packages` for CI's `sdkmanager`, and preferred by
