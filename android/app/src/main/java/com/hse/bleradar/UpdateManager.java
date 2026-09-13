@@ -17,7 +17,7 @@ import android.util.Log;
  * re-implementation. Network I/O and OS package installation remain the
  * platform boundary — see {@code docs/AUTO_UPDATE.md}.
  */
-public final class UpdateManager {
+public final class UpdateManager implements UpdateStatusSource {
 
     private static final String TAG = "UpdateManager";
     private static final int MIN_ANDROID_VERSION_FOR_LONG_VERSION_CODE = Build.VERSION_CODES.P;

@@ -28,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * implementation — this class only does BLE plumbing and bookkeeping (never
  * reimplements the signal/tracking math itself).
  */
-final class BleScanEngine {
+final class BleScanEngine implements SnapshotSource {
 
     private static final String TAG = "BleScanEngine";
     private static final int MIN_ANDROID_VERSION_FOR_BLUETOOTH_PERMISSIONS = Build.VERSION_CODES.S;
@@ -142,7 +142,8 @@ final class BleScanEngine {
         }
     }
 
-    boolean isScanning() {
+    @Override
+    public boolean isScanning() {
         return scanning;
     }
 
@@ -150,7 +151,8 @@ final class BleScanEngine {
      * Returns milliseconds elapsed since scanning started, or 0 if not currently scanning.
      * Used for UI status display and API reporting.
      */
-    long getUptimeMillis() {
+    @Override
+    public long getUptimeMillis() {
         if (!scanning || scanStartUptimeMillis == 0) {
             return 0;
         }
@@ -162,7 +164,8 @@ final class BleScanEngine {
      * {@link NativeRadar#deviceRankKey} policy (live before recent before stale,
      * then most recent, then most confident, then strongest).
      */
-    List<Blip> snapshot() {
+    @Override
+    public List<Blip> snapshot() {
         pruneStale(SystemClock.uptimeMillis());
         List<Blip> snapshot = new ArrayList<>(blipsByAddress.values());
         // Keys are sampled once so the sort sees an immutable ordering while the

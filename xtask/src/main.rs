@@ -12,6 +12,7 @@
 //! [`repo_root`] additionally walks upward from the current directory so
 //! invoking it from a subdirectory still works.
 
+mod apilive;
 mod dashboard;
 mod dex;
 mod elf;
@@ -86,6 +87,7 @@ fn main() -> ExitCode {
         "verify-jni-target" => cmd_verify_jni_target(),
         "prepare-bionic-sysroot" => cmd_prepare_bionic_sysroot(&rest),
         "verify-dashboard-live" => cmd_verify_dashboard_live(),
+        "verify-api-live" => cmd_verify_api_live(),
         "android-sdk-packages" => cmd_android_sdk_packages(&rest),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
@@ -130,6 +132,7 @@ fn print_usage() {
          \x20 verify-jni-target          run the bleradar-jni test suite cross-compiled for aarch64-linux-android under qemu-aarch64 against a Bionic runtime\n\
          \x20 prepare-bionic-sysroot <dir>  extract the Bionic runtime (linker64 + libc/libm/libdl/libc++) from the installed android-24 arm64 system image into <dir>, for BIONIC_SYSROOT\n\
          \x20 verify-dashboard-live      render the web dashboard (assets/dashboard.html) in headless Chromium against a mock of the JSON contract and check the DOM\n\
+         \x20 verify-api-live            run the app's real ApiHttpServer on the host JVM with fixture sources, check every HTTP contract by real requests (JSON byte-identical to the browser fixtures) and render the dashboard from it in headless Chromium\n\
          \x20 android-sdk-packages [--system-image]  print the pinned sdkmanager package set the Android proofs are built with (CI installs exactly this)\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
@@ -2528,6 +2531,17 @@ fn verify_android_api_levels(root: &Path, sdk_root: &Path) -> Result<(), String>
 fn cmd_verify_dashboard_live() -> Result<(), String> {
     let root = repo_root()?;
     dashboard::run(&root)
+}
+
+/// Runs the app's real `ApiHttpServer` on the host JVM with fixture sources,
+/// checks every documented HTTP contract by real requests (the three JSON
+/// documents byte-identical to the browser fixtures) and renders the
+/// dashboard from that server in headless Chromium; see
+/// `xtask/src/apilive.rs`. Needs a JDK and a browser, so it is not part of
+/// `gates`; CI runs it in the `gates` job after `verify-jni-live`.
+fn cmd_verify_api_live() -> Result<(), String> {
+    let root = repo_root()?;
+    apilive::run(&root)
 }
 
 /// Executes the immutable v0.3.0 native oracle under `qemu-aarch64` against a

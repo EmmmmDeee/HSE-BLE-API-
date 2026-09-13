@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo;
 import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.util.Collections;
@@ -69,7 +70,13 @@ public final class RadarScanService extends Service {
         super.onCreate();
         engine = new BleScanEngine(this);
         createNotificationChannel();
-        httpServer = new ApiHttpServer(engine, new UpdateManager(this), getAssets());
+        httpServer = new ApiHttpServer(
+                engine,
+                new UpdateManager(this),
+                getAssets()::open,
+                SystemClock::uptimeMillis,
+                System::currentTimeMillis,
+                ApiHttpServer.DEFAULT_PORT);
         httpServer.start();
     }
 
