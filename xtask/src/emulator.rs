@@ -510,57 +510,77 @@ fn api_unreachable(port: u16, timeout: Duration) -> bool {
 /// (the emulator package ships netsimd but no CLI, as the first run found).
 struct Netsim {
     port: u16,
-    /// The discovery file the port came from, for the report.
+    /// Where the port came from, for the report.
+    source: String,
+    /// The discovery file that was found, if any.
     ini: Option<PathBuf>,
 }
 
 impl Netsim {
     /// Settles on the web port that answers `GET /v1/devices`: the one a
-    /// discovery file names first, then netsimd's default — a stale file
-    /// from another instance is never trusted.
+    /// discovery file names first, then every port the netsimd process
+    /// listens on, then netsimd's default — a stale file from another
+    /// instance is never trusted, and a failure shows the file, the
+    /// daemon's command line and its sockets.
     fn connect() -> Result<Self, String> {
         let ini = find_netsim_ini();
-        let named = ini
+        let ini_text = ini
             .as_ref()
             .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|text| netsim_ini_port(&text, "web.port"));
-        let mut candidates: Vec<u16> = named.into_iter().collect();
-        if !candidates.contains(&NETSIM_DEFAULT_WEB_PORT) {
-            candidates.push(NETSIM_DEFAULT_WEB_PORT);
+            .unwrap_or_default();
+        let mut candidates: Vec<(u16, &str)> = Vec::new();
+        if let Some(port) = netsim_ini_port(&ini_text, "web.port") {
+            candidates.push((port, "the discovery file's web.port"));
+        }
+        let sockets = listening_sockets();
+        for port in netsimd_ports(&sockets) {
+            if !candidates.iter().any(|(known, _)| *known == port) {
+                candidates.push((port, "a socket the netsimd process listens on"));
+            }
+        }
+        if !candidates
+            .iter()
+            .any(|(known, _)| *known == NETSIM_DEFAULT_WEB_PORT)
+        {
+            candidates.push((NETSIM_DEFAULT_WEB_PORT, "netsimd's default web port"));
         }
         let mut failures = Vec::new();
-        for port in candidates {
+        for (port, source) in candidates {
             let netsim = Self {
                 port,
+                source: source.to_string(),
                 ini: ini.clone(),
             };
             match netsim.devices() {
                 Ok(_) => return Ok(netsim),
-                Err(error) => failures.push(format!("127.0.0.1:{port}: {error}")),
+                Err(error) => failures.push(format!("127.0.0.1:{port} ({source}): {error}")),
             }
         }
         Err(format!(
-            "netsimd's HTTP frontend answers `GET /v1/devices` on none of the candidate ports ({}):\n{}",
-            match &ini {
-                Some(path) => format!("discovery file {}", path.display()),
-                None => "no discovery file found".to_string(),
-            },
-            failures.join("\n")
+            "netsimd's HTTP frontend answers `GET /v1/devices` on none of the candidate ports:\n{}\n-- discovery file {} --\n{}\n-- netsimd command line --\n{}\n-- listening sockets --\n{}",
+            failures.join("\n"),
+            ini.as_ref().map_or("(none found)".to_string(), |path| path
+                .display()
+                .to_string()),
+            ini_text.trim(),
+            process_lines("netsimd").join("\n"),
+            sockets
+                .lines()
+                .filter(|line| line.contains("netsim") || line.contains("LISTEN"))
+                .collect::<Vec<_>>()
+                .join("\n")
         ))
     }
 
     fn describe(&self) -> String {
-        match &self.ini {
-            Some(ini) => format!(
-                "HTTP frontend at 127.0.0.1:{} (discovery file {})",
-                self.port,
-                ini.display()
-            ),
-            None => format!(
-                "HTTP frontend at 127.0.0.1:{} (the default port; no discovery file found)",
-                self.port
-            ),
-        }
+        format!(
+            "HTTP frontend at 127.0.0.1:{} ({}; discovery file {})",
+            self.port,
+            self.source,
+            self.ini
+                .as_ref()
+                .map_or("none found".to_string(), |path| path.display().to_string())
+        )
     }
 
     /// One request to the frontend; the answer must be a `200`.
@@ -647,6 +667,44 @@ fn netsim_exchange(port: u16, request: &[u8]) -> Result<HttpResponse, String> {
         }
     }
     apilive::parse_http_response(&raw)
+}
+
+/// `ss -ltnp` (or nothing, where `ss` is absent): every listening TCP
+/// socket with its owning process.
+fn listening_sockets() -> String {
+    Command::new("ss")
+        .args(["-ltnp"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// The local ports of the sockets `ss -ltnp` attributes to netsimd, in
+/// listing order.
+pub fn netsimd_ports(ss: &str) -> Vec<u16> {
+    ss.lines()
+        .filter(|line| line.contains("\"netsimd\""))
+        .filter_map(|line| {
+            // LISTEN 0 128 127.0.0.1:7681 0.0.0.0:* users:(("netsimd",pid=…))
+            let local = line.split_whitespace().nth(3)?;
+            local.rsplit(':').next()?.parse().ok()
+        })
+        .collect()
+}
+
+/// The `ps` command lines naming `needle`.
+fn process_lines(needle: &str) -> Vec<String> {
+    Command::new("ps")
+        .args(["-eo", "pid,args"])
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.contains(needle))
+                .map(|line| line.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// netsimd's discovery file (`netsim.ini` or `netsim_<instance>.ini`),
@@ -1657,6 +1715,13 @@ mod tests {
         assert_eq!(beacon_chip_id(created), Some(7));
         assert_eq!(beacon_chip_id(r#"{"device":{"id":3,"chips":[]}}"#), None);
         assert_eq!(beacon_chip_id("{}"), None);
+
+        let ss = "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process\n\
+                  LISTEN 0      4096   127.0.0.1:5037     0.0.0.0:*     users:((\"adb\",pid=2733,fd=8))\n\
+                  LISTEN 0      128    127.0.0.1:8877     0.0.0.0:*     users:((\"netsimd\",pid=3200,fd=12))\n\
+                  LISTEN 0      128    [::1]:7681         [::]:*        users:((\"netsimd\",pid=3200,fd=13))\n";
+        assert_eq!(netsimd_ports(ss), vec![8877, 7681]);
+        assert!(netsimd_ports("").is_empty());
 
         let body = beacon_create_body();
         assert_eq!(
