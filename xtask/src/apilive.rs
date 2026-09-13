@@ -10,7 +10,8 @@
 //!    scan control (`POST /api/scan/start|stop`) against a scripted
 //!    `ScanControl` — a pause reflected by every document, an accepted
 //!    start, each documented refusal as `409`, a control that throws
-//!    answered `500` with the server still up, a request body skipped;
+//!    answered `500` with the server still up, a request body consumed, a
+//!    body declared beyond the cap refused with `413`;
 //! 2. the committed dashboard rendered by headless Chromium *from that
 //!    server*, checked with the same healthy-scenario DOM markers.
 //!
@@ -542,6 +543,18 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         json,
         SCAN_STARTED_JSON.as_bytes(),
     )?;
+    // A body declared beyond the server's cap is refused at once, without
+    // waiting for bytes the client never sends.
+    expect(
+        "POST /api/scan/start declaring a 1 MiB body it never sends",
+        &http_request(
+            port,
+            b"POST /api/scan/start HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n",
+        )?,
+        413,
+        json,
+        br#"{"error":"Request body too large"}"#,
+    )?;
     expect(
         "GET /api/scan/start",
         &get(port, "/api/scan/start")?,
@@ -573,7 +586,7 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         json,
         NOT_FOUND_JSON.as_bytes(),
     )?;
-    Ok(26)
+    Ok(27)
 }
 
 /// The whole command.

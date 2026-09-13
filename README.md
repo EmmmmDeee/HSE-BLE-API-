@@ -223,7 +223,7 @@ of which measures actual round-over-round yield.
 - Rust toolchain **1.98.0** with `clippy` and `rustfmt` — pinned by `rust-toolchain.toml`; `rustup` installs it automatically on first `cargo` invocation in the repo.
 - No third-party crates in the shipped workspace: it is intentionally dependency-free, and CI fails if that changes without a recorded decision. `xtask/` (developer tooling) and the vendored advisory database are outside that scope; see `xtask/Cargo.toml`.
 - `cargo-audit` and `cargo-deny` on `PATH` to run those two specific gates, at the versions CI pins (`cargo install --locked cargo-audit@0.22.2 cargo-deny@0.20.2`; bump them together with `.github/workflows/gates.yml`); every other gate, including `cargo xtask gates` itself, needs nothing beyond the pinned toolchain. The JNI export-contract gate inside `gates` reads the host-built `libbleradar_jni.so` with the in-tree ELF64 reader, so `gates` is proven on Linux hosts (what CI runs).
-- A JDK (`javac`/`java`) only for `cargo xtask verify-jni-live`, and an Android SDK/NDK only for `cargo xtask build-apk`/`verify-android-live` (see `docs/ANDROID_APP.md`).
+- A JDK (`javac`/`java`) only for `cargo xtask verify-jni-live`, `verify-api-live` and `verify-android-emulator` (whose `avdmanager` runs on it), an Android SDK/NDK only for `cargo xtask build-apk`/`verify-android-live`, and the SDK's emulator, platform-tools and pinned system image plus KVM only for `verify-android-emulator` (see `docs/ANDROID_APP.md`).
 
 ## Installation
 
@@ -387,12 +387,13 @@ cargo xtask verify-api-live
 
 This runs the app's real `ApiHttpServer` — the class the APK ships, which
 references nothing in `android.*` — on the host JVM with fixture sources, a
-scripted `ScanControl` and the host `bleradar-jni` library, answers 26 real
+scripted `ScanControl` and the host `bleradar-jni` library, answers 27 real
 HTTP requests over loopback (the dashboard bytes, the three JSON documents
 byte-identical to the browser fixtures, `404`/`405`/`400`, `no-store`, exact
 `Content-Length`; scan control paused and resumed with every document
 reflecting it, the four documented refusals as `409`, a throwing control
-answered `500` with the server still up, a 64 KiB request body skipped), and
+answered `500` with the server still up, a 64 KiB request body consumed, a
+body declared beyond the 64 KiB cap refused with `413` at once), and
 then renders the committed dashboard from that server in headless Chromium.
 It needs a JDK and a Chromium/Chrome binary; CI's `gates` job runs it after
 the live JNI proof.

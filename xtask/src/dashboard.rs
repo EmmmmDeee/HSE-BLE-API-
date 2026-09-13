@@ -47,7 +47,7 @@ const BROWSER_TIMEOUT: Duration = Duration::from_secs(90);
 /// The mock closes a connection that sends no request within this time
 /// (Chromium preconnects speculatively).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-/// The most of a declared request body the mock skips.
+/// The largest declared request body the mock skips.
 const MAX_SKIPPED_BODY: usize = 64 * 1024;
 
 /// Executables tried on `PATH`, in order, when `BLERADAR_CHROMIUM` is unset.
@@ -1452,10 +1452,10 @@ mod tests {
             private String aJson() throws IOException {
                 String brace = "}"; char other = '{';
                 if (x) { json.name("one").value(1); }
-                json.name("two").value(2.0);
+                writer.name("two").value(2.0);
                 return json.toString();
             }
-            private String bJson() { json.name("three").value(3); return ""; }
+            private String bJson() { new Json().beginObject().name("three").value(3); return ""; }
         "#;
         let a = java_json_fields(source, "aJson").unwrap();
         assert_eq!(a.iter().collect::<Vec<_>>(), vec!["one", "two"]);

@@ -160,6 +160,12 @@ public final class RadarScanService extends Service implements ScanControl {
      */
     @Override
     public int requestStart() {
+        if (engine.isScanning()) {
+            // Already running: accepted without re-running the gates, which a
+            // toggled adapter could otherwise turn into a refusal.
+            scanRequested = true;
+            return ScanControl.START_ACCEPTED;
+        }
         if (!BleScanEngine.hasRequiredPermissions(this)) {
             return ScanControl.START_PERMISSIONS_MISSING;
         }
