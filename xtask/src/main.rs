@@ -91,6 +91,7 @@ fn main() -> ExitCode {
         "verify-api-live" => cmd_verify_api_live(),
         "verify-android-emulator" => cmd_verify_android_emulator(),
         "android-sdk-packages" => cmd_android_sdk_packages(&rest),
+        "android-sdk-install" => cmd_android_sdk_install(&rest),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -137,6 +138,7 @@ fn print_usage() {
          \x20 verify-api-live            run the app's real ApiHttpServer on the host JVM with fixture sources, check every HTTP contract by real requests (JSON byte-identical to the browser fixtures) and render the dashboard from it in headless Chromium\n\
          \x20 verify-android-emulator    install the committed APK on a headless Android emulator (KVM) and exercise the app's real lifecycle through the loopback API\n\
          \x20 android-sdk-packages [--system-image|--emulator]  print the pinned sdkmanager package set the Android proofs are built with (CI installs exactly this)\n\
+         \x20 android-sdk-install [--system-image|--emulator]   install that set into the discovered SDK: licenses accepted, sdkmanager retried, every package checked complete and discoverable (what CI runs)\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/jni-contract/test/doc/checks/audit/deny)"
@@ -1188,15 +1190,175 @@ fn emulator_image_package() -> String {
     )
 }
 
+/// The package-set flag `android-sdk-packages` and `android-sdk-install` share.
+fn parse_sdk_package_set(args: &[String], command: &str) -> Result<SdkPackageSet, String> {
+    match args {
+        [] => Ok(SdkPackageSet::Build),
+        [flag] if flag == "--system-image" => Ok(SdkPackageSet::SystemImage),
+        [flag] if flag == "--emulator" => Ok(SdkPackageSet::Emulator),
+        _ => Err(format!("usage: {command} [--system-image|--emulator]")),
+    }
+}
+
 /// Prints the pinned package set on one line, ready for `sdkmanager --install`.
 fn cmd_android_sdk_packages(args: &[String]) -> Result<(), String> {
-    let set = match args {
-        [] => SdkPackageSet::Build,
-        [flag] if flag == "--system-image" => SdkPackageSet::SystemImage,
-        [flag] if flag == "--emulator" => SdkPackageSet::Emulator,
-        _ => return Err("usage: android-sdk-packages [--system-image|--emulator]".to_string()),
-    };
+    let set = parse_sdk_package_set(args, "android-sdk-packages")?;
     println!("{}", android_sdk_packages(set).join(" "));
+    Ok(())
+}
+
+/// Where `sdkmanager` installs a package: its `;`-separated id as a path
+/// under the SDK root (`build-tools;37.0.0` → `build-tools/37.0.0`,
+/// `system-images;android-34;google_apis;x86_64` → that nested directory),
+/// each carrying the `package.xml` sdkmanager writes on a completed install.
+fn sdk_package_dir(sdk_root: &Path, package: &str) -> PathBuf {
+    package
+        .split(';')
+        .fold(sdk_root.to_path_buf(), |dir, segment| dir.join(segment))
+}
+
+/// How many times `sdkmanager --install` is attempted: a truncated
+/// download ("Error on ZipFile unknown archive" while unzipping the
+/// emulator) failed CI's install step on `main` once, and sdkmanager
+/// re-fetches on the next attempt.
+const SDK_INSTALL_ATTEMPTS: u32 = 3;
+
+/// Installs one pinned package set (`android-sdk-packages`' output) into the
+/// discovered SDK — the licenses accepted, the install retried — and then
+/// checks that every package is complete (`package.xml` present) and that
+/// the proofs' discovery finds the pinned tools, so an incomplete install
+/// fails here, named, instead of inside a later step. CI's three install
+/// steps run exactly this.
+fn cmd_android_sdk_install(args: &[String]) -> Result<(), String> {
+    let set = parse_sdk_package_set(args, "android-sdk-install")?;
+    let sdk_root = discover_sdk_root()?;
+    let sdkmanager = sdk_root.join("cmdline-tools/latest/bin/sdkmanager");
+    if !sdkmanager.is_file() {
+        return Err(format!(
+            "sdkmanager not found at {} (install cmdline-tools;latest into the SDK first)",
+            sdkmanager.display()
+        ));
+    }
+    let packages = android_sdk_packages(set);
+
+    println!("== sdkmanager --licenses ==");
+    let mut licenses = Command::new(&sdkmanager)
+        .arg("--licenses")
+        .env("ANDROID_HOME", &sdk_root)
+        .env("ANDROID_SDK_ROOT", &sdk_root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("failed to spawn sdkmanager --licenses: {e}"))?;
+    if let Some(mut stdin) = licenses.stdin.take() {
+        use std::io::Write as _;
+        // One answer per license prompt; extra answers are ignored.
+        let _ = stdin.write_all(&"y\n".repeat(30).into_bytes());
+    }
+    let status = licenses
+        .wait()
+        .map_err(|e| format!("waiting for sdkmanager --licenses: {e}"))?;
+    if !status.success() {
+        return Err(format!("sdkmanager --licenses exited with {status}"));
+    }
+
+    let mut last = String::new();
+    let mut installed = false;
+    for attempt in 1..=SDK_INSTALL_ATTEMPTS {
+        println!(
+            "== sdkmanager --install {} (attempt {attempt}/{SDK_INSTALL_ATTEMPTS}) ==",
+            packages.join(" ")
+        );
+        let mut install = Command::new(&sdkmanager);
+        install
+            .arg("--install")
+            .args(&packages)
+            .env("ANDROID_HOME", &sdk_root)
+            .env("ANDROID_SDK_ROOT", &sdk_root);
+        match install.status() {
+            Ok(status) if status.success() => {
+                installed = true;
+                break;
+            }
+            Ok(status) => last = format!("sdkmanager exited with {status}"),
+            Err(e) => last = format!("failed to spawn sdkmanager: {e}"),
+        }
+        if attempt < SDK_INSTALL_ATTEMPTS {
+            println!("{last}; retrying in 15 s (a truncated download is fetched again)");
+            std::thread::sleep(std::time::Duration::from_secs(15));
+        }
+    }
+    if !installed {
+        return Err(format!(
+            "sdkmanager --install {} failed {SDK_INSTALL_ATTEMPTS} times; last: {last}",
+            packages.join(" ")
+        ));
+    }
+
+    let incomplete: Vec<&String> = packages
+        .iter()
+        .filter(|package| {
+            !sdk_package_dir(&sdk_root, package)
+                .join("package.xml")
+                .is_file()
+        })
+        .collect();
+    if !incomplete.is_empty() {
+        return Err(format!(
+            "sdkmanager reported success but these packages have no package.xml under {}: {}",
+            sdk_root.display(),
+            incomplete
+                .iter()
+                .map(|package| package.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+    // What the proofs will actually pick up.
+    let found: Vec<String> = match set {
+        SdkPackageSet::Build => vec![
+            discover_platform_jar(&sdk_root)?.display().to_string(),
+            discover_build_tools(&sdk_root)?.display().to_string(),
+            discover_ndk_root(&sdk_root)?.display().to_string(),
+        ],
+        SdkPackageSet::SystemImage => {
+            vec![
+                discover_arm64_system_image(&sdk_root)?
+                    .display()
+                    .to_string(),
+            ]
+        }
+        // avdmanager ships with cmdline-tools (where sdkmanager itself lives),
+        // not with this set, but the proof needs it as much as the emulator.
+        SdkPackageSet::Emulator => [
+            "emulator/emulator",
+            "platform-tools/adb",
+            "cmdline-tools/latest/bin/avdmanager",
+        ]
+        .iter()
+        .map(|relative| {
+            let tool = sdk_root.join(relative);
+            if tool.is_file() {
+                Ok(tool.display().to_string())
+            } else {
+                Err(format!("{} is missing after the install", tool.display()))
+            }
+        })
+        .chain(std::iter::once({
+            let image = sdk_package_dir(&sdk_root, &emulator_image_package()).join("system.img");
+            if image.is_file() {
+                Ok(image.display().to_string())
+            } else {
+                Err(format!("{} is missing after the install", image.display()))
+            }
+        }))
+        .collect::<Result<Vec<_>, _>>()?,
+    };
+    println!(
+        "android-sdk-install: {} complete and discoverable: {}",
+        packages.join(" "),
+        found.join(", ")
+    );
     Ok(())
 }
 
@@ -1781,9 +1943,13 @@ fn discover_sdk_root() -> Result<PathBuf, String> {
             }
         }
     }
-    let fallback = PathBuf::from("/usr/local/lib/android/sdk");
-    if fallback.is_dir() {
-        return Ok(fallback);
+    // GitHub's runner image, then the path docs/COLD_START_VERIFICATION.md's
+    // fresh-host install used.
+    for fallback in ["/usr/local/lib/android/sdk", "/opt/android-sdk"] {
+        let path = PathBuf::from(fallback);
+        if path.is_dir() {
+            return Ok(path);
+        }
     }
     Err(
         "Android SDK not found: set ANDROID_HOME (or ANDROID_SDK_ROOT) to its install path"
@@ -3301,6 +3467,28 @@ mod tests {
             ]
         );
         assert!(cmd_android_sdk_packages(&["--nope".to_string()]).is_err());
+        assert!(
+            parse_sdk_package_set(&["--nope".to_string()], "android-sdk-install")
+                .unwrap_err()
+                .contains("usage: android-sdk-install")
+        );
+        assert_eq!(
+            parse_sdk_package_set(&["--emulator".to_string()], "x").unwrap(),
+            SdkPackageSet::Emulator
+        );
+        let sdk = Path::new("/sdk");
+        assert_eq!(
+            sdk_package_dir(sdk, "build-tools;37.0.0"),
+            PathBuf::from("/sdk/build-tools/37.0.0")
+        );
+        assert_eq!(
+            sdk_package_dir(sdk, "system-images;android-34;google_apis;x86_64"),
+            PathBuf::from("/sdk/system-images/android-34/google_apis/x86_64")
+        );
+        assert_eq!(
+            sdk_package_dir(sdk, "emulator"),
+            PathBuf::from("/sdk/emulator")
+        );
     }
 
     #[test]

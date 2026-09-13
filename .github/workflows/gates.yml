@@ -74,12 +74,11 @@ jobs:
           distribution: temurin
           java-version: '21'
       # The versions live in xtask (PINNED_* in xtask/src/main.rs), which is
-      # also what discovery prefers over anything else the runner image ships.
+      # also what discovery prefers over anything else the runner image ships;
+      # the install retries a failed sdkmanager (a truncated download once
+      # failed this step on main) and checks the tools are discoverable.
       - name: Install the pinned Android platform, build-tools and NDK
-        run: |
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          printf 'y\n%.0s' $(seq 1 30) | "$SDKMANAGER" --licenses > /dev/null
-          "$SDKMANAGER" --install $(cargo xtask android-sdk-packages)
+        run: cargo xtask android-sdk-install
       - name: Build, sign and inspect the APK
         run: cargo xtask verify-android-live
       # The shipped library is aarch64/Bionic; the JVM proof above runs on the
@@ -104,7 +103,7 @@ jobs:
       - name: Extract the Bionic runtime from the system image (cache miss only)
         if: steps.bionic.outputs.cache-hit != 'true'
         run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install $(cargo xtask android-sdk-packages --system-image)
+          cargo xtask android-sdk-install --system-image
           cargo xtask prepare-bionic-sysroot "$HOME/.cache/bionic-sysroot"
       - name: Run the bleradar-jni test suite on aarch64/Bionic under qemu
         run: BIONIC_SYSROOT="$HOME/.cache/bionic-sysroot" cargo xtask verify-jni-target
@@ -131,9 +130,11 @@ jobs:
     # permissions granted, the app is launched, and the loopback API is
     # driven through adb forward — the dashboard bytes, the documents, scan
     # control, the foreground service and its notification, the START_STICKY
-    # restart after kill -9, and the API ending with am force-stop
-    # (docs/AUTONOMOUS_DECISIONS.md #93). Needs KVM, which the runner exposes
-    # once the udev rule below opens /dev/kvm to the runner user.
+    # restart after kill -9, the first launch's update check finishing, the
+    # API ending with am force-stop, and a runtime permission revoked while
+    # scanning (docs/AUTONOMOUS_DECISIONS.md #93, #94). Needs KVM, which the
+    # runner exposes once the udev rule below opens /dev/kvm to the runner
+    # user.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -150,9 +151,6 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - name: Install the emulator, platform-tools and the pinned system image
-        run: |
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          printf 'y\n%.0s' $(seq 1 30) | "$SDKMANAGER" --licenses > /dev/null
-          "$SDKMANAGER" --install $(cargo xtask android-sdk-packages --emulator)
+        run: cargo xtask android-sdk-install --emulator
       - name: Install the committed APK on a headless emulator and exercise the app
         run: cargo xtask verify-android-emulator

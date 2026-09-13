@@ -14,7 +14,13 @@
 //!   notification, a stop pauses it with the idle notification and keeps
 //!   it, and a `kill -9` of the app process is followed by the
 //!   `START_STICKY` restart that resumes the scan;
+//! * the update check the first launch starts ran to its decision and its
+//!   `dataSync` service finished (no record, no notification left);
 //! * `am force-stop` ends the app and, with it, the API;
+//! * after a relaunch and a new scan, revoking `BLUETOOTH_SCAN` makes the
+//!   platform kill the app: no scan and no foreground service survive it,
+//!   and the report records whether the sticky restart ran the "revoked,
+//!   stopping" branch;
 //! * the crash and main logs carry no Java or native crash of the app.
 //!
 //! Needs KVM (the emulator is started with `-accel on`), so it runs in CI's
@@ -35,6 +41,15 @@ use crate::dashboard::{self, SCAN_STARTED_JSON, SCAN_STOPPED_JSON};
 pub const PACKAGE: &str = "com.hse.bleradar";
 const ACTIVITY: &str = "com.hse.bleradar/.MainActivity";
 const SERVICE: &str = "com.hse.bleradar/.RadarScanService";
+const UPDATE_SERVICE: &str = "com.hse.bleradar/.UpdateCheckService";
+/// The runtime permission whose revocation the proof exercises (API 31+).
+const REVOKED_PERMISSION: &str = "android.permission.BLUETOOTH_SCAN";
+/// What `RadarScanService.onStartCommand` logs when a sticky restart finds
+/// the permissions revoked and stops the service instead of promoting it.
+const REVOKED_RESTART_LOG: &str = "Bluetooth permissions revoked on sticky restart";
+/// `UpdateCheckService.buildUpdateNotification`'s title, which must be gone
+/// once the check finished.
+const UPDATE_NOTIFICATION_TITLE: &str = "Checking for updates...";
 /// The console port the emulator is told to use; its adb serial follows.
 const CONSOLE_PORT: u16 = 5554;
 const AVD_NAME: &str = "bleradar-proof";
@@ -171,6 +186,32 @@ pub fn json_integer(json: &str, key: &str) -> Option<i64> {
 /// Whether the JSON text carries `"key":<literal>` verbatim.
 pub fn json_has(json: &str, key: &str, literal: &str) -> bool {
     json.contains(&format!("\"{key}\":{literal}"))
+}
+
+/// The `Update decision: N` line `UpdateCheckService` logs once it assessed
+/// the bundled manifest: the ordinal, if the check ran that far.
+pub fn update_decision_logged(logcat: &str) -> Option<i64> {
+    logcat
+        .lines()
+        .filter_map(|line| line.split("Update decision: ").nth(1))
+        .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .find_map(|digits| digits.parse().ok())
+}
+
+/// The `ps` lines (after the header) about emulator-side processes — the
+/// launcher or QEMU, netsim, adb — excluding this command's own process
+/// tree, whose arguments name the subcommand.
+pub fn emulator_process_lines(ps: &str) -> Vec<String> {
+    ps.lines()
+        .skip(1)
+        .filter(|line| !line.contains("verify-android-emulator"))
+        .filter(|line| {
+            ["emulator", "qemu-system", "netsim", "adb"]
+                .iter()
+                .any(|needle| line.contains(needle))
+        })
+        .map(|line| line.trim().to_string())
+        .collect()
 }
 
 /// The keys a document must carry, checked against what it does.
@@ -360,6 +401,62 @@ fn wait_for_service_state(adb: &Adb, title: &str) -> Result<Duration, String> {
 
 fn body_text(response: &HttpResponse) -> String {
     String::from_utf8_lossy(&response.body).into_owned()
+}
+
+/// `POST /api/scan/start`, which must be accepted: a service instance the
+/// activity's relaunch is destroying refuses a start (its engine is closed)
+/// and the instance the relaunch creates takes the next one, so an
+/// "unavailable" refusal is retried briefly. The `200` body.
+fn start_scan(port: u16) -> Result<String, String> {
+    let mut start = post(port, "/api/scan/start")?;
+    let mut start_text = body_text(&start);
+    for _ in 0..REQUEST_ATTEMPTS {
+        if !(start.status == 409 && start_text.contains("scanner unavailable")) {
+            break;
+        }
+        thread::sleep(Duration::from_secs(1));
+        start = post(port, "/api/scan/start")?;
+        start_text = body_text(&start);
+    }
+    if start.status != 200 || start_text != SCAN_STARTED_JSON {
+        return Err(format!(
+            "POST /api/scan/start answered {} {start_text}; expected 200 {SCAN_STARTED_JSON} (the adapter was enabled above, so a refusal is a regression)",
+            start.status
+        ));
+    }
+    Ok(start_text)
+}
+
+/// Whether the API stopped answering: three consecutive failed status
+/// requests (each retries on its own) before `timeout` runs out.
+fn api_unreachable(port: u16, timeout: Duration) -> bool {
+    let started = Instant::now();
+    let mut failures = 0;
+    while started.elapsed() < timeout && failures < 3 {
+        match get(port, "/api/status") {
+            Ok(response) if response.status == 200 => failures = 0,
+            _ => failures += 1,
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    failures >= 3
+}
+
+/// The app's process id, which must exist.
+fn app_pid(adb: &Adb) -> Result<u32, String> {
+    adb.shell(&format!("pidof {PACKAGE}"))?
+        .trim()
+        .parse()
+        .map_err(|e| format!("pidof {PACKAGE} gave no pid: {e}"))
+}
+
+/// Launches the activity (`am start -W`), which must report `Status: ok`.
+fn launch_activity(adb: &Adb) -> Result<(), String> {
+    let launch = adb.shell(&format!("am start -W -n {ACTIVITY}"))?;
+    if !launch_succeeded(&launch) {
+        return Err(format!("the activity did not start: {}", launch.trim()));
+    }
+    Ok(())
 }
 
 // ===== the emulator =====
@@ -638,10 +735,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
     ));
 
     println!("== am start -W {ACTIVITY} ==");
-    let launch = adb.shell(&format!("am start -W -n {ACTIVITY}"))?;
-    if !launch_succeeded(&launch) {
-        return Err(format!("the activity did not start: {}", launch.trim()));
-    }
+    launch_activity(adb)?;
     report.push("launch: MainActivity started (Status: ok)".to_string());
 
     let forward = adb.run(&["forward", "tcp:0", &format!("tcp:{GUEST_API_PORT}")])?;
@@ -710,25 +804,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
     report.push(format!("GET /api/updates: {}", body_text(&updates)));
 
     println!("== scan control ==");
-    // A service instance the activity's relaunch is destroying refuses a
-    // start (its engine is closed); the instance the relaunch creates takes
-    // the next one, so an "unavailable" refusal is retried briefly.
-    let mut start = post(port, "/api/scan/start")?;
-    let mut start_text = body_text(&start);
-    for _ in 0..REQUEST_ATTEMPTS {
-        if !(start.status == 409 && start_text.contains("scanner unavailable")) {
-            break;
-        }
-        thread::sleep(Duration::from_secs(1));
-        start = post(port, "/api/scan/start")?;
-        start_text = body_text(&start);
-    }
-    if start.status != 200 || start_text != SCAN_STARTED_JSON {
-        return Err(format!(
-            "POST /api/scan/start answered {} {start_text}; expected 200 {SCAN_STARTED_JSON} (the adapter was enabled above, so a refusal is a regression)",
-            start.status
-        ));
-    }
+    let start_text = start_scan(port)?;
     report.push(format!("POST /api/scan/start: 200 {start_text}"));
 
     {
@@ -771,11 +847,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         wait_for_service_state(adb, SCANNING_TEXT)?;
 
         println!("== kill -9 the app process: START_STICKY must resume the scan ==");
-        let pid: u32 = adb
-            .shell(&format!("pidof {PACKAGE}"))?
-            .trim()
-            .parse()
-            .map_err(|e| format!("pidof {PACKAGE} gave no pid: {e}"))?;
+        let pid = app_pid(adb)?;
         report.push(format!("app process before the kill: pid {pid}"));
         adb.shell(&format!("kill -9 {pid}"))?;
         let killed = Instant::now();
@@ -805,6 +877,159 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         ));
     }
 
+    println!("== the update check the first launch started ==");
+    // MainActivity.onStart starts UpdateCheckService (never checked before on
+    // this fresh install) through startForegroundService, asynchronously: it
+    // must have been promoted without the platform's foreground timeout
+    // killing the app (the crash log below would show that), assessed the
+    // bundled manifest, and finished — no service record and no "Checking
+    // for updates..." notification left. Both are awaited, and every dump is
+    // a fallible command, so a failed adb call never reads as "nothing left".
+    let decision_awaited = Instant::now();
+    let (decision, update_lines) = loop {
+        let update_log = adb.shell("logcat -d -s UpdateCheckService:* UpdateManager:*")?;
+        if let Some(decision) = update_decision_logged(&update_log) {
+            let lines = update_log
+                .lines()
+                .filter(|line| {
+                    line.contains("UpdateCheckService") || line.contains("UpdateManager")
+                })
+                .count();
+            break (decision, lines);
+        }
+        if decision_awaited.elapsed() > PROMOTION_TIMEOUT {
+            return Err(format!(
+                "the update check did not reach a decision within {}s; its log:\n{update_log}",
+                PROMOTION_TIMEOUT.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(500));
+    };
+    let finish_awaited = Instant::now();
+    loop {
+        let services = adb.shell(&format!("dumpsys activity services {PACKAGE}"))?;
+        let notifications = notification_strings(&adb.shell("dumpsys notification --noredact")?);
+        let record = service_record(&services, UPDATE_SERVICE);
+        let notified = notifications
+            .iter()
+            .any(|title| title == UPDATE_NOTIFICATION_TITLE);
+        if record.is_none() && !notified {
+            break;
+        }
+        if finish_awaited.elapsed() > PROMOTION_TIMEOUT {
+            return Err(format!(
+                "UpdateCheckService did not finish within {}s of its decision: service record {}, \"{UPDATE_NOTIFICATION_TITLE}\" notification {}\n{}",
+                PROMOTION_TIMEOUT.as_secs(),
+                if record.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                },
+                if notified { "present" } else { "absent" },
+                record.unwrap_or_default()
+            ));
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    report.push(format!(
+        "update check: ran on the first launch to decision {decision} ({update_lines} log lines) and the dataSync service finished — no record, no notification left"
+    ));
+
+    println!("== am force-stop: the API must end with the app ==");
+    adb.shell(&format!("am force-stop {PACKAGE}"))?;
+    if !api_unreachable(port, Duration::from_secs(30)) {
+        return Err("the API still answers after am force-stop".to_string());
+    }
+    report
+        .push("am force-stop: the API is unreachable, the service ended with the app".to_string());
+
+    println!("== pm revoke {REVOKED_PERMISSION} while scanning: nothing may survive it ==");
+    // Relaunch, scan again, then revoke a permission the scan needs: the
+    // platform kills the app for it. Whatever it does next — restart the
+    // sticky service (whose onStartCommand must then stop it rather than
+    // promote it without the permission, which API 34 rejects) or leave it
+    // down — no scan and no foreground service may remain, and the API is
+    // either gone or answering an idle state.
+    launch_activity(adb)?;
+    wait_for_api(port, API_TIMEOUT)?;
+    start_scan(port)?;
+    wait_for_status(port, "scanning", "true")?;
+    wait_for_service_state(adb, SCANNING_TEXT)?;
+    let pid = app_pid(adb)?;
+    adb.shell(&format!("pm revoke {PACKAGE} {REVOKED_PERMISSION}"))?;
+    let revoked = Instant::now();
+    let mut killed = false;
+    let mut settled = None;
+    let mut last = String::new();
+    while revoked.elapsed() < RESTART_TIMEOUT {
+        // Every probe is a fallible command: a transport failure is an error,
+        // never "killed" or "no service". `pidof` itself exits 1 with no
+        // output when nothing matches, hence the `||`.
+        let current = adb.shell(&format!("pidof {PACKAGE} || echo none"))?;
+        killed = killed
+            || !current
+                .split_whitespace()
+                .any(|candidate| candidate == pid.to_string());
+        let services = adb.shell(&format!("dumpsys activity services {PACKAGE}"))?;
+        let foreground = service_is_foreground(&services, SERVICE);
+        // The API must be gone (no answer after the request's own retries) or
+        // answering an idle state; any other answer keeps the loop going.
+        let api = match get(port, "/api/status") {
+            Ok(response) if response.status == 200 => {
+                json_has(&body_text(&response), "scanning", "false").then_some("answering idle")
+            }
+            Ok(response) => {
+                last = format!("status {}", response.status);
+                None
+            }
+            Err(_) => Some("unreachable"),
+        };
+        if killed && foreground != Some(true) && api.is_some() {
+            settled = api;
+            break;
+        }
+        last = format!("killed={killed}, isForeground={foreground:?}, api={api:?} ({last})");
+        thread::sleep(Duration::from_secs(2));
+    }
+    let settled = settled.ok_or_else(|| {
+        format!(
+            "within {}s of the revocation the app did not settle (last: {last})",
+            RESTART_TIMEOUT.as_secs()
+        )
+    })?;
+    // A sticky restart may still be pending (its delay grows with each
+    // restart): watch the service's own log for the branch through the rest
+    // of the window, and classify only once the line appears or the window
+    // has passed. A foreground service at any point is a regression.
+    let mut services;
+    let restarted_and_stopped = loop {
+        let service_log = adb.shell("logcat -d -s RadarScanService:*")?;
+        services = adb.shell(&format!("dumpsys activity services {PACKAGE}"))?;
+        if service_is_foreground(&services, SERVICE) == Some(true) {
+            return Err(format!(
+                "RadarScanService is back in the foreground without {REVOKED_PERMISSION}:\n{services}"
+            ));
+        }
+        if service_log.contains(REVOKED_RESTART_LOG) {
+            break true;
+        }
+        if revoked.elapsed() >= RESTART_TIMEOUT {
+            break false;
+        }
+        thread::sleep(Duration::from_secs(2));
+    };
+    let restart = if restarted_and_stopped {
+        "the sticky restart found the permissions revoked and stopped the service"
+    } else if service_record(&services, SERVICE).is_some() {
+        "the service record is back (an activity relaunch re-bound it) without a scan"
+    } else {
+        "the platform did not restart the service within the window"
+    };
+    report.push(format!(
+        "pm revoke {REVOKED_PERMISSION}: the platform killed pid {pid}; {restart}; the API is {settled} {:.1}s after the revocation",
+        revoked.elapsed().as_secs_f64()
+    ));
+
     println!("== crash log ==");
     let crashes = adb.shell_lenient("logcat -d -b crash -b main -v brief");
     let headers = crash_headers(&crashes, PACKAGE);
@@ -815,31 +1040,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             crashes
         ));
     }
-    let update_lines = adb
-        .shell_lenient("logcat -d -s UpdateCheckService:* UpdateManager:*")
-        .lines()
-        .filter(|line| line.contains("UpdateCheckService") || line.contains("UpdateManager"))
-        .count();
-    report.push(format!(
-        "logcat: no Java or native crash of {PACKAGE}; {update_lines} update-check line(s)"
-    ));
-
-    println!("== am force-stop: the API must end with the app ==");
-    adb.shell(&format!("am force-stop {PACKAGE}"))?;
-    let stopped = Instant::now();
-    let mut unreachable = 0;
-    while stopped.elapsed() < Duration::from_secs(30) && unreachable < 3 {
-        match get(port, "/api/status") {
-            Ok(response) if response.status == 200 => unreachable = 0,
-            _ => unreachable += 1,
-        }
-        thread::sleep(Duration::from_secs(1));
-    }
-    if unreachable < 3 {
-        return Err("the API still answers after am force-stop".to_string());
-    }
-    report
-        .push("am force-stop: the API is unreachable, the service ended with the app".to_string());
+    report.push(format!("logcat: no Java or native crash of {PACKAGE}"));
     Ok(())
 }
 
@@ -874,6 +1075,35 @@ pub fn run(config: &Config) -> Result<(), String> {
         serial: format!("emulator-{CONSOLE_PORT}"),
     };
     let mut report = Report::new();
+    // The tool identity and whether the SDK ships netsim (virtual radios):
+    // what the next proof step could build on.
+    let version = Command::new(&emulator_exe)
+        .arg("-version")
+        .env("ANDROID_SDK_ROOT", config.sdk_root)
+        .env("ANDROID_HOME", config.sdk_root)
+        .output()
+        .map(|output| {
+            // The launcher prints its banner on stderr on some versions.
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+        .unwrap_or_default();
+    report.push(format!(
+        "emulator: {}; netsimd {}",
+        version
+            .lines()
+            .find(|line| line.to_ascii_lowercase().contains("version"))
+            .unwrap_or("(version unknown)")
+            .trim(),
+        if config.sdk_root.join("emulator/netsimd").is_file() {
+            "shipped"
+        } else {
+            "absent"
+        }
+    ));
     let outcome = match launch_emulator(config.sdk_root, &emulator_exe, &avd_home, &log) {
         Err(error) => Err(error),
         Ok(mut emulator) => {
@@ -925,6 +1155,20 @@ pub fn run(config: &Config) -> Result<(), String> {
             }
             println!("== shutting the emulator down ==");
             shutdown(&adb, &mut emulator);
+            // What the shutdown left behind (CI's runner once reported an
+            // orphan `emulator` process after a green run).
+            let ps = Command::new("ps")
+                .args(["-eo", "pid,ppid,comm,args"])
+                .output()
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default();
+            let lingering = emulator_process_lines(&ps);
+            report.push(format!(
+                "after the shutdown: {} emulator-side process(es) still alive{}{}",
+                lingering.len(),
+                if lingering.is_empty() { "" } else { ": " },
+                lingering.join(" | ")
+            ));
             outcome
         }
     };
@@ -1032,5 +1276,37 @@ mod tests {
                 .unwrap_err()
                 .contains("expected")
         );
+    }
+
+    #[test]
+    fn the_update_decision_and_lingering_processes_are_read_from_tool_output() {
+        let log = "--------- beginning of main\n\
+                   09-13 01:18:45.100  3512  3512 D UpdateCheckService: UpdateCheckService created\n\
+                   09-13 01:18:45.200  3512  3512 D UpdateCheckService: Update decision: 0 (available=1)\n\
+                   09-13 01:18:45.201  3512  3512 D UpdateCheckService: No safe update available (decision=0)\n";
+        assert_eq!(update_decision_logged(log), Some(0));
+        assert_eq!(
+            update_decision_logged("D UpdateCheckService: Update decision: 3 (available=1)"),
+            Some(3)
+        );
+        assert_eq!(
+            update_decision_logged("D UpdateCheckService: created"),
+            None
+        );
+        assert_eq!(update_decision_logged(""), None);
+
+        let ps = "    PID    PPID COMMAND         COMMAND\n\
+                  2646       1 adb             adb -L tcp:5037 fork-server server --reply-fd 4\n\
+                  3139    3100 emulator        /opt/sdk/emulator/emulator -avd bleradar-proof -port 5554\n\
+                  3140    3139 netsimd         netsimd -s 8877\n\
+                  3100    2900 xtask           target/debug/xtask verify-android-emulator\n\
+                  2900    2800 cargo           cargo xtask verify-android-emulator\n\
+                  4001       1 bash            bash -c ls\n";
+        let lines = emulator_process_lines(ps);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].starts_with("2646"));
+        assert!(lines[1].contains("emulator -avd"));
+        assert!(lines[2].contains("netsimd"));
+        assert!(emulator_process_lines("PID COMMAND\n").is_empty());
     }
 }
