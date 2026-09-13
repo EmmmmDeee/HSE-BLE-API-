@@ -279,6 +279,31 @@ fn wait_for_api(port: u16, timeout: Duration) -> Result<Duration, String> {
     ))
 }
 
+/// How long the service may take to be promoted (or re-promoted) with the
+/// expected notification after a control request answered.
+const PROMOTION_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Waits until `RadarScanService` is a running foreground service whose
+/// notification carries `title`; the time it took.
+fn wait_for_service_state(adb: &Adb, title: &str) -> Result<Duration, String> {
+    let started = Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < PROMOTION_TIMEOUT {
+        let services = adb.shell_lenient(&format!("dumpsys activity services {PACKAGE}"));
+        let foreground = service_is_foreground(&services, SERVICE);
+        let titles = notification_titles(&adb.shell_lenient("dumpsys notification --noredact"));
+        if foreground == Some(true) && titles.iter().any(|candidate| candidate == title) {
+            return Ok(started.elapsed());
+        }
+        last = format!("isForeground={foreground:?}, notification titles {titles:?}");
+        thread::sleep(Duration::from_millis(500));
+    }
+    Err(format!(
+        "within {}s RadarScanService was not a foreground service with the \"{title}\" notification (last: {last})",
+        PROMOTION_TIMEOUT.as_secs()
+    ))
+}
+
 fn body_text(response: &HttpResponse) -> String {
     String::from_utf8_lossy(&response.body).into_owned()
 }
@@ -619,22 +644,13 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         if !json_has(&status, "scanning", "true") {
             return Err(format!("status does not report the scan: {status}"));
         }
-        let services = adb.shell(&format!("dumpsys activity services {PACKAGE}"))?;
-        match service_is_foreground(&services, SERVICE) {
-            Some(true) => {}
-            Some(false) => {
-                return Err("RadarScanService is running but not in the foreground".into());
-            }
-            None => return Err("RadarScanService has no service record after the start".into()),
-        }
-        let titles = notification_titles(&adb.shell("dumpsys notification --noredact")?);
-        if !titles.iter().any(|title| title == SCANNING_TITLE) {
-            return Err(format!(
-                "the scanning notification is missing; titles: {titles:?}"
-            ));
-        }
+        // The start answers from the handler thread while the queued
+        // startForegroundService command is still on its way to the main
+        // thread, so the promotion is awaited rather than sampled once.
+        let promoted = wait_for_service_state(adb, SCANNING_TITLE)?;
         report.push(format!(
-            "scanning: status {status}; RadarScanService isForeground=true; notification \"{SCANNING_TITLE}\""
+            "scanning: status {status}; RadarScanService isForeground=true with \"{SCANNING_TITLE}\" {:.1}s after the start",
+            promoted.as_secs_f64()
         ));
 
         let stop = post(port, "/api/scan/stop")?;
@@ -649,18 +665,7 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         if !json_has(&paused, "scanning", "false") {
             return Err(format!("status does not report the pause: {paused}"));
         }
-        let services = adb.shell(&format!("dumpsys activity services {PACKAGE}"))?;
-        if service_is_foreground(&services, SERVICE) != Some(true) {
-            return Err(
-                "after the pause RadarScanService is not a running foreground service".into(),
-            );
-        }
-        let titles = notification_titles(&adb.shell("dumpsys notification --noredact")?);
-        if !titles.iter().any(|title| title == IDLE_TITLE) {
-            return Err(format!(
-                "the idle notification is missing; titles: {titles:?}"
-            ));
-        }
+        wait_for_service_state(adb, IDLE_TITLE)?;
         report.push(format!(
             "paused: POST /api/scan/stop {stop_text}; the service stays in the foreground with \"{IDLE_TITLE}\""
         ));
@@ -804,9 +809,27 @@ pub fn run(config: &Config) -> Result<(), String> {
     });
     if outcome.is_err() {
         println!("== diagnostics ==");
-        println!("-- logcat (warnings and above, last 120 lines) --");
-        let logcat = adb.shell_lenient("logcat -d -v time *:W");
-        let lines: Vec<&str> = logcat.lines().collect();
+        println!("-- report so far --");
+        for line in &report {
+            println!("  {line}");
+        }
+        println!("-- logcat lines about the app (last 120) --");
+        let logcat = adb.shell_lenient("logcat -d -v time");
+        let lines: Vec<&str> = logcat
+            .lines()
+            .filter(|line| {
+                [
+                    "bleradar",
+                    "RadarScanService",
+                    "ApiHttpServer",
+                    "BleScanEngine",
+                    "UpdateCheckService",
+                    "AndroidRuntime",
+                ]
+                .iter()
+                .any(|needle| line.contains(needle))
+            })
+            .collect();
         println!("{}", lines[lines.len().saturating_sub(120)..].join("\n"));
         println!("-- emulator log (last 40 lines) --");
         println!("{}", tail(&log, 40));
