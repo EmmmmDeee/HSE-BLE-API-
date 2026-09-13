@@ -96,8 +96,19 @@ final class BleScanEngine implements SnapshotSource {
         };
     }
 
-    /** @return {@code true} if scanning actually started. */
-    boolean start() {
+    /** Whether the Bluetooth adapter exists and is enabled. */
+    static boolean isBluetoothEnabled(Context context) {
+        BluetoothManager manager = context.getSystemService(BluetoothManager.class);
+        BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+        return adapter != null && adapter.isEnabled();
+    }
+
+    /**
+     * @return {@code true} if scanning actually started. Synchronized because
+     *     the HTTP handler thread ({@code POST /api/scan/start}) and the main
+     *     thread ({@code onStartCommand}) may both request it.
+     */
+    synchronized boolean start() {
         if (scanning) {
             return true;
         }
@@ -129,7 +140,7 @@ final class BleScanEngine implements SnapshotSource {
         }
     }
 
-    void stop() {
+    synchronized void stop() {
         if (!scanning || scanner == null) {
             return;
         }

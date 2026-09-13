@@ -2,8 +2,6 @@ package com.hse.bleradar;
 
 import android.Manifest;
 import android.app.AlertDialog;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -63,6 +61,9 @@ public final class MainActivity extends android.app.Activity {
         public void onServiceConnected(ComponentName name, IBinder service) {
             boundService = ((RadarScanService.LocalBinder) service).getService();
             serviceBound = true;
+            // The API exists from this moment: re-render the status line so
+            // its dashboard URL appears even while the app stays idle.
+            refreshStatus();
             refreshUiLoop();
         }
 
@@ -70,8 +71,12 @@ public final class MainActivity extends android.app.Activity {
         public void onServiceDisconnected(ComponentName name) {
             boundService = null;
             serviceBound = false;
+            refreshStatus();
         }
     };
+
+    /** The last status text asked for, without the lines {@link #setStatus} appends. */
+    private CharSequence baseStatus = "";
 
     private final Runnable refreshTicker = this::refreshUiLoop;
 
@@ -226,7 +231,7 @@ public final class MainActivity extends android.app.Activity {
             requestPermissions(BleScanEngine.requiredPermissions(), PERMISSION_REQUEST_CODE);
             return;
         }
-        if (!isBluetoothEnabled()) {
+        if (!BleScanEngine.isBluetoothEnabled(this)) {
             setStatus(getString(R.string.status_bluetooth_off));
             return;
         }
@@ -241,12 +246,6 @@ public final class MainActivity extends android.app.Activity {
         }
     }
 
-    private boolean isBluetoothEnabled() {
-        BluetoothManager manager = getSystemService(BluetoothManager.class);
-        BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
-        return adapter != null && adapter.isEnabled();
-    }
-
     private void applyIdleStatus() {
         setStatus(getString(R.string.status_idle));
     }
@@ -259,13 +258,25 @@ public final class MainActivity extends android.app.Activity {
      * failure into apparent success.
      */
     private void setStatus(CharSequence status) {
-        if (NativeRadar.isAvailable()) {
-            statusText.setText(status);
-            return;
+        baseStatus = status;
+        StringBuilder text = new StringBuilder(status);
+        String apiUrl = boundService == null ? null : boundService.apiUrl();
+        if (apiUrl != null) {
+            // The loopback dashboard and API exist only while the service is
+            // alive; say where they are so a Termux user can find them.
+            text.append('\n').append(getString(R.string.status_web_ui_fmt, apiUrl));
         }
-        Throwable error = NativeRadar.loadError();
-        String cause = error == null ? "unknown" : error.getClass().getSimpleName();
-        statusText.setText(status + "\n" + getString(R.string.status_native_unavailable, cause));
+        if (!NativeRadar.isAvailable()) {
+            Throwable error = NativeRadar.loadError();
+            String cause = error == null ? "unknown" : error.getClass().getSimpleName();
+            text.append('\n').append(getString(R.string.status_native_unavailable, cause));
+        }
+        statusText.setText(text);
+    }
+
+    /** Re-renders the current status: the appended lines depend on the bound service. */
+    private void refreshStatus() {
+        setStatus(baseStatus);
     }
 
     private void refreshUiLoop() {

@@ -60,10 +60,21 @@ import java.util.logging.Logger;
  *       {@code assets/dashboard.html}, a self-contained page that polls the
  *       three JSON endpoints and renders the radar and device table. Java
  *       serves its bytes unchanged.</li>
+ *   <li>{@code POST /api/scan/start} and {@code POST /api/scan/stop} — scan
+ *       control through {@link ScanControl}: {@code 200} with
+ *       {@code {"scanning": <live state>}}, or {@code 409} with an
+ *       {@code error} naming why a start was refused (permissions not
+ *       granted, Bluetooth off, scanner unavailable, background start
+ *       refused by Android). A stop pauses the scan and keeps the service
+ *       (and this API) alive.</li>
  * </ul>
- * Unknown paths answer {@code 404}; known paths with any method but
- * {@code GET} answer {@code 405}; a malformed request line answers {@code 400};
- * {@code /} answers {@code 500} if the packaged page could not be read.
+ * Unknown paths answer {@code 404}; a known path with the wrong method
+ * answers {@code 405}; a malformed request line answers {@code 400};
+ * {@code /} answers {@code 500} if the packaged page could not be read, and
+ * any route answers {@code 500} (the exception's class in {@code error}) if
+ * a collaborator throws, so no request can end the app process. A request
+ * body is consumed and discarded (no route reads one), so a client that
+ * sent one is answered rather than reset.
  *
  * <p>Binding to {@code 127.0.0.1} is the whole access-control model: nothing
  * off-device can reach the port, and remote use goes through an SSH tunnel.
@@ -85,6 +96,7 @@ public final class ApiHttpServer {
     private final SnapshotSource engine;
     private final UpdateStatusSource updates;
     private final AssetSource assets;
+    private final ScanControl control;
     /** The {@code SystemClock.uptimeMillis()} timeline {@link Blip#lastSeenUptimeMillis} lives on. */
     private final LongSupplier uptimeMillis;
     /** Wall-clock epoch milliseconds for {@code timestamp_ms}. */
@@ -101,12 +113,14 @@ public final class ApiHttpServer {
             AssetSource assets,
             LongSupplier uptimeMillis,
             LongSupplier epochMillis,
+            ScanControl control,
             int port) {
         this.engine = engine;
         this.updates = updates;
         this.assets = assets;
         this.uptimeMillis = uptimeMillis;
         this.epochMillis = epochMillis;
+        this.control = control;
         this.port = port;
     }
 
@@ -194,10 +208,24 @@ public final class ApiHttpServer {
             if (requestLine == null) {
                 return;
             }
-            // Headers are irrelevant to every route and no route reads a body,
-            // so drain them only to reach the end of the request.
+            // No route reads a body: drain the headers to reach the end of the
+            // request, then consume and discard a declared body so a client
+            // that sent one is answered rather than reset.
+            long bodyLength = 0;
             for (String header = reader.readLine(); header != null && !header.isEmpty(); header = reader.readLine()) {
-                // drained
+                int colon = header.indexOf(':');
+                if (colon > 0 && "content-length".equalsIgnoreCase(header.substring(0, colon).trim())) {
+                    try {
+                        bodyLength = Long.parseLong(header.substring(colon + 1).trim());
+                    } catch (NumberFormatException malformed) {
+                        bodyLength = 0;
+                    }
+                }
+            }
+            for (long skipped = 0; skipped < bodyLength; skipped++) {
+                if (reader.read() < 0) {
+                    break;
+                }
             }
             OutputStream out = socket.getOutputStream();
             String[] parts = requestLine.split(" ");
@@ -210,13 +238,32 @@ public final class ApiHttpServer {
             if (query >= 0) {
                 path = path.substring(0, query);
             }
-            respond(out, parts[0], path);
+            try {
+                respond(out, parts[0], path);
+            } catch (RuntimeException error) {
+                // A collaborator failed (scan control, the snapshot). On Android
+                // an uncaught exception on any thread ends the whole process, so
+                // a request must never take the app down: log it and answer 500.
+                // Every route does its work before writing its response in one
+                // call, so nothing has reached the client yet.
+                LOG.log(Level.SEVERE, "HTTP " + parts[0] + " " + path + " failed", error);
+                writeResponse(out, 500, "Internal Server Error", JSON,
+                        errorJson("Internal error: " + error.getClass().getSimpleName()));
+            }
         } catch (IOException error) {
             LOG.warning("HTTP request failed: " + error);
         }
     }
 
     private void respond(OutputStream out, String method, String path) throws IOException {
+        if ("/api/scan/start".equals(path) || "/api/scan/stop".equals(path)) {
+            if (!"POST".equals(method)) {
+                writeResponse(out, 405, "Method Not Allowed", JSON, errorJson("Method not allowed"));
+                return;
+            }
+            respondScan(out, path.endsWith("/start"));
+            return;
+        }
         boolean routed = "/api/devices".equals(path)
                 || "/api/status".equals(path)
                 || "/api/updates".equals(path)
@@ -248,6 +295,38 @@ public final class ApiHttpServer {
                     writeResponse(out, 200, "OK", HTML, page);
                 }
                 break;
+        }
+    }
+
+    private void respondScan(OutputStream out, boolean start) throws IOException {
+        if (start) {
+            int outcome = control.requestStart();
+            if (outcome != ScanControl.START_ACCEPTED) {
+                writeResponse(out, 409, "Conflict", JSON, errorJson(startRefusalLabel(outcome)));
+                return;
+            }
+        } else {
+            control.requestStop();
+        }
+        writeResponse(out, 200, "OK", JSON, scanJson());
+    }
+
+    private String scanJson() {
+        return new Json().beginObject().name("scanning").value(engine.isScanning()).endObject().toString();
+    }
+
+    private static String startRefusalLabel(int outcome) {
+        switch (outcome) {
+            case ScanControl.START_PERMISSIONS_MISSING:
+                return "Bluetooth permissions not granted; open the app once to grant them";
+            case ScanControl.START_BLUETOOTH_OFF:
+                return "Bluetooth is off";
+            case ScanControl.START_UNAVAILABLE:
+                return "Bluetooth LE scanner unavailable";
+            case ScanControl.START_BACKGROUND_RESTRICTED:
+                return "Android refused a background start; open the app once";
+            default:
+                return "Scan could not start (outcome " + outcome + ")";
         }
     }
 

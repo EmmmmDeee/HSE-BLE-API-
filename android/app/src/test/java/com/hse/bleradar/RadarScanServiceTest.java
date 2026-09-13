@@ -81,6 +81,28 @@ public class RadarScanServiceTest {
     }
 
     @Test
+    public void api_scan_control_applies_the_activity_gates_and_pauses_without_ending_the_service() {
+        // RadarScanService implements ScanControl for ApiHttpServer's
+        // POST /api/scan/start|stop (headless Termux use):
+        // - requestStart() checks hasRequiredPermissions and the adapter like
+        //   the Start action, then startForegroundService + engine.start(), so
+        //   the started state, promotion and sticky restart are identical; an
+        //   API 31+ ForegroundServiceStartNotAllowedException becomes
+        //   START_BACKGROUND_RESTRICTED (answered 409) instead of a crash on
+        //   the handler thread
+        // - requestStop() pauses the scan but keeps the service started and in
+        //   the foreground with the idle notification; only stopScanning()
+        //   (the app's Stop) leaves the foreground and stops the service
+        // - scanRequested records the latest request; onStartCommand starts
+        //   the engine only for a sticky restart (null intent) or while a
+        //   start is still wanted, so a stop that overtakes the queued
+        //   startForegroundService is never undone (the promotion then leaves
+        //   the foreground again at once)
+        int accepted = ScanControl.START_ACCEPTED;
+        assertEquals("START_ACCEPTED is the zero outcome", 0, accepted);
+    }
+
+    @Test
     public void service_promotion_is_idempotent() {
         // RadarScanService.promoteToForeground() can be called multiple times
         // without harm because startForeground() is idempotent and

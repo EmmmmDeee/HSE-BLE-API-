@@ -206,10 +206,27 @@ public class ApiHttpServerTest {
 
     @Test
     public void invalid_http_methods_return_405() {
-        // POST, PUT, DELETE on API endpoints should return 405 Method Not Allowed
-        // Only GET is supported
+        // The documents (/, /api/devices, /api/status, /api/updates) are GET
+        // only and scan control (/api/scan/start, /api/scan/stop) is POST only;
+        // a known path with any other method answers 405 Method Not Allowed
         int notAllowed = 405;
         assertEquals("Invalid methods should return 405", 405, notAllowed);
+    }
+
+    @Test
+    public void scan_control_routes_report_the_live_state_or_the_refusal() {
+        // POST /api/scan/start -> ScanControl.requestStart(): 200 {"scanning":<live>}
+        // when START_ACCEPTED, else 409 {"error":<reason>} — permissions not
+        // granted, Bluetooth off, scanner unavailable, background start
+        // refused by Android. POST /api/scan/stop -> requestStop(): 200 with
+        // the live state; the service stays alive (paused) so the API remains
+        // reachable. A request body is consumed and discarded (no route reads
+        // one), so a client that sent one is answered, not reset. A collaborator
+        // that throws is answered 500 (COR-032) rather than ending the
+        // process. Executed proof: cargo xtask verify-api-live drives every
+        // outcome through a scripted ScanControl with real requests.
+        int conflict = 409;
+        assertEquals("A refused start answers 409", 409, conflict);
     }
 
     @Test

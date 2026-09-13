@@ -46,7 +46,7 @@ import java.util.List;
  * restart that implies it), keeps that ordering; a restart that finds the
  * permissions revoked stops the service instead of throwing.
  */
-public final class RadarScanService extends Service {
+public final class RadarScanService extends Service implements ScanControl {
 
     private static final String TAG = "RadarScanService";
     private static final int MIN_ANDROID_VERSION_FOR_FOREGROUND_SERVICE_TYPE = Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
@@ -57,6 +57,16 @@ public final class RadarScanService extends Service {
     private final IBinder binder = new LocalBinder();
     private BleScanEngine engine;
     private ApiHttpServer httpServer;
+    /** Whether {@link #promoteToForeground} is in effect (so a pause can refresh the notification). */
+    private volatile boolean foreground;
+    /**
+     * The most recent request: {@code true} after a start (the activity's or
+     * the API's), {@code false} after a stop. {@link #onStartCommand} honours
+     * it so a stop that overtakes the {@code startForegroundService} it
+     * follows — both can arrive from the HTTP handler thread within
+     * milliseconds — is not undone when that start command is delivered.
+     */
+    private volatile boolean scanRequested;
 
     /** Binder handed to {@link MainActivity} to reach this service's live state. */
     public final class LocalBinder extends Binder {
@@ -76,6 +86,7 @@ public final class RadarScanService extends Service {
                 getAssets()::open,
                 SystemClock::uptimeMillis,
                 System::currentTimeMillis,
+                this,
                 ApiHttpServer.DEFAULT_PORT);
         httpServer.start();
     }
@@ -92,7 +103,12 @@ public final class RadarScanService extends Service {
             stopSelf(startId);
             return START_NOT_STICKY;
         }
-        boolean started = engine.start();
+        // A sticky restart (null intent) always resumes the scan the process
+        // died with; an explicit start is skipped when a stop has overtaken it,
+        // so the promotion below then leaves the foreground again at once.
+        boolean wanted = intent == null || scanRequested;
+        boolean started = wanted && engine.start();
+        scanRequested = started;
         promoteToForeground(started);
         return START_STICKY;
     }
@@ -122,14 +138,67 @@ public final class RadarScanService extends Service {
      * @return {@code true} if scanning is now active.
      */
     boolean startScanning() {
+        scanRequested = true;
         return engine.start();
     }
 
     /** Stops scanning, removes the notification, and leaves the started/foreground state. */
     void stopScanning() {
+        scanRequested = false;
         engine.stop();
+        foreground = false;
         stopForeground(Service.STOP_FOREGROUND_REMOVE);
         stopSelf();
+    }
+
+    /**
+     * {@code POST /api/scan/start}: the same gate the activity's Start action
+     * applies (permissions, adapter), then the same start request — the
+     * started state promotes the service and lets a sticky restart resume the
+     * scan — with the engine started here as well so the answer reports the
+     * live state ({@link BleScanEngine#start()} is idempotent and serialized).
+     */
+    @Override
+    public int requestStart() {
+        if (!BleScanEngine.hasRequiredPermissions(this)) {
+            return ScanControl.START_PERMISSIONS_MISSING;
+        }
+        if (!BleScanEngine.isBluetoothEnabled(this)) {
+            return ScanControl.START_BLUETOOTH_OFF;
+        }
+        scanRequested = true;
+        try {
+            startForegroundService(new Intent(this, RadarScanService.class));
+        } catch (IllegalStateException restricted) {
+            // API 31+ ForegroundServiceStartNotAllowedException: the app counts
+            // as background (no visible activity, not yet in the foreground).
+            // Report it instead of letting it end the process from the HTTP
+            // handler thread.
+            Log.w(TAG, "Background start refused; open the app once", restricted);
+            return ScanControl.START_BACKGROUND_RESTRICTED;
+        }
+        return engine.start() ? ScanControl.START_ACCEPTED : ScanControl.START_UNAVAILABLE;
+    }
+
+    /**
+     * {@code POST /api/scan/stop}: pauses the scan but keeps the service
+     * started and in the foreground (with the idle notification) so the API
+     * stays reachable for a headless client; the app's Stop button is what
+     * ends the service.
+     */
+    @Override
+    public void requestStop() {
+        scanRequested = false;
+        engine.stop();
+        if (foreground) {
+            promoteToForeground(false, false);
+        }
+    }
+
+    /** The loopback URL of the web dashboard while the API is bound, else {@code null}. */
+    String apiUrl() {
+        int port = httpServer == null ? -1 : httpServer.boundPort();
+        return port > 0 ? "http://127.0.0.1:" + port + "/" : null;
     }
 
     boolean isScanning() {
@@ -141,17 +210,28 @@ public final class RadarScanService extends Service {
     }
 
     private void promoteToForeground(boolean scanning) {
+        promoteToForeground(scanning, true);
+    }
+
+    /**
+     * Enters (or refreshes) the foreground with the scanning or idle
+     * notification. With {@code stopWhenIdle}, a scan that could not start
+     * leaves the foreground again; an API pause passes {@code false} to stay.
+     */
+    private void promoteToForeground(boolean scanning, boolean stopWhenIdle) {
         Notification notification = buildNotification(scanning);
         if (Build.VERSION.SDK_INT >= MIN_ANDROID_VERSION_FOR_FOREGROUND_SERVICE_TYPE) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
-        if (!scanning) {
+        foreground = true;
+        if (!scanning && stopWhenIdle) {
             // The scan could not start (adapter off, scanner unavailable). The
             // promotion above honours the startForegroundService contract;
             // leave the foreground again so no misleading notification
             // lingers, and drop the started state.
+            foreground = false;
             stopForeground(Service.STOP_FOREGROUND_REMOVE);
             stopSelf();
         }

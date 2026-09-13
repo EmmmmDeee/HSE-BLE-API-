@@ -11,6 +11,7 @@
     <string name="status_scanning_fmt">Scanning… %1$d device(s) in range</string>
     <string name="status_permission_required">Bluetooth and location permission are required to scan</string>
     <string name="status_bluetooth_off">Turn on Bluetooth to start scanning</string>
+    <string name="status_web_ui_fmt">Web UI: %1$s</string>
     <string name="status_native_unavailable">Native radar core unavailable (%1$s): raw signal only, no distance estimates</string>
     <string name="format_distance_meters">%1$s m</string>
     <string name="format_distance_unknown">— m</string>
