@@ -485,20 +485,54 @@ struct Netsim {
 }
 
 impl Netsim {
+    /// Finds the CLI in the emulator package (its name has varied between
+    /// releases) and settles on an endpoint that answers `devices`: the
+    /// port of a discovery file first, else the CLI's own discovery — a
+    /// stale file from another emulator instance is thereby never trusted.
     fn locate(sdk_root: &Path) -> Result<Self, String> {
-        let cli = sdk_root.join("emulator/netsim-cli");
-        if !cli.is_file() {
-            return Err(format!(
-                "{} is missing: the pinned emulator package no longer ships netsim-cli, which the virtual-advertiser check needs",
-                cli.display()
-            ));
-        }
+        let emulator_dir = sdk_root.join("emulator");
+        let cli = ["netsim-cli", "netsim", "bin/netsim-cli", "bin/netsim"]
+            .iter()
+            .map(|name| emulator_dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| {
+                let shipped: Vec<String> = fs::read_dir(&emulator_dir)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            .filter(|name| name.contains("netsim"))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "no netsim CLI under {}: the virtual-advertiser check needs it; netsim entries there: {:?}",
+                    emulator_dir.display(),
+                    shipped
+                )
+            })?;
         let ini = find_netsim_ini();
         let port = ini
             .as_ref()
             .and_then(|path| fs::read_to_string(path).ok())
             .and_then(|text| netsim_grpc_port(&text));
-        Ok(Self { cli, port, ini })
+        let mut netsim = Self { cli, port, ini };
+        let mut failures = Vec::new();
+        for attempt in [netsim.port, None] {
+            netsim.port = attempt;
+            match netsim.run(&["devices"]) {
+                Ok(_) => return Ok(netsim),
+                Err(error) => failures.push(error),
+            }
+            if attempt.is_none() {
+                break;
+            }
+        }
+        Err(format!(
+            "netsim-cli answers `devices` neither through {} nor through its own discovery:\n{}",
+            netsim.describe(),
+            failures.join("\n")
+        ))
     }
 
     /// Runs `netsim-cli <args>` with a timeout; the combined output when it
@@ -527,10 +561,14 @@ impl Netsim {
     }
 
     fn describe(&self) -> String {
+        let cli = self.cli.display();
         match (&self.ini, self.port) {
-            (Some(ini), Some(port)) => format!("{} (grpc.port {port})", ini.display()),
-            (Some(ini), None) => format!("{} without a grpc.port line", ini.display()),
-            (None, _) => "no netsim.ini found; the CLI's own discovery".to_string(),
+            (Some(ini), Some(port)) => format!("{cli}, {} (grpc.port {port})", ini.display()),
+            (Some(ini), None) => format!(
+                "{cli}, its own discovery ({} carried no usable grpc.port)",
+                ini.display()
+            ),
+            (None, _) => format!("{cli}, its own discovery (no netsim.ini found)"),
         }
     }
 }
@@ -964,17 +1002,25 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         let created = Instant::now();
         let mut listed = None;
         let mut last = String::new();
-        while created.elapsed() < BEACON_TIMEOUT {
+        loop {
             let text = body_text(&get(port, "/api/devices")?);
+            // The bound is judged after the answer (a request retries on
+            // its own), so a row that arrived late never passes as on time.
+            let after = created.elapsed();
             // The advertiser's address as the guest reports it, else the
             // name the advertisement carries.
             if let Some(row) = device_row(&text, "address", BEACON_ADDRESS)
                 .or_else(|| device_row(&text, "name", BEACON_NAME))
             {
-                listed = Some((row.to_string(), created.elapsed()));
+                if after <= BEACON_TIMEOUT {
+                    listed = Some((row.to_string(), after));
+                }
                 break;
             }
             last = text;
+            if after >= BEACON_TIMEOUT {
+                break;
+            }
             thread::sleep(Duration::from_secs(1));
         }
         let (row, after) = listed.ok_or_else(|| {
@@ -1002,16 +1048,31 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         netsim.run(&["beacon", "remove", BEACON_NAME])?;
         let removed = Instant::now();
         let pruned = loop {
-            let text = body_text(&get(port, "/api/devices")?);
-            if device_row(&text, "address", BEACON_ADDRESS).is_none()
+            let response = get(port, "/api/devices")?;
+            let text = body_text(&response);
+            let after = removed.elapsed();
+            // Only a healthy document from a scan still running counts: an
+            // error answer or an idle engine has an empty list for other
+            // reasons than the freshness policy.
+            let observed = response.status == 200 && json_has(&text, "scanning", "true");
+            if observed
+                && device_row(&text, "address", BEACON_ADDRESS).is_none()
                 && device_row(&text, "name", BEACON_NAME).is_none()
             {
-                break removed.elapsed();
+                if after > PRUNE_TIMEOUT {
+                    return Err(format!(
+                        "the row was gone only {:.1}s after `beacon remove` (bound {}s)",
+                        after.as_secs_f64(),
+                        PRUNE_TIMEOUT.as_secs()
+                    ));
+                }
+                break after;
             }
-            if removed.elapsed() > PRUNE_TIMEOUT {
+            if after > PRUNE_TIMEOUT {
                 return Err(format!(
-                    "{}s after `beacon remove` the row is still listed (the Rust prune policy never dropped it): {text}",
-                    PRUNE_TIMEOUT.as_secs()
+                    "{}s after `beacon remove` the row is still listed, or the document is not a healthy scanning one (status {}): {text}",
+                    PRUNE_TIMEOUT.as_secs(),
+                    response.status
                 ));
             }
             thread::sleep(Duration::from_secs(2));
@@ -1296,9 +1357,9 @@ pub fn run(config: &Config) -> Result<(), String> {
         "emulator: {}; netsimd {}",
         version
             .lines()
-            .find(|line| line.to_ascii_lowercase().contains("version"))
-            .unwrap_or("(version unknown)")
-            .trim(),
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("(`-version` printed nothing)"),
         if config.sdk_root.join("emulator/netsimd").is_file() {
             "shipped"
         } else {
