@@ -411,7 +411,12 @@ forwarded to the host. It then requires, over real HTTP, `GET /` byte-identical
 to the committed dashboard, the three documents with their keys and
 `native_available` true, `POST /api/scan/start` answered `200` with
 `RadarScanService` promoted to the foreground and its "BLE Radar is scanning"
-notification, `POST /api/scan/stop` keeping the foreground with "BLE Radar is
+notification, a virtual advertiser — a second Bluetooth controller the proof
+connects to netsimd's HCI socket (`xtask/src/hci.rs`; the emulator's radios
+are simulated there), advertising as `bleradar-beacon` — listed by
+`/api/devices` with its Rust-computed row (RSSI, a finite distance) within
+30 s and pruned by the core's freshness policy within 75 s of its removal,
+`POST /api/scan/stop` keeping the foreground with "BLE Radar is
 idle", a restarted service with the scan resumed after `kill -9` of the app
 process, the first launch's update check finished (its decision logged, no
 service record or notification left), the API unreachable after
@@ -419,12 +424,14 @@ service record or notification left), the API unreachable after
 foreground service surviving `pm revoke … BLUETOOTH_SCAN` (the report names
 the branch the platform took; on the first run the sticky restart found the
 permissions revoked and stopped the service), with no Java or native crash
-of the package in logcat; the AVD is deleted on every exit. It needs
+of the package and no leaked `ServiceConnection` in logcat; the AVD is
+deleted on every exit. It needs
 `/dev/kvm`, the SDK's `emulator`, `platform-tools` and the pinned image
 (`cargo xtask android-sdk-install --emulator` installs them: licenses
 accepted, `sdkmanager` retried, every package and the tools checked)
 and a JDK; CI's `android-emulator` job runs it on every pull request and
-every push to `main` (2 min 33 s on the first green run).
+every push to `main` (2 min 33 s on the first green run; 4 min 00 s with
+the virtual advertiser, decision #95).
 
 ## Parity report
 

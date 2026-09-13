@@ -149,8 +149,13 @@ authority.
 - `MainActivity.onCreate` calls `NativeRadar.ensureLoaded()`; `onStart` only
   **binds** to `RadarScanService` (`BIND_AUTO_CREATE`), which creates the
   service without promoting it, so nothing is shown in the notification shade
-  while the app is idle. Rotation is handled through `configChanges` so the
-  activity is not recreated.
+  while the app is idle. `onStart` records `bindService`'s own answer and
+  `onStop` releases the binding whenever one was requested — not only after
+  `onServiceConnected` ran (COR-036: the platform relaunches the activity
+  within milliseconds of its first start on the emulator, destroying it
+  before the connection arrived, and logged a leaked `ServiceConnection`
+  while keeping the service alive on the app's behalf). Rotation is handled
+  through `configChanges` so the activity is not recreated.
 - A scan request is the only thing that promotes the service. The Start
   action first checks `hasRequiredPermissions` and the adapter, then issues
   `startForegroundService` and `startScanning()`. `onStartCommand` therefore
@@ -212,9 +217,17 @@ authority.
   killed the app, the sticky restart found the permissions revoked and
   stopped the service, no crash) are observed, so REQ-ANDROID-002 is
   `VERIFIED` in full in `docs/REQUIREMENTS_LEDGER.md`; the first launch's
-  update check is observed reaching its decision and finishing.
+  update check is observed reaching its decision and finishing. Since
+  decision #95 the scan itself is observed: a virtual advertiser — a second
+  Bluetooth controller the proof connects to netsimd's HCI socket
+  (`xtask/src/hci.rs`), advertising as `bleradar-beacon` — is listed by
+  `/api/devices` with the row `bleradar-core` computed for it (RSSI,
+  distance, proximity, freshness; listed 1.0 s after the advertiser started)
+  and pruned by the core's freshness policy once it is gone (30.2 s after its
+  removal), so REQ-ANDROID-001's per-device values are observed on the
+  runtime, and no leaked `ServiceConnection` is logged.
   Still unobserved: the no-native-library status line (REQ-ANDROID-003) on
-  a non-`arm64-v8a` device (MIG-003).
+  a non-`arm64-v8a` device, and a physical radio (MIG-003).
 
 ## Verification
 
@@ -226,8 +239,8 @@ authority.
 | Cross-compile, package, sign, and inspect the APK (entries including `assets/dashboard.html` and `assets/release_manifest.txt`, DEX classes, exports), and lint's `NewApi` check that no library call exceeds the manifest's `minSdkVersion` | `cargo xtask build-apk`, `cargo xtask verify-android-live` | Android SDK build-tools, platform `android.jar`, `cmdline-tools` (`lint`), NDK, JDK | yes (`android-apk` job installs the pinned platform, build-tools and NDK) |
 | The web dashboard renders live data in a real browser engine: headless Chromium loads the committed `assets/dashboard.html` from a mock of the JSON contract and the rendered DOM must show every device in server order (escaped), more than one completed poll, and the error banner when `/api/devices` answers `500` or the wrong shape, when `/api/status` answers the wrong shape, and (with the table still rendered) when `/api/updates` answers `500`; first, the JSON field names `ApiHttpServer.*Json()` writes must equal the mock's keys and cover every property the page reads | `cargo xtask verify-dashboard-live` (the contract lock also runs as an xtask unit test inside `gates`) | a Chromium/Chrome binary (`BLERADAR_CHROMIUM`, `PATH`, or Playwright's cache) | yes (`web-dashboard` job; the runner image ships Google Chrome) |
 | The app's real `ApiHttpServer` runs on the host JVM with fixture sources, a scripted `ScanControl` and the host `bleradar-jni` library: 27 real HTTP requests must be answered as documented (the dashboard bytes, the three JSON documents byte-identical to the browser fixtures, `404`/`405`/`400`, `no-store`, exact `Content-Length`; scan control — a pause reflected by every document, an accepted start, the four documented refusals as `409`, a throwing control answered `500` with the server still up, a 64 KiB request body consumed, a body declared beyond the 64 KiB cap refused with `413` at once), then headless Chromium must render the committed dashboard from that server with Start disabled and Stop offered | `cargo xtask verify-api-live` | a JDK (`javac`/`java`) and a Chromium/Chrome binary | yes (`gates` job, after `verify-jni-live`) |
-| The committed APK on a real Android runtime: a throw-away AVD from the pinned API 34 `google_apis` x86_64 image (its ARM translation runs the arm64-only package) boots headless on KVM; the adapter is enabled and awaited, the APK installed with the runtime permissions granted, the activity launched, the loopback API forwarded; `GET /` must be the committed page byte for byte, the documents must carry their keys with `native_available` true, a start must answer `200` with `RadarScanService` promoted and its notification "BLE Radar is scanning", a stop must keep the foreground with "BLE Radar is idle", `kill -9` must be followed by a restarted service with the scan resumed, the first launch's update check must have reached its decision with its service finished (no record, no notification), `am force-stop` must end the API, a relaunch + scan + `pm revoke BLUETOOTH_SCAN` must leave no scan and no foreground service (the report names the branch the platform took), and logcat must carry no crash of the package; the AVD is deleted on every exit | `cargo xtask verify-android-emulator` (`cargo xtask android-sdk-install --emulator` installs the SDK packages) | KVM (`/dev/kvm`), the SDK's `emulator`, `platform-tools` and the pinned system image, a JDK for `avdmanager` | yes (`android-emulator` job; 2 min 33 s on the first green run — decision #93; the revocation and update-check steps added in #94, proof step 1 min 54 s) |
-| BLE scan of real advertisers, the update download/install path, and differential comparison against the oracle on a physical device | — | an ARM64 Android device with a radio (the emulator's adapter reports no devices; it ships `netsimd`, the candidate for virtual advertisers), and the original signing key for update identity | no (MIG-003, narrowed by the emulator proof; EXT-006) |
+| The committed APK on a real Android runtime: a throw-away AVD from the pinned API 34 `google_apis` x86_64 image (its ARM translation runs the arm64-only package) boots headless on KVM; the adapter is enabled and awaited, the APK installed with the runtime permissions granted, the activity launched, the loopback API forwarded; `GET /` must be the committed page byte for byte, the documents must carry their keys with `native_available` true, a start must answer `200` with `RadarScanService` promoted and its notification "BLE Radar is scanning", a stop must keep the foreground with "BLE Radar is idle", a virtual advertiser — a second controller connected to netsimd's HCI socket, advertising `bleradar-beacon` from `C0:DE:BE:AC:0D:01` — must be listed by `/api/devices` within 30 s with an RSSI and a finite distance (the Rust-computed row) and be pruned within 75 s of its removal, `kill -9` must be followed by a restarted service with the scan resumed, the first launch's update check must have reached its decision with its service finished (no record, no notification), `am force-stop` must end the API, a relaunch + scan + `pm revoke BLUETOOTH_SCAN` must leave no scan and no foreground service (the report names the branch the platform took), and logcat must carry no crash of the package and no leaked `ServiceConnection`; the AVD is deleted on every exit | `cargo xtask verify-android-emulator` (`cargo xtask android-sdk-install --emulator` installs the SDK packages) | KVM (`/dev/kvm`), the SDK's `emulator` (which ships `netsimd`, the virtual radios), `platform-tools` and the pinned system image, a JDK for `avdmanager` | yes (`android-emulator` job; 2 min 33 s on the first green run — decision #93; the revocation and update-check steps added in #94, proof step 1 min 54 s; the virtual advertiser in #95, proof step 2 min 12 s, job 4 min 00 s) |
+| BLE scan of real advertisers on a physical radio (the virtual advertiser proves the scan → Rust row path; a radio's RSSI physics is not simulated), the update download/install path, and differential comparison against the oracle on a physical device | — | an ARM64 Android device with a radio, and the original signing key for update identity | no (MIG-003, narrowed by the emulator proofs; EXT-006) |
 
 `ANDROID_HOME`/`ANDROID_SDK_ROOT` locate the SDK for the last two commands
 (`xtask/src/main.rs::discover_sdk_root`). The committed
