@@ -570,6 +570,8 @@ struct Netsim {
     source: String,
     /// The discovery file that was found, if any.
     ini: Option<PathBuf>,
+    /// What `GetVersion` answered.
+    version: String,
 }
 
 impl Netsim {
@@ -596,18 +598,26 @@ impl Netsim {
         }
         let mut failures = Vec::new();
         for (port, source) in candidates {
-            let netsim = Self {
+            let mut netsim = Self {
                 port,
                 source: source.to_string(),
                 ini: ini.clone(),
+                version: String::new(),
             };
-            match netsim.devices() {
-                Ok(_) => return Ok(netsim),
+            // GetVersion exists in every netsim release; the device list and
+            // the beacon calls are checked, and named, where they are used.
+            match netsim.call("GetVersion", &[]) {
+                Ok(response) => {
+                    netsim.version = grpc::message_field(&response, 1)?
+                        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                        .unwrap_or_default();
+                    return Ok(netsim);
+                }
                 Err(error) => failures.push(format!("127.0.0.1:{port} ({source}): {error}")),
             }
         }
         Err(format!(
-            "netsimd's frontend answers `ListDevice` on none of the candidate ports:\n{}\n-- discovery file {} --\n{}\n-- netsimd command line --\n{}\n-- listening sockets --\n{}",
+            "netsimd's frontend answers `GetVersion` on none of the candidate ports:\n{}\n-- discovery file {} --\n{}\n-- netsimd command line --\n{}\n-- listening sockets --\n{}",
             if failures.is_empty() {
                 "(no candidate: no discovery file port and no netsimd socket)".to_string()
             } else {
@@ -628,7 +638,8 @@ impl Netsim {
 
     fn describe(&self) -> String {
         format!(
-            "gRPC frontend at 127.0.0.1:{} ({}; discovery file {})",
+            "netsim {} through the gRPC frontend at 127.0.0.1:{} ({}; discovery file {})",
+            self.version,
             self.port,
             self.source,
             self.ini
@@ -653,6 +664,14 @@ impl Netsim {
                 outcome.headers_lossy()
             ));
         }
+        if let Some((code, message)) = outcome.status()
+            && code != 0
+        {
+            return Err(format!(
+                "{method}: grpc-status {code} ({}) {message:?}",
+                grpc::status_name(code)
+            ));
+        }
         match outcome.messages.len() {
             1 => Ok(outcome.messages.into_iter().next().unwrap_or_default()),
             count => Err(format!(
@@ -664,7 +683,13 @@ impl Netsim {
 
     /// `ListDevice`: the daemon's devices, readable.
     fn devices(&self) -> Result<String, String> {
-        let response = self.call("ListDevice", &[])?;
+        // `ListDevice` since 2024; releases before the rename answer
+        // UNIMPLEMENTED and know it as `GetDevices` (the same response shape).
+        let response = match self.call("ListDevice", &[]) {
+            Ok(response) => response,
+            Err(error) if error.contains("grpc-status 12 ") => self.call("GetDevices", &[])?,
+            Err(error) => return Err(error),
+        };
         let devices = netsim_devices(&response)?;
         Ok(devices
             .iter()
@@ -714,6 +739,14 @@ impl Netsim {
         }
         if let Some((code, debug)) = &outcome.goaway {
             return Err(format!("DeleteChip: GOAWAY {code} {debug:?}"));
+        }
+        if let Some((code, message)) = outcome.status()
+            && code != 0
+        {
+            return Err(format!(
+                "DeleteChip: grpc-status {code} ({}) {message:?}",
+                grpc::status_name(code)
+            ));
         }
         Ok(())
     }
@@ -1474,7 +1507,21 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             crashes
         ));
     }
-    report.push(format!("logcat: no Java or native crash of {PACKAGE}"));
+    // A binding the activity never released: the platform logs it as an
+    // error and keeps the service alive on the app's behalf (COR-036).
+    let leaks: Vec<&str> = crashes
+        .lines()
+        .filter(|line| line.contains(PACKAGE) && line.contains("ServiceConnectionLeaked"))
+        .collect();
+    if !leaks.is_empty() {
+        return Err(format!(
+            "the app leaked a ServiceConnection on the device:\n{}",
+            leaks.join("\n")
+        ));
+    }
+    report.push(format!(
+        "logcat: no Java or native crash of {PACKAGE}, no leaked ServiceConnection"
+    ));
     Ok(())
 }
 

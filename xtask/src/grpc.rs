@@ -247,6 +247,206 @@ pub fn grpc_messages(mut data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     Ok(out)
 }
 
+/// RFC 7541 Appendix A: the static table, index 1 to 61.
+const STATIC_TABLE: [(&str, &str); 61] = [
+    (":authority", ""),
+    (":method", "GET"),
+    (":method", "POST"),
+    (":path", "/"),
+    (":path", "/index.html"),
+    (":scheme", "http"),
+    (":scheme", "https"),
+    (":status", "200"),
+    (":status", "204"),
+    (":status", "206"),
+    (":status", "304"),
+    (":status", "400"),
+    (":status", "404"),
+    (":status", "500"),
+    ("accept-charset", ""),
+    ("accept-encoding", "gzip, deflate"),
+    ("accept-language", ""),
+    ("accept-ranges", ""),
+    ("accept", ""),
+    ("access-control-allow-origin", ""),
+    ("age", ""),
+    ("allow", ""),
+    ("authorization", ""),
+    ("cache-control", ""),
+    ("content-disposition", ""),
+    ("content-encoding", ""),
+    ("content-language", ""),
+    ("content-length", ""),
+    ("content-location", ""),
+    ("content-range", ""),
+    ("content-type", ""),
+    ("cookie", ""),
+    ("date", ""),
+    ("etag", ""),
+    ("expect", ""),
+    ("expires", ""),
+    ("from", ""),
+    ("host", ""),
+    ("if-match", ""),
+    ("if-modified-since", ""),
+    ("if-none-match", ""),
+    ("if-range", ""),
+    ("if-unmodified-since", ""),
+    ("last-modified", ""),
+    ("link", ""),
+    ("location", ""),
+    ("max-forwards", ""),
+    ("proxy-authenticate", ""),
+    ("proxy-authorization", ""),
+    ("range", ""),
+    ("referer", ""),
+    ("refresh", ""),
+    ("retry-after", ""),
+    ("server", ""),
+    ("set-cookie", ""),
+    ("strict-transport-security", ""),
+    ("transfer-encoding", ""),
+    ("user-agent", ""),
+    ("vary", ""),
+    ("via", ""),
+    ("www-authenticate", ""),
+];
+
+/// Reads an HPACK integer with an `n`-bit prefix; the value and the bytes
+/// consumed.
+pub fn hpack_read_int(bytes: &[u8], prefix_bits: u8) -> Option<(usize, usize)> {
+    let max = (1usize << prefix_bits) - 1;
+    let first = usize::from(*bytes.first()?) & max;
+    if first < max {
+        return Some((first, 1));
+    }
+    let mut value = max;
+    let mut shift = 0u32;
+    for (index, byte) in bytes.iter().enumerate().skip(1) {
+        value = value.checked_add((usize::from(byte & 0x7f)).checked_shl(shift)?)?;
+        if byte & 0x80 == 0 {
+            return Some((value, index + 1));
+        }
+        shift = shift.checked_add(7)?;
+    }
+    None
+}
+
+/// A best-effort HPACK decoder for one connection's header blocks: indexed
+/// fields from the static table and the entries this decoder added to its
+/// dynamic table, literal fields with raw strings; a Huffman-coded string
+/// is reported as `<huffman>` (its bytes skipped), which keeps the decoder
+/// dependency-free and is enough to read `grpc-status`/`grpc-message` as
+/// gRPC's C core sends them.
+#[derive(Debug, Default)]
+pub struct HpackDecoder {
+    dynamic: Vec<(String, String)>,
+}
+
+impl HpackDecoder {
+    fn lookup(&self, index: usize) -> Option<(String, String)> {
+        if index == 0 {
+            return None;
+        }
+        if index <= STATIC_TABLE.len() {
+            let (name, value) = STATIC_TABLE[index - 1];
+            return Some((name.to_string(), value.to_string()));
+        }
+        self.dynamic.get(index - STATIC_TABLE.len() - 1).cloned()
+    }
+
+    fn read_string(bytes: &[u8]) -> Option<(String, usize)> {
+        let huffman = bytes.first()? & 0x80 != 0;
+        let (length, used) = hpack_read_int(bytes, 7)?;
+        let raw = bytes.get(used..used + length)?;
+        let text = if huffman {
+            "<huffman>".to_string()
+        } else {
+            String::from_utf8_lossy(raw).into_owned()
+        };
+        Some((text, used + length))
+    }
+
+    /// Decodes one header block, in order; decoding stops at the first
+    /// representation it cannot follow.
+    pub fn decode(&mut self, mut block: &[u8]) -> Vec<(String, String)> {
+        let mut fields = Vec::new();
+        while let Some(&first) = block.first() {
+            let (name_bits, add) = if first & 0x80 != 0 {
+                let Some((index, used)) = hpack_read_int(block, 7) else {
+                    break;
+                };
+                block = &block[used..];
+                match self.lookup(index) {
+                    Some(field) => fields.push(field),
+                    None => break,
+                }
+                continue;
+            } else if first & 0x40 != 0 {
+                (6, true)
+            } else if first & 0x20 != 0 {
+                // A dynamic table size update: no field.
+                let Some((_, used)) = hpack_read_int(block, 5) else {
+                    break;
+                };
+                block = &block[used..];
+                continue;
+            } else {
+                (4, false)
+            };
+            let Some((index, used)) = hpack_read_int(block, name_bits) else {
+                break;
+            };
+            block = &block[used..];
+            let name = if index == 0 {
+                let Some((name, used)) = Self::read_string(block) else {
+                    break;
+                };
+                block = &block[used..];
+                name
+            } else {
+                match self.lookup(index) {
+                    Some((name, _)) => name,
+                    None => break,
+                }
+            };
+            let Some((value, used)) = Self::read_string(block) else {
+                break;
+            };
+            block = &block[used..];
+            if add {
+                self.dynamic.insert(0, (name.clone(), value.clone()));
+            }
+            fields.push((name, value));
+        }
+        fields
+    }
+}
+
+/// The name gRPC gives a status code.
+pub fn status_name(code: u32) -> &'static str {
+    match code {
+        0 => "OK",
+        1 => "CANCELLED",
+        2 => "UNKNOWN",
+        3 => "INVALID_ARGUMENT",
+        4 => "DEADLINE_EXCEEDED",
+        5 => "NOT_FOUND",
+        6 => "ALREADY_EXISTS",
+        7 => "PERMISSION_DENIED",
+        8 => "RESOURCE_EXHAUSTED",
+        9 => "FAILED_PRECONDITION",
+        10 => "ABORTED",
+        11 => "OUT_OF_RANGE",
+        12 => "UNIMPLEMENTED",
+        13 => "INTERNAL",
+        14 => "UNAVAILABLE",
+        15 => "DATA_LOSS",
+        16 => "UNAUTHENTICATED",
+        _ => "unknown",
+    }
+}
+
 /// What one unary call yielded.
 #[derive(Debug, Default)]
 pub struct Unary {
@@ -261,6 +461,33 @@ pub struct Unary {
 }
 
 impl Unary {
+    /// The decoded header fields (headers, then trailers).
+    pub fn fields(&self) -> Vec<(String, String)> {
+        let mut decoder = HpackDecoder::default();
+        self.header_blocks
+            .iter()
+            .flat_map(|block| decoder.decode(block))
+            .collect()
+    }
+
+    /// The call's `grpc-status` and `grpc-message`, when the trailers carry
+    /// them in a form the decoder reads.
+    pub fn status(&self) -> Option<(u32, String)> {
+        let fields = self.fields();
+        let code = fields
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "grpc-status")
+            .and_then(|(_, value)| value.parse().ok())?;
+        let message = fields
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "grpc-message")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        Some((code, message))
+    }
+
     /// The printable bytes of the header blocks (literal header names and
     /// values such as `grpc-status`/`grpc-message` show through).
     pub fn headers_lossy(&self) -> String {
@@ -511,6 +738,64 @@ mod tests {
         assert!(grpc_messages(&one[..6]).is_err());
         assert!(grpc_messages(&[1, 0, 0, 0, 0]).is_err(), "compressed");
         assert!(grpc_messages(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn hpack_blocks_decode_literals_indexes_and_the_dynamic_table() {
+        // RFC 7541 C.2.1: literal with incremental indexing, new name.
+        let mut decoder = HpackDecoder::default();
+        let block = [
+            0x40, 0x0a, b'c', b'u', b's', b't', b'o', b'm', b'-', b'k', b'e', b'y', 0x0d, b'c',
+            b'u', b's', b't', b'o', b'm', b'-', b'h', b'e', b'a', b'd', b'e', b'r',
+        ];
+        assert_eq!(
+            decoder.decode(&block),
+            vec![("custom-key".to_string(), "custom-header".to_string())]
+        );
+        // The entry now sits at dynamic index 62; C.2.4: `:method: GET` is static index 2.
+        assert_eq!(
+            decoder.decode(&[0x82, 0xbe]),
+            vec![
+                (":method".to_string(), "GET".to_string()),
+                ("custom-key".to_string(), "custom-header".to_string())
+            ]
+        );
+        // C.2.2: literal without indexing, new name; C.2.3: never indexed.
+        let mut fresh = HpackDecoder::default();
+        assert_eq!(
+            fresh.decode(&[
+                0x00, 0x05, b':', b'p', b'a', b't', b'h', 0x03, b'a', b'b', b'c'
+            ]),
+            vec![(":path".to_string(), "abc".to_string())]
+        );
+        assert_eq!(
+            fresh.decode(&[
+                0x10, 0x08, b'p', b'a', b's', b's', b'w', b'o', b'r', b'd', 0x01, b'x'
+            ]),
+            vec![("password".to_string(), "x".to_string())]
+        );
+        // What gRPC's C core sent netsimd's trailers as: literals with
+        // incremental indexing on static index 31 (content-type) and new names.
+        let trailers = [
+            0x5f, 0x10, b'a', b'p', b'p', b'l', b'i', b'c', b'a', b't', b'i', b'o', b'n', b'/',
+            b'g', b'r', b'p', b'c', 0x40, 0x0b, b'g', b'r', b'p', b'c', b'-', b's', b't', b'a',
+            b't', b'u', b's', 0x02, b'1', b'2', 0x40, 0x0c, b'g', b'r', b'p', b'c', b'-', b'm',
+            b'e', b's', b's', b'a', b'g', b'e', 0x00,
+        ];
+        let unary = Unary {
+            header_blocks: vec![trailers.to_vec()],
+            ..Unary::default()
+        };
+        assert_eq!(unary.status(), Some((12, String::new())));
+        assert_eq!(status_name(12), "UNIMPLEMENTED");
+        // A Huffman-coded value is skipped, not decoded; a size update is no field.
+        let mut huff = HpackDecoder::default();
+        assert_eq!(
+            huff.decode(&[0x3f, 0xe1, 0x1f, 0x00, 0x01, b'a', 0x82, 0xff, 0xff]),
+            vec![("a".to_string(), "<huffman>".to_string())]
+        );
+        assert_eq!(hpack_read_int(&[0x1f, 0x9a, 0x0a], 5), Some((1337, 3)));
+        assert_eq!(hpack_read_int(&[], 5), None);
     }
 
     #[test]
