@@ -885,7 +885,9 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
     // and no "Checking for updates..." notification left behind.
     let update_log = adb.shell_lenient("logcat -d -s UpdateCheckService:* UpdateManager:*");
     let decision = update_decision_logged(&update_log).ok_or_else(|| {
-        format!("the update check did not reach a decision on the first launch; its log:\n{update_log}")
+        format!(
+            "the update check did not reach a decision on the first launch; its log:\n{update_log}"
+        )
     })?;
     let update_lines = update_log
         .lines()
@@ -898,7 +900,10 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         ));
     }
     let notifications = notification_strings(&adb.shell_lenient("dumpsys notification --noredact"));
-    if notifications.iter().any(|title| title == UPDATE_NOTIFICATION_TITLE) {
+    if notifications
+        .iter()
+        .any(|title| title == UPDATE_NOTIFICATION_TITLE)
+    {
         return Err(format!(
             "the \"{UPDATE_NOTIFICATION_TITLE}\" notification outlived the update check; notifications: {notifications:?}"
         ));
@@ -1231,7 +1236,10 @@ mod tests {
             update_decision_logged("D UpdateCheckService: Update decision: 3 (available=1)"),
             Some(3)
         );
-        assert_eq!(update_decision_logged("D UpdateCheckService: created"), None);
+        assert_eq!(
+            update_decision_logged("D UpdateCheckService: created"),
+            None
+        );
         assert_eq!(update_decision_logged(""), None);
 
         let ps = "    PID    PPID COMMAND         COMMAND\n\

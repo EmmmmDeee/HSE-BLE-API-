@@ -1297,7 +1297,11 @@ fn cmd_android_sdk_install(args: &[String]) -> Result<(), String> {
 
     let incomplete: Vec<&String> = packages
         .iter()
-        .filter(|package| !sdk_package_dir(&sdk_root, package).join("package.xml").is_file())
+        .filter(|package| {
+            !sdk_package_dir(&sdk_root, package)
+                .join("package.xml")
+                .is_file()
+        })
         .collect();
     if !incomplete.is_empty() {
         return Err(format!(
@@ -1318,7 +1322,11 @@ fn cmd_android_sdk_install(args: &[String]) -> Result<(), String> {
             discover_ndk_root(&sdk_root)?.display().to_string(),
         ],
         SdkPackageSet::SystemImage => {
-            vec![discover_arm64_system_image(&sdk_root)?.display().to_string()]
+            vec![
+                discover_arm64_system_image(&sdk_root)?
+                    .display()
+                    .to_string(),
+            ]
         }
         SdkPackageSet::Emulator => ["emulator/emulator", "platform-tools/adb"]
             .iter()
@@ -1331,7 +1339,8 @@ fn cmd_android_sdk_install(args: &[String]) -> Result<(), String> {
                 }
             })
             .chain(std::iter::once({
-                let image = sdk_package_dir(&sdk_root, &emulator_image_package()).join("system.img");
+                let image =
+                    sdk_package_dir(&sdk_root, &emulator_image_package()).join("system.img");
                 if image.is_file() {
                     Ok(image.display().to_string())
                 } else {
@@ -3471,7 +3480,10 @@ mod tests {
             sdk_package_dir(sdk, "system-images;android-34;google_apis;x86_64"),
             PathBuf::from("/sdk/system-images/android-34/google_apis/x86_64")
         );
-        assert_eq!(sdk_package_dir(sdk, "emulator"), PathBuf::from("/sdk/emulator"));
+        assert_eq!(
+            sdk_package_dir(sdk, "emulator"),
+            PathBuf::from("/sdk/emulator")
+        );
     }
 
     #[test]

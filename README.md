@@ -416,7 +416,8 @@ idle", a restarted service with the scan resumed after `kill -9` of the app
 process, no Java or native crash of the package in logcat, and the API
 unreachable after `am force-stop`; the AVD is deleted on every exit. It needs
 `/dev/kvm`, the SDK's `emulator`, `platform-tools` and the pinned image
-(`cargo xtask android-sdk-packages --emulator` prints them for `sdkmanager`)
+(`cargo xtask android-sdk-install --emulator` installs them: licenses
+accepted, `sdkmanager` retried, every package and the tools checked)
 and a JDK; CI's `android-emulator` job runs it on every pull request and
 every push to `main` (2 min 33 s on the first green run).
 
@@ -450,6 +451,7 @@ cargo xtask build-apk              # cross-compile + package + sign the Android 
 cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/export checks
 cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator (needs KVM + SDK emulator)
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
+cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)
 cargo xtask audit                  # cargo audit, offline, vendored advisory db
 cargo xtask deny                   # cargo deny check, offline, vendored advisory db
 cargo xtask gates                  # every gate, one command

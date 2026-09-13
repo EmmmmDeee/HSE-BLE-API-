@@ -130,9 +130,11 @@ jobs:
     # permissions granted, the app is launched, and the loopback API is
     # driven through adb forward — the dashboard bytes, the documents, scan
     # control, the foreground service and its notification, the START_STICKY
-    # restart after kill -9, and the API ending with am force-stop
-    # (docs/AUTONOMOUS_DECISIONS.md #93). Needs KVM, which the runner exposes
-    # once the udev rule below opens /dev/kvm to the runner user.
+    # restart after kill -9, the first launch's update check finishing, the
+    # API ending with am force-stop, and a runtime permission revoked while
+    # scanning (docs/AUTONOMOUS_DECISIONS.md #93, #94). Needs KVM, which the
+    # runner exposes once the udev rule below opens /dev/kvm to the runner
+    # user.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

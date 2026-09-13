@@ -246,8 +246,12 @@ API-33 `readAllBytes()` call on this minSdk-26 app — COR-028), and the
 committed APK is the #93 build (SHA-256 `f67958c8…afca`, 406,094 bytes; the
 native library byte-identical to the #87 build). The SDK set that build uses
 is pinned once, in `xtask/src/main.rs` (`PINNED_*`), printed by
-`cargo xtask android-sdk-packages` for CI's `sdkmanager`, and preferred by
-xtask's discovery over any other version a machine carries (decision #90).
+`cargo xtask android-sdk-packages` and installed by
+`cargo xtask android-sdk-install` (licenses accepted, `sdkmanager` retried
+after a truncated download failed CI once, every package checked for its
+`package.xml`, the pinned tools checked discoverable — what CI's three
+install steps run, decision #94), and preferred by xtask's discovery over
+any other version a machine carries (decision #90).
 
 Reproducibility, observed 2026-09-10 by rebuilding the then-committed APK on
 a different host (build-tools 37.0.0, NDK 27.3.13750724, platform
