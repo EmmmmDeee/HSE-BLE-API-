@@ -297,7 +297,17 @@ fn tool(sdk_root: &Path, relative: &str) -> Result<PathBuf, String> {
     }
 }
 
-fn create_avd(sdk_root: &Path, avdmanager: &Path, image_package: &str) -> Result<(), String> {
+/// Creates the AVD under `avd_home`, which every tool is pointed at
+/// explicitly: `avdmanager` and the emulator otherwise resolve the AVD
+/// directory differently (`ANDROID_USER_HOME`/`XDG_CONFIG_HOME` versus
+/// `$HOME/.android/avd`), which on a CI runner left the emulator unable to
+/// find the AVD that had just been created. Returns the tool's output.
+fn create_avd(
+    sdk_root: &Path,
+    avdmanager: &Path,
+    avd_home: &Path,
+    image_package: &str,
+) -> Result<String, String> {
     let mut command = Command::new(avdmanager);
     command
         .args([
@@ -311,6 +321,7 @@ fn create_avd(sdk_root: &Path, avdmanager: &Path, image_package: &str) -> Result
         ])
         .env("ANDROID_SDK_ROOT", sdk_root)
         .env("ANDROID_HOME", sdk_root)
+        .env("ANDROID_AVD_HOME", avd_home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -324,28 +335,44 @@ fn create_avd(sdk_root: &Path, avdmanager: &Path, image_package: &str) -> Result
     let output = child
         .wait_with_output()
         .map_err(|e| format!("waiting for avdmanager: {e}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     if !output.status.success() {
         return Err(format!(
-            "avdmanager create avd failed with {}: {}{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            "avdmanager create avd failed with {}: {text}",
+            output.status
         ));
     }
-    Ok(())
+    let ini = avd_home.join(format!("{AVD_NAME}.ini"));
+    if !ini.is_file() {
+        return Err(format!(
+            "avdmanager reported success but {} does not exist: {text}",
+            ini.display()
+        ));
+    }
+    Ok(text)
 }
 
-fn delete_avd(sdk_root: &Path, avdmanager: &Path) {
+fn delete_avd(sdk_root: &Path, avdmanager: &Path, avd_home: &Path) {
     let _ = Command::new(avdmanager)
         .args(["delete", "avd", "--name", AVD_NAME])
         .env("ANDROID_SDK_ROOT", sdk_root)
         .env("ANDROID_HOME", sdk_root)
+        .env("ANDROID_AVD_HOME", avd_home)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
 }
 
-fn launch_emulator(sdk_root: &Path, emulator: &Path, log: &Path) -> Result<Child, String> {
+fn launch_emulator(
+    sdk_root: &Path,
+    emulator: &Path,
+    avd_home: &Path,
+    log: &Path,
+) -> Result<Child, String> {
     let stdout = fs::File::create(log).map_err(|e| format!("creating {}: {e}", log.display()))?;
     let stderr = stdout
         .try_clone()
@@ -373,6 +400,7 @@ fn launch_emulator(sdk_root: &Path, emulator: &Path, log: &Path) -> Result<Child
         ])
         .env("ANDROID_SDK_ROOT", sdk_root)
         .env("ANDROID_HOME", sdk_root)
+        .env("ANDROID_AVD_HOME", avd_home)
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
@@ -742,17 +770,24 @@ pub fn run(config: &Config) -> Result<(), String> {
         return Err(format!("APK not found: {}", config.apk.display()));
     }
     let work = crate::xtask_temp_dir("verify-android-emulator");
-    crate::recreate_dirs(&[&work])?;
+    let avd_home = work.join("avd");
+    crate::recreate_dirs(&[&work, &avd_home])?;
     let log = work.join("emulator.log");
 
     println!(
         "== avdmanager create avd {AVD_NAME} ({}) ==",
         config.image_package
     );
-    create_avd(config.sdk_root, &avdmanager, config.image_package)?;
+    let created = create_avd(
+        config.sdk_root,
+        &avdmanager,
+        &avd_home,
+        config.image_package,
+    )?;
+    println!("{}", created.trim());
 
     println!("== booting the emulator (headless, -accel on) ==");
-    let mut emulator = launch_emulator(config.sdk_root, &emulator_exe, &log)?;
+    let mut emulator = launch_emulator(config.sdk_root, &emulator_exe, &avd_home, &log)?;
     let adb = Adb {
         exe: adb_exe,
         serial: format!("emulator-{CONSOLE_PORT}"),
@@ -778,7 +813,7 @@ pub fn run(config: &Config) -> Result<(), String> {
     }
     println!("== shutting the emulator down ==");
     shutdown(&adb, &mut emulator);
-    delete_avd(config.sdk_root, &avdmanager);
+    delete_avd(config.sdk_root, &avdmanager, &avd_home);
     outcome?;
     println!("== verify-android-emulator: report ==");
     for line in &report {
