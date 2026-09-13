@@ -879,34 +879,57 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
 
     println!("== the update check the first launch started ==");
     // MainActivity.onStart starts UpdateCheckService (never checked before on
-    // this fresh install): it must have been promoted without the platform's
-    // foreground timeout killing the app (the crash log below would show
-    // that), assessed the bundled manifest, and finished — no service record
-    // and no "Checking for updates..." notification left behind.
-    let update_log = adb.shell_lenient("logcat -d -s UpdateCheckService:* UpdateManager:*");
-    let decision = update_decision_logged(&update_log).ok_or_else(|| {
-        format!(
-            "the update check did not reach a decision on the first launch; its log:\n{update_log}"
-        )
-    })?;
-    let update_lines = update_log
-        .lines()
-        .filter(|line| line.contains("UpdateCheckService") || line.contains("UpdateManager"))
-        .count();
-    let services = adb.shell_lenient(&format!("dumpsys activity services {PACKAGE}"));
-    if let Some(record) = service_record(&services, UPDATE_SERVICE) {
-        return Err(format!(
-            "UpdateCheckService is still running after its check:\n{record}"
-        ));
-    }
-    let notifications = notification_strings(&adb.shell_lenient("dumpsys notification --noredact"));
-    if notifications
-        .iter()
-        .any(|title| title == UPDATE_NOTIFICATION_TITLE)
-    {
-        return Err(format!(
-            "the \"{UPDATE_NOTIFICATION_TITLE}\" notification outlived the update check; notifications: {notifications:?}"
-        ));
+    // this fresh install) through startForegroundService, asynchronously: it
+    // must have been promoted without the platform's foreground timeout
+    // killing the app (the crash log below would show that), assessed the
+    // bundled manifest, and finished — no service record and no "Checking
+    // for updates..." notification left. Both are awaited, and every dump is
+    // a fallible command, so a failed adb call never reads as "nothing left".
+    let decision_awaited = Instant::now();
+    let (decision, update_lines) = loop {
+        let update_log = adb.shell("logcat -d -s UpdateCheckService:* UpdateManager:*")?;
+        if let Some(decision) = update_decision_logged(&update_log) {
+            let lines = update_log
+                .lines()
+                .filter(|line| {
+                    line.contains("UpdateCheckService") || line.contains("UpdateManager")
+                })
+                .count();
+            break (decision, lines);
+        }
+        if decision_awaited.elapsed() > PROMOTION_TIMEOUT {
+            return Err(format!(
+                "the update check did not reach a decision within {}s; its log:\n{update_log}",
+                PROMOTION_TIMEOUT.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(500));
+    };
+    let finish_awaited = Instant::now();
+    loop {
+        let services = adb.shell(&format!("dumpsys activity services {PACKAGE}"))?;
+        let notifications = notification_strings(&adb.shell("dumpsys notification --noredact")?);
+        let record = service_record(&services, UPDATE_SERVICE);
+        let notified = notifications
+            .iter()
+            .any(|title| title == UPDATE_NOTIFICATION_TITLE);
+        if record.is_none() && !notified {
+            break;
+        }
+        if finish_awaited.elapsed() > PROMOTION_TIMEOUT {
+            return Err(format!(
+                "UpdateCheckService did not finish within {}s of its decision: service record {}, \"{UPDATE_NOTIFICATION_TITLE}\" notification {}\n{}",
+                PROMOTION_TIMEOUT.as_secs(),
+                if record.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                },
+                if notified { "present" } else { "absent" },
+                record.unwrap_or_default()
+            ));
+        }
+        thread::sleep(Duration::from_millis(500));
     }
     report.push(format!(
         "update check: ran on the first launch to decision {decision} ({update_lines} log lines) and the dataSync service finished — no record, no notification left"
@@ -939,21 +962,33 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
     let mut settled = None;
     let mut last = String::new();
     while revoked.elapsed() < RESTART_TIMEOUT {
-        let current = adb.shell_lenient(&format!("pidof {PACKAGE}"));
-        killed = killed || current.trim().parse::<u32>().ok() != Some(pid);
-        let services = adb.shell_lenient(&format!("dumpsys activity services {PACKAGE}"));
+        // Every probe is a fallible command: a transport failure is an error,
+        // never "killed" or "no service". `pidof` itself exits 1 with no
+        // output when nothing matches, hence the `||`.
+        let current = adb.shell(&format!("pidof {PACKAGE} || echo none"))?;
+        killed = killed
+            || !current
+                .split_whitespace()
+                .any(|candidate| candidate == pid.to_string());
+        let services = adb.shell(&format!("dumpsys activity services {PACKAGE}"))?;
         let foreground = service_is_foreground(&services, SERVICE);
-        let idle = match get(port, "/api/status") {
+        // The API must be gone (no answer after the request's own retries) or
+        // answering an idle state; any other answer keeps the loop going.
+        let api = match get(port, "/api/status") {
             Ok(response) if response.status == 200 => {
-                json_has(&body_text(&response), "scanning", "false").then_some("idle")
+                json_has(&body_text(&response), "scanning", "false").then_some("answering idle")
             }
-            _ => Some("unreachable"),
+            Ok(response) => {
+                last = format!("status {}", response.status);
+                None
+            }
+            Err(_) => Some("unreachable"),
         };
-        if killed && foreground != Some(true) && idle.is_some() {
-            settled = idle;
+        if killed && foreground != Some(true) && api.is_some() {
+            settled = api;
             break;
         }
-        last = format!("killed={killed}, isForeground={foreground:?}, api={idle:?}");
+        last = format!("killed={killed}, isForeground={foreground:?}, api={api:?} ({last})");
         thread::sleep(Duration::from_secs(2));
     }
     let settled = settled.ok_or_else(|| {
@@ -962,22 +997,33 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             RESTART_TIMEOUT.as_secs()
         )
     })?;
-    // Give a pending sticky restart its chance to run the branch, then read
-    // the service's own log for the outcome.
-    thread::sleep(Duration::from_secs(10));
-    let service_log = adb.shell_lenient("logcat -d -s RadarScanService:*");
-    let services = adb.shell_lenient(&format!("dumpsys activity services {PACKAGE}"));
-    if service_is_foreground(&services, SERVICE) == Some(true) {
-        return Err(format!(
-            "RadarScanService is back in the foreground without {REVOKED_PERMISSION}:\n{services}"
-        ));
-    }
-    let restart = if service_log.contains(REVOKED_RESTART_LOG) {
+    // A sticky restart may still be pending (its delay grows with each
+    // restart): watch the service's own log for the branch through the rest
+    // of the window, and classify only once the line appears or the window
+    // has passed. A foreground service at any point is a regression.
+    let mut services;
+    let restarted_and_stopped = loop {
+        let service_log = adb.shell("logcat -d -s RadarScanService:*")?;
+        services = adb.shell(&format!("dumpsys activity services {PACKAGE}"))?;
+        if service_is_foreground(&services, SERVICE) == Some(true) {
+            return Err(format!(
+                "RadarScanService is back in the foreground without {REVOKED_PERMISSION}:\n{services}"
+            ));
+        }
+        if service_log.contains(REVOKED_RESTART_LOG) {
+            break true;
+        }
+        if revoked.elapsed() >= RESTART_TIMEOUT {
+            break false;
+        }
+        thread::sleep(Duration::from_secs(2));
+    };
+    let restart = if restarted_and_stopped {
         "the sticky restart found the permissions revoked and stopped the service"
     } else if service_record(&services, SERVICE).is_some() {
         "the service record is back (an activity relaunch re-bound it) without a scan"
     } else {
-        "the platform did not restart the service"
+        "the platform did not restart the service within the window"
     };
     report.push(format!(
         "pm revoke {REVOKED_PERMISSION}: the platform killed pid {pid}; {restart}; the API is {settled} {:.1}s after the revocation",

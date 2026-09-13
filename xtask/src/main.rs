@@ -1328,26 +1328,31 @@ fn cmd_android_sdk_install(args: &[String]) -> Result<(), String> {
                     .to_string(),
             ]
         }
-        SdkPackageSet::Emulator => ["emulator/emulator", "platform-tools/adb"]
-            .iter()
-            .map(|relative| {
-                let tool = sdk_root.join(relative);
-                if tool.is_file() {
-                    Ok(tool.display().to_string())
-                } else {
-                    Err(format!("{} is missing after the install", tool.display()))
-                }
-            })
-            .chain(std::iter::once({
-                let image =
-                    sdk_package_dir(&sdk_root, &emulator_image_package()).join("system.img");
-                if image.is_file() {
-                    Ok(image.display().to_string())
-                } else {
-                    Err(format!("{} is missing after the install", image.display()))
-                }
-            }))
-            .collect::<Result<Vec<_>, _>>()?,
+        // avdmanager ships with cmdline-tools (where sdkmanager itself lives),
+        // not with this set, but the proof needs it as much as the emulator.
+        SdkPackageSet::Emulator => [
+            "emulator/emulator",
+            "platform-tools/adb",
+            "cmdline-tools/latest/bin/avdmanager",
+        ]
+        .iter()
+        .map(|relative| {
+            let tool = sdk_root.join(relative);
+            if tool.is_file() {
+                Ok(tool.display().to_string())
+            } else {
+                Err(format!("{} is missing after the install", tool.display()))
+            }
+        })
+        .chain(std::iter::once({
+            let image = sdk_package_dir(&sdk_root, &emulator_image_package()).join("system.img");
+            if image.is_file() {
+                Ok(image.display().to_string())
+            } else {
+                Err(format!("{} is missing after the install", image.display()))
+            }
+        }))
+        .collect::<Result<Vec<_>, _>>()?,
     };
     println!(
         "android-sdk-install: {} complete and discoverable: {}",
