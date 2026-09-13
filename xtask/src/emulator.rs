@@ -414,6 +414,22 @@ fn wait_for_boot(adb: &Adb, emulator: &mut Child, log: &Path) -> Result<Duration
     }
 }
 
+/// Waits for the device to be back in the `device` state with its boot
+/// property set (after `adb root` restarts adbd).
+fn wait_until_online(adb: &Adb, timeout: Duration) -> Result<(), String> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if adb.is_online() && boot_completed(&adb.shell_lenient("getprop sys.boot_completed")) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+    Err(format!(
+        "the device did not come back within {}s after adb root",
+        timeout.as_secs()
+    ))
+}
+
 fn shutdown(adb: &Adb, emulator: &mut Child) {
     let _ = adb.run(&["emu", "kill"]);
     let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
@@ -456,7 +472,9 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
     // Root first, so the forward below survives adbd's restart.
     println!("== adb root ==");
     let root = adb.run(&["root"])?;
-    adb.run(&["wait-for-device"])?;
+    // adbd restarts: the device drops off for a moment before it is back.
+    thread::sleep(Duration::from_secs(3));
+    wait_until_online(adb, Duration::from_secs(60))?;
     report.push(format!("adb root: {}", root.trim()));
     let _ = adb.shell_lenient("input keyevent 82");
     let bluetooth = adb.shell_lenient("svc bluetooth enable; settings get global bluetooth_on");
