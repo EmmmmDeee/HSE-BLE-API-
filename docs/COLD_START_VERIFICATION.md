@@ -80,9 +80,12 @@ pull request and every push to `main`), and once more from the decision #89 sour
 in 12 s warm; APK SHA-256 `db4fb288…61b8`, 406,094 bytes, the first build to
 carry `assets/`), then from the decision #90 sources (exit 0; APK SHA-256
 `ad14aff1…536b`, 406,094 bytes; `classes.dex` 64,948 bytes; the pinned SDK
-set chosen by xtask's discovery without a fallback notice), and from the
+set chosen by xtask's discovery without a fallback notice), from the
 decision #91 sources (exit 0; APK SHA-256 `3559634d…353e`, 406,094 bytes;
-`classes.dex` 67,680 bytes with the server's seams and `Json` added):
+`classes.dex` 67,680 bytes with the server's seams and `Json` added), and
+from the decision #92 sources (exit 0 in 11 s warm; APK SHA-256
+`b1d051b2…b854`, 406,094 bytes; `classes.dex` 70,224 bytes with scan
+control added):
 
 | Check | Outcome |
 |---|---|
@@ -93,7 +96,7 @@ decision #91 sources (exit 0; APK SHA-256 `3559634d…353e`, 406,094 bytes;
 | Required DEX classes (MainActivity, NativeRadar, RadarScanService, BleScanEngine, ApiHttpServer) | **Validated** |
 | Android lint `NewApi`: no `java.*`/`android.*` call newer than `minSdkVersion` 26 | **Validated** (2026-09-12, "No issues found."; the pre-#89 sources failed on `InputStream#readAllBytes` at API 33 — COR-028) |
 | The web dashboard renders live data in headless Chromium against a mock of the JSON contract (`cargo xtask verify-dashboard-live`) | **Validated** (2026-09-12, Chromium 141: healthy `polls=4`, every device in order and escaped; a `500` or wrong-shape `/api/devices`, a wrong-shape `/api/status` and a `500` `/api/updates` each show the banner (five scenarios); run by the `web-dashboard` CI job) |
-| The app's real `ApiHttpServer` on the host JVM: ten real HTTP requests answered as documented, the three JSON documents byte-identical to the browser fixtures, the committed dashboard rendered from that server in headless Chromium (`cargo xtask verify-api-live`) | **Validated** (2026-09-12: 10 requests, `polls=4`, 5.5 s; run by the `gates` CI job) |
+| The app's real `ApiHttpServer` on the host JVM: 26 real HTTP requests answered as documented — the three JSON documents byte-identical to the browser fixtures; scan control through a scripted `ScanControl` paused and resumed with every document reflecting it, refused four ways as `409`, a throwing control answered `500` with the server still up, a 64 KiB request body consumed before a clean close — and the committed dashboard rendered from that server in headless Chromium with Start disabled and Stop offered (`cargo xtask verify-api-live`) | **Validated** (2026-09-13: 26 requests, `polls=4`, 3.0 s; run by the `gates` CI job) |
 | JNI export contract derived from `NativeRadar.java` (`check-jni-contract`: every `static native` ↔ one `Java_com_hse_bleradar_NativeRadar_*` export, no orphans) | **Validated** (2026-09-11, 25 ↔ 25 against the then-committed APK's `lib/arm64-v8a/libbleradar_jni.so`, SHA-256 `29d89f14…e8de02`; 2026-09-12, 27 ↔ 27 against the regenerated APK's `.so`, SHA-256 `c9d9e99a…d4b84`, then 31 ↔ 31 against the `.so` regenerated for decision #87, SHA-256 `e27e42ac…9253`) |
 | `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=8, `linked-natives=25`, 2026-09-11; abi=9, `linked-natives=27`, then abi=10, `linked-natives=31` with the string bridge exercised through real Java strings, 2026-09-12; run by CI) |
 | On-device install / BLE scan / original-oracle differential | **Unverified** — no emulator, physical device, or original signing key (MIG-003) |

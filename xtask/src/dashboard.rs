@@ -8,8 +8,9 @@
 //! browser-automation library is needed: the browser is an external tool
 //! invoked like the SDK, the JDK and qemu are, and the tooling stays
 //! dependency-free. Five scenarios run — a healthy API (every fixture device
-//! must be rendered in server order, escaped, and the page must have polled
-//! more than once), `/api/devices` answering `500`, `/api/devices` answering
+//! must be rendered in server order, escaped, the page must have polled
+//! more than once, and the Start button must be disabled with Stop offered
+//! while the server reports scanning), `/api/devices` answering `500`, `/api/devices` answering
 //! `200` with the wrong shape, `/api/status` answering an array, and
 //! `/api/updates` answering `500` — and every degraded one must surface the
 //! error banner rather than a blank or silently stale page (with the device
@@ -46,6 +47,8 @@ const BROWSER_TIMEOUT: Duration = Duration::from_secs(90);
 /// The mock closes a connection that sends no request within this time
 /// (Chromium preconnects speculatively).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most of a declared request body the mock skips.
+const MAX_SKIPPED_BODY: usize = 64 * 1024;
 
 /// Executables tried on `PATH`, in order, when `BLERADAR_CHROMIUM` is unset.
 /// Google Chrome comes first because on GitHub's Ubuntu runner image
@@ -85,6 +88,16 @@ pub const STATUS_JSON: &str =
 /// `/api/updates` as `ApiHttpServer.updatesJson` writes it.
 pub const UPDATES_JSON: &str =
     r#"{"last_check_ms":1757600000000,"next_check_ms":1757686400000,"retry_count":2}"#;
+/// `POST /api/scan/start` as `ApiHttpServer.scanJson` writes it once the
+/// control accepted: the live scanning state.
+pub const SCAN_STARTED_JSON: &str = r#"{"scanning":true}"#;
+/// `POST /api/scan/stop` as `ApiHttpServer.scanJson` writes it.
+pub const SCAN_STOPPED_JSON: &str = r#"{"scanning":false}"#;
+/// `404` as `ApiHttpServer.errorJson` writes it — the shape of every error
+/// body, including a refused start's reason.
+pub const NOT_FOUND_JSON: &str = r#"{"error":"Not found"}"#;
+/// `405` as `ApiHttpServer.errorJson` writes it.
+pub const METHOD_NOT_ALLOWED_JSON: &str = r#"{"error":"Method not allowed"}"#;
 
 /// What the mock answers; every scenario but [`Scenario::Healthy`] breaks
 /// exactly one endpoint and the page must show the error banner for it.
@@ -162,19 +175,18 @@ const JSON: &str = "application/json";
 const HTML: &str = "text/html; charset=utf-8";
 
 /// Routes one request exactly as `ApiHttpServer.respond` does (unknown path
-/// → `404`, known path with a non-`GET` method → `405`), with `/api/devices`
-/// shaped by the scenario.
+/// → `404`, known path with the wrong method → `405`: the documents are
+/// `GET`, scan control is `POST`), with `/api/devices` shaped by the
+/// scenario. Scan control answers as an accepted request does; the refusals
+/// are exercised against the real server by `verify-api-live`.
 pub fn route(scenario: Scenario, method: &str, path: &str, dashboard: &[u8]) -> Response {
-    let known = matches!(path, "/" | "/api/devices" | "/api/status" | "/api/updates");
-    if !known {
-        return json(404, "Not Found", r#"{"error":"Not found"}"#);
-    }
-    if method != "GET" {
-        return json(
-            405,
-            "Method Not Allowed",
-            r#"{"error":"Method not allowed"}"#,
-        );
+    let expected_method = match path {
+        "/" | "/api/devices" | "/api/status" | "/api/updates" => "GET",
+        "/api/scan/start" | "/api/scan/stop" => "POST",
+        _ => return json(404, "Not Found", NOT_FOUND_JSON),
+    };
+    if method != expected_method {
+        return json(405, "Method Not Allowed", METHOD_NOT_ALLOWED_JSON);
     }
     match path {
         "/api/devices" => match scenario {
@@ -190,6 +202,8 @@ pub fn route(scenario: Scenario, method: &str, path: &str, dashboard: &[u8]) -> 
             Scenario::UpdatesError => json(500, "Internal Server Error", r#"{"error":"boom"}"#),
             _ => json(200, "OK", UPDATES_JSON),
         },
+        "/api/scan/start" => json(200, "OK", SCAN_STARTED_JSON),
+        "/api/scan/stop" => json(200, "OK", SCAN_STOPPED_JSON),
         _ => Response {
             status: 200,
             reason: "OK",
@@ -316,12 +330,23 @@ fn serve_connection(
     if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
         return; // A speculative connection that never sent a request.
     }
-    // Drain the headers; no route reads them.
+    // Drain the headers and skip a declared body, as the app does; no route
+    // reads either.
     let mut header = String::new();
-    while reader.read_line(&mut header).unwrap_or(0) > 0 && header.trim_end().is_empty().eq(&false)
-    {
+    let mut body_length = 0usize;
+    loop {
         header.clear();
+        if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim_end().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            body_length = value.trim().parse().unwrap_or(0);
+        }
     }
+    let mut body = vec![0u8; body_length.min(MAX_SKIPPED_BODY)];
+    let _ = reader.read_exact(&mut body);
     let response = match parse_request_line(request_line.trim_end()) {
         Some((method, path)) => {
             if let Ok(mut log) = requests.lock() {
@@ -586,6 +611,9 @@ fn tail(text: &str, lines: usize) -> String {
 pub const HEALTHY_MARKERS: &[&str] = &[
     r#"data-state="live""#,
     r#">Scanning<"#,
+    // Start is disabled while the server reports scanning (Chromium
+    // serializes the property as `disabled=""`); Stop must stay offered.
+    r#"id="start" data-action="start" type="button" disabled="""#,
     "native core: loaded",
     ">4 devices<",
     ">1:02:03<",
@@ -630,6 +658,10 @@ pub const HEALTHY_MARKERS: &[&str] = &[
 /// Text that must never appear: the device name rendered as markup.
 pub const FORBIDDEN_MARKERS: &[&str] = &["<b>evil</b>"];
 
+/// The Stop button disabled, which must never happen while the server
+/// reports scanning: the page would offer no way to pause.
+pub const STOP_DISABLED_MARKER: &str = r#"id="stop" data-action="stop" type="button" disabled="""#;
+
 /// Fewest polls the healthy page must have completed within the budget.
 pub const MIN_POLLS: u32 = 2;
 
@@ -647,6 +679,11 @@ pub fn check_dom(scenario: Scenario, dom: &str) -> Result<u32, String> {
                 if dom.contains(marker) {
                     return Err(format!("rendered page contains `{marker}` as markup"));
                 }
+            }
+            if dom.contains(STOP_DISABLED_MARKER) {
+                return Err(
+                    "the Stop button is disabled although the server reports scanning".to_string(),
+                );
             }
             let addresses: Vec<usize> = HEALTHY_MARKERS
                 .iter()
@@ -705,13 +742,13 @@ pub fn data_polls(dom: &str) -> Option<u32> {
     rest[..end].parse().ok()
 }
 
-/// The Java side of the contract: the only writer of the three JSON documents.
+/// The Java side of the contract: the only writer of the JSON documents.
 pub const API_HTTP_SERVER_JAVA_PATH: &str =
     "android/app/src/main/java/com/hse/bleradar/ApiHttpServer.java";
 
-/// The three endpoints: path, the `ApiHttpServer` method that writes it, the
-/// fixture the mock serves, and the page variables that hold its object.
-const ENDPOINTS: [(&str, &str, &str, &[&str]); 3] = [
+/// The JSON documents: what answers, the `ApiHttpServer` method that writes
+/// it, the fixture the mock serves, and the page variables that hold it.
+const ENDPOINTS: [(&str, &str, &str, &[&str]); 5] = [
     (
         "/api/devices",
         "devicesJson",
@@ -720,14 +757,16 @@ const ENDPOINTS: [(&str, &str, &str, &[&str]); 3] = [
     ),
     ("/api/status", "statusJson", STATUS_JSON, &["status"]),
     ("/api/updates", "updatesJson", UPDATES_JSON, &["updates"]),
+    ("/api/scan/*", "scanJson", SCAN_STARTED_JSON, &["scan"]),
+    ("error bodies", "errorJson", NOT_FOUND_JSON, &["refusal"]),
 ];
 
 /// Locks the three views of the JSON contract together, so a field renamed,
 /// added or dropped on one side alone fails a gate instead of waiting for a
 /// device: the names `ApiHttpServer.<method>` writes must equal the keys of
 /// the fixture the browser is shown, and every property the page reads from
-/// that endpoint's object must be one the writer emits. Returns the field
-/// count per endpoint.
+/// that document's object must be one the writer emits. Returns the field
+/// count per document.
 pub fn check_json_contract(
     java_source: &str,
     page: &str,
@@ -757,7 +796,7 @@ pub fn check_json_contract(
     Ok(counts)
 }
 
-/// The JSON field names one `String <method>()` of `ApiHttpServer.java`
+/// The JSON field names one `String <method>(…)` of `ApiHttpServer.java`
 /// writes: every `.name("…")` call in its body (the `Json` writer's
 /// `name` method, whatever the receiver is called).
 pub fn java_json_fields(source: &str, method: &str) -> Result<BTreeSet<String>, String> {
@@ -780,10 +819,10 @@ pub fn java_json_fields(source: &str, method: &str) -> Result<BTreeSet<String>, 
     Ok(fields)
 }
 
-/// The body of `String <method>()`, from its opening brace to the matching
+/// The body of `String <method>(…)`, from its opening brace to the matching
 /// closing brace, with string and character literals skipped.
 fn java_method_body<'a>(source: &'a str, method: &str) -> Result<&'a str, String> {
-    let signature = format!("String {method}()");
+    let signature = format!("String {method}(");
     let start = source
         .find(&signature)
         .ok_or_else(|| format!("`{signature}` not found in ApiHttpServer.java"))?;
@@ -1056,6 +1095,23 @@ mod tests {
             405
         );
         assert_eq!(route(Scenario::Healthy, "POST", "/nope", page).status, 404);
+        // Scan control: POST only, answered with the live state.
+        assert_eq!(
+            route(Scenario::Healthy, "POST", "/api/scan/start", page).body,
+            SCAN_STARTED_JSON.as_bytes()
+        );
+        assert_eq!(
+            route(Scenario::UpdatesError, "POST", "/api/scan/stop", page).body,
+            SCAN_STOPPED_JSON.as_bytes()
+        );
+        assert_eq!(
+            route(Scenario::Healthy, "GET", "/api/scan/start", page).status,
+            405
+        );
+        assert_eq!(
+            route(Scenario::Healthy, "POST", "/api/scan/other", page).status,
+            404
+        );
     }
 
     #[test]
@@ -1090,6 +1146,12 @@ mod tests {
             check_dom(Scenario::Healthy, &injected)
                 .unwrap_err()
                 .contains("as markup")
+        );
+        let stop_disabled = healthy_dom() + STOP_DISABLED_MARKER;
+        assert!(
+            check_dom(Scenario::Healthy, &stop_disabled)
+                .unwrap_err()
+                .contains("Stop button is disabled")
         );
         let one_poll = healthy_dom().replace(r#"data-polls="4""#, r#"data-polls="1""#);
         assert!(
@@ -1194,7 +1256,17 @@ mod tests {
         stream.read_to_string(&mut page).expect("read response");
         assert!(page.contains("Content-Type: text/html; charset=utf-8\r\n"));
         assert!(page.ends_with("<html>page</html>"));
-        assert_eq!(mock.requests(), vec!["/api/status", "/"]);
+        // A POST with a body, as fetch sends scan control: the body is
+        // skipped and the request answered.
+        let mut stream = TcpStream::connect(&address).expect("connect");
+        stream
+            .write_all(b"POST /api/scan/stop HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+            .expect("write request");
+        let mut stop = String::new();
+        stream.read_to_string(&mut stop).expect("read response");
+        assert!(stop.starts_with("HTTP/1.1 200 OK\r\n"), "{stop}");
+        assert!(stop.ends_with(SCAN_STOPPED_JSON), "{stop}");
+        assert_eq!(mock.requests(), vec!["/api/status", "/", "/api/scan/stop"]);
         mock.stop();
     }
 
@@ -1330,6 +1402,20 @@ mod tests {
         assert_eq!(counts.get("/api/devices"), Some(&15));
         assert_eq!(counts.get("/api/status"), Some(&4));
         assert_eq!(counts.get("/api/updates"), Some(&3));
+        assert_eq!(counts.get("/api/scan/*"), Some(&1));
+        assert_eq!(counts.get("error bodies"), Some(&1));
+
+        let scan_drift = DASHBOARD_HTML.replace("scan.scanning", "scan.active");
+        assert_eq!(
+            check_json_contract(API_HTTP_SERVER_JAVA, &scan_drift).unwrap_err(),
+            "/api/scan/*: the page reads `scan.active`, which ApiHttpServer.scanJson never writes"
+        );
+        let refusal_drift = DASHBOARD_HTML.replace("refusal.error", "refusal.reason");
+        assert!(
+            check_json_contract(API_HTTP_SERVER_JAVA, &refusal_drift)
+                .unwrap_err()
+                .starts_with("error bodies: the page reads `refusal.reason`")
+        );
 
         let renamed = API_HTTP_SERVER_JAVA.replace(
             "json.name(\"last_seen_ago_ms\")",

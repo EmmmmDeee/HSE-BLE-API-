@@ -7,6 +7,10 @@
 //!    documents compared byte for byte with the fixtures the browser proofs
 //!    use (`dashboard::DEVICES_JSON` and friends), so the mock in
 //!    `verify-dashboard-live` is proven to be what the Java writer emits;
+//!    scan control (`POST /api/scan/start|stop`) against a scripted
+//!    `ScanControl` — a pause reflected by every document, an accepted
+//!    start, each documented refusal as `409`, a control that throws
+//!    answered `500` with the server still up, a request body skipped;
 //! 2. the committed dashboard rendered by headless Chromium *from that
 //!    server*, checked with the same healthy-scenario DOM markers.
 //!
@@ -24,7 +28,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::dashboard::{
-    self, DASHBOARD_ASSET_PATH, DEVICES_JSON, STATUS_JSON, Scenario, UPDATES_JSON,
+    self, DASHBOARD_ASSET_PATH, DEVICES_JSON, METHOD_NOT_ALLOWED_JSON, NOT_FOUND_JSON,
+    SCAN_STARTED_JSON, SCAN_STOPPED_JSON, STATUS_JSON, Scenario, UPDATES_JSON,
 };
 
 /// The Java sources the server needs on a plain JVM: none of them may
@@ -35,19 +40,48 @@ const HOST_JAVA_SOURCES: &[&str] = &[
     "Blip.java",
     "Json.java",
     "NativeRadar.java",
+    "ScanControl.java",
     "SnapshotSource.java",
     "Streams.java",
     "UpdateStatusSource.java",
 ];
+
+/// `/api/status` while the scripted control has paused the scan: no uptime.
+const PAUSED_STATUS_JSON: &str =
+    r#"{"scanning":false,"device_count":4,"native_available":true,"uptime_ms":0}"#;
+
+/// The four refusals `ApiHttpServer.startRefusalLabel` documents, as the
+/// harness script answers them in turn (label, exact `409` body).
+const START_REFUSALS: [(&str, &str); 4] = [
+    (
+        "permissions missing",
+        r#"{"error":"Bluetooth permissions not granted; open the app once to grant them"}"#,
+    ),
+    ("Bluetooth off", r#"{"error":"Bluetooth is off"}"#),
+    (
+        "scanner unavailable",
+        r#"{"error":"Bluetooth LE scanner unavailable"}"#,
+    ),
+    (
+        "background start refused",
+        r#"{"error":"Android refused a background start; open the app once"}"#,
+    ),
+];
+
+/// The `500` a control that throws must produce (the exception's class).
+const CONTROL_THREW_JSON: &str = r#"{"error":"Internal error: IllegalStateException"}"#;
 
 const JAVA_PACKAGE_DIR: &str = "android/app/src/main/java/com/hse/bleradar";
 /// How long the JVM may take to print its bound port.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long one request may take end to end.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a reset may take to follow a graceful end of stream.
+const RESET_GRACE: Duration = Duration::from_millis(300);
 
-/// The host harness: fixture sources equal to the browser fixtures, an
-/// ephemeral port, and a run that lasts until stdin closes.
+/// The host harness: fixture sources equal to the browser fixtures, a
+/// scripted scan control, an ephemeral port, and a run that lasts until
+/// stdin closes.
 pub fn api_smoke_java_source() -> String {
     r#"package com.hse.bleradar;
 
@@ -64,6 +98,12 @@ public final class ApiSmoke {
 
     private static final long NOW_UPTIME_MS = 100_000L;
     private static final long NOW_EPOCH_MS = 1_757_700_000_000L;
+    private static final long SCAN_UPTIME_MS = 3_723_000L;
+
+    /** The scripted scan state; starts scanning, as the browser fixtures say. */
+    private static volatile boolean scanning = true;
+    /** How many starts the scripted control has answered. */
+    private static int starts;
 
     public static void main(String[] args) throws Exception {
         final Path dashboard = Paths.get(args[0]);
@@ -89,12 +129,41 @@ public final class ApiSmoke {
 
             @Override
             public boolean isScanning() {
-                return true;
+                return scanning;
             }
 
             @Override
             public long getUptimeMillis() {
-                return 3_723_000L;
+                return scanning ? SCAN_UPTIME_MS : 0L;
+            }
+        };
+        // The script: the first start is accepted, the next four answer each
+        // documented refusal in turn, the sixth throws (the server must answer
+        // 500 and stay up), every later one is accepted; a stop always pauses.
+        ScanControl control = new ScanControl() {
+            @Override
+            public synchronized int requestStart() {
+                starts++;
+                switch (starts) {
+                    case 2:
+                        return START_PERMISSIONS_MISSING;
+                    case 3:
+                        return START_BLUETOOTH_OFF;
+                    case 4:
+                        return START_UNAVAILABLE;
+                    case 5:
+                        return START_BACKGROUND_RESTRICTED;
+                    case 6:
+                        throw new IllegalStateException("scripted failure");
+                    default:
+                        scanning = true;
+                        return START_ACCEPTED;
+                }
+            }
+
+            @Override
+            public void requestStop() {
+                scanning = false;
             }
         };
         UpdateStatusSource updates = new UpdateStatusSource() {
@@ -120,7 +189,7 @@ public final class ApiSmoke {
             return Files.newInputStream(dashboard);
         };
         ApiHttpServer server = new ApiHttpServer(
-                source, updates, assets, () -> NOW_UPTIME_MS, () -> NOW_EPOCH_MS, 0);
+                source, updates, assets, () -> NOW_UPTIME_MS, () -> NOW_EPOCH_MS, control, 0);
         server.start();
         int port = server.boundPort();
         if (port <= 0) {
@@ -209,6 +278,37 @@ pub fn parse_http_response(raw: &[u8]) -> Result<HttpResponse, String> {
 /// Sends `request` (raw bytes, request line included) to the loopback
 /// `port` and returns the parsed response.
 pub fn http_request(port: u16, request: &[u8]) -> Result<HttpResponse, String> {
+    let (_, raw) = exchange(port, request)?;
+    parse_http_response(&raw)
+}
+
+/// Like [`http_request`], and additionally requires the server to have
+/// closed the connection without resetting it. A server that closes with
+/// the request body unread resets the connection; the JDK shuts the socket
+/// down before closing it, so `read_to_end` still sees a clean end of
+/// stream and the reset shows only as the socket's pending error, moments
+/// after the answer.
+pub fn http_request_clean_close(port: u16, request: &[u8]) -> Result<HttpResponse, String> {
+    let (stream, raw) = exchange(port, request)?;
+    let deadline = Instant::now() + RESET_GRACE;
+    loop {
+        if let Some(error) = stream
+            .take_error()
+            .map_err(|e| format!("reading the socket error: {e}"))?
+        {
+            return Err(format!(
+                "the server reset the connection after answering ({error}): the request body was left unread"
+            ));
+        }
+        if Instant::now() >= deadline {
+            return parse_http_response(&raw);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// One connection: sends `request` and reads to the end of the stream.
+fn exchange(port: u16, request: &[u8]) -> Result<(TcpStream, Vec<u8>), String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .map_err(|e| format!("connecting to 127.0.0.1:{port}: {e}"))?;
     stream
@@ -224,7 +324,7 @@ pub fn http_request(port: u16, request: &[u8]) -> Result<HttpResponse, String> {
     stream
         .read_to_end(&mut raw)
         .map_err(|e| format!("reading the response: {e}"))?;
-    parse_http_response(&raw)
+    Ok((stream, raw))
 }
 
 fn get(port: u16, target: &str) -> Result<HttpResponse, String> {
@@ -232,6 +332,21 @@ fn get(port: u16, target: &str) -> Result<HttpResponse, String> {
         port,
         format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes(),
     )
+}
+
+/// A `POST` with `body` (its length declared), as `fetch` sends one.
+fn post_request(target: &str, body: &[u8]) -> Vec<u8> {
+    let mut request = format!(
+        "POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(body);
+    request
+}
+
+fn post(port: u16, target: &str, body: &[u8]) -> Result<HttpResponse, String> {
+    http_request(port, &post_request(target, body))
 }
 
 /// Checks one response's status, content type and exact body.
@@ -318,14 +433,14 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         &get(port, "/nope")?,
         404,
         json,
-        br#"{"error":"Not found"}"#,
+        NOT_FOUND_JSON.as_bytes(),
     )?;
     expect(
         "GET /api (prefix only)",
         &get(port, "/api")?,
         404,
         json,
-        br#"{"error":"Not found"}"#,
+        NOT_FOUND_JSON.as_bytes(),
     )?;
     expect(
         "POST /api/status",
@@ -335,14 +450,14 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         )?,
         405,
         json,
-        br#"{"error":"Method not allowed"}"#,
+        METHOD_NOT_ALLOWED_JSON.as_bytes(),
     )?;
     expect(
         "DELETE /",
         &http_request(port, b"DELETE / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?,
         405,
         json,
-        br#"{"error":"Method not allowed"}"#,
+        METHOD_NOT_ALLOWED_JSON.as_bytes(),
     )?;
     expect(
         "malformed request line",
@@ -351,7 +466,114 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         json,
         br#"{"error":"Bad request"}"#,
     )?;
-    Ok(10)
+
+    // Scan control, in the order the harness script answers: a pause that
+    // every document reflects, an accepted start, the four documented
+    // refusals, a control that throws (answered 500, the server still up), a
+    // start whose request body must be skipped, and the wrong method or
+    // path. The sequence ends scanning, which the browser render expects.
+    let paused_devices = DEVICES_JSON.replacen(r#""scanning":true"#, r#""scanning":false"#, 1);
+    expect(
+        "POST /api/scan/stop",
+        &post(port, "/api/scan/stop", b"")?,
+        200,
+        json,
+        SCAN_STOPPED_JSON.as_bytes(),
+    )?;
+    expect(
+        "GET /api/status (paused)",
+        &get(port, "/api/status")?,
+        200,
+        json,
+        PAUSED_STATUS_JSON.as_bytes(),
+    )?;
+    expect(
+        "GET /api/devices (paused)",
+        &get(port, "/api/devices")?,
+        200,
+        json,
+        paused_devices.as_bytes(),
+    )?;
+    expect(
+        "POST /api/scan/start (accepted)",
+        &post(port, "/api/scan/start", b"")?,
+        200,
+        json,
+        SCAN_STARTED_JSON.as_bytes(),
+    )?;
+    expect(
+        "GET /api/status (resumed)",
+        &get(port, "/api/status")?,
+        200,
+        json,
+        STATUS_JSON.as_bytes(),
+    )?;
+    for (label, body) in START_REFUSALS {
+        expect(
+            &format!("POST /api/scan/start ({label})"),
+            &post(port, "/api/scan/start", b"")?,
+            409,
+            json,
+            body.as_bytes(),
+        )?;
+    }
+    expect(
+        "POST /api/scan/start (the control throws)",
+        &post(port, "/api/scan/start", b"")?,
+        500,
+        json,
+        CONTROL_THREW_JSON.as_bytes(),
+    )?;
+    expect(
+        "GET /api/status (the server survived)",
+        &get(port, "/api/status")?,
+        200,
+        json,
+        STATUS_JSON.as_bytes(),
+    )?;
+    // A body larger than the server's read buffers: without the skip it stays
+    // unread in the socket and the close becomes a reset (which a client on
+    // Android may see as a lost answer), so the close must be clean.
+    let body = vec![b'x'; 64 * 1024];
+    expect(
+        "POST /api/scan/start with a 64 KiB request body",
+        &http_request_clean_close(port, &post_request("/api/scan/start", &body))?,
+        200,
+        json,
+        SCAN_STARTED_JSON.as_bytes(),
+    )?;
+    expect(
+        "GET /api/scan/start",
+        &get(port, "/api/scan/start")?,
+        405,
+        json,
+        METHOD_NOT_ALLOWED_JSON.as_bytes(),
+    )?;
+    expect(
+        "DELETE /api/scan/stop",
+        &http_request(
+            port,
+            b"DELETE /api/scan/stop HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )?,
+        405,
+        json,
+        METHOD_NOT_ALLOWED_JSON.as_bytes(),
+    )?;
+    expect(
+        "POST /api/scan/other",
+        &post(port, "/api/scan/other", b"")?,
+        404,
+        json,
+        NOT_FOUND_JSON.as_bytes(),
+    )?;
+    expect(
+        "POST /api/scan (prefix only)",
+        &post(port, "/api/scan", b"")?,
+        404,
+        json,
+        NOT_FOUND_JSON.as_bytes(),
+    )?;
+    Ok(26)
 }
 
 /// The whole command.
@@ -435,7 +657,7 @@ pub fn run(root: &Path) -> Result<(), String> {
         println!("== HTTP contract by real requests ==");
         let checks = check_http_contract(port, &dashboard_bytes)?;
         println!(
-            "{checks} requests answered as documented; /api/devices, /api/status and /api/updates are byte-identical to the browser fixtures"
+            "{checks} requests answered as documented; /api/devices, /api/status and /api/updates are byte-identical to the browser fixtures; scan control paused, resumed, refused four ways, survived a throwing control and skipped a request body"
         );
 
         println!("== headless Chromium renders the dashboard from the real server ==");
@@ -567,5 +789,41 @@ mod tests {
         assert!(DEVICES_JSON.contains(r#""timestamp_ms":1757700000000"#));
         assert!(STATUS_JSON.contains(r#""uptime_ms":3723000"#));
         assert!(UPDATES_JSON.contains(r#""retry_count":2"#));
+    }
+
+    #[test]
+    fn the_scripted_control_answers_every_documented_outcome() {
+        // The 409 bodies the checks expect must be the labels the server
+        // writes, and the script must reach every outcome the interface
+        // declares (plus the throw), so the checks cannot drift from either.
+        let java =
+            include_str!("../../android/app/src/main/java/com/hse/bleradar/ApiHttpServer.java");
+        let control =
+            include_str!("../../android/app/src/main/java/com/hse/bleradar/ScanControl.java");
+        for (_, body) in START_REFUSALS {
+            let message = body
+                .trim_start_matches(r#"{"error":""#)
+                .trim_end_matches(r#""}"#);
+            assert!(java.contains(&format!("\"{message}\"")), "{message}");
+        }
+        let harness = api_smoke_java_source();
+        for outcome in [
+            "START_ACCEPTED",
+            "START_PERMISSIONS_MISSING",
+            "START_BLUETOOTH_OFF",
+            "START_UNAVAILABLE",
+            "START_BACKGROUND_RESTRICTED",
+        ] {
+            assert!(control.contains(&format!("int {outcome} = ")), "{outcome}");
+            assert!(harness.contains(outcome), "{outcome}");
+        }
+        assert!(harness.contains("throw new IllegalStateException"));
+        assert!(CONTROL_THREW_JSON.contains("IllegalStateException"));
+        assert_eq!(
+            PAUSED_STATUS_JSON,
+            STATUS_JSON
+                .replace(r#""scanning":true"#, r#""scanning":false"#)
+                .replace(r#""uptime_ms":3723000"#, r#""uptime_ms":0"#)
+        );
     }
 }

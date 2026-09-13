@@ -348,6 +348,23 @@ for the JSON); from another machine, tunnel it with
 `ssh -L 8080:127.0.0.1:8080 <device>` — nothing off-device can reach the
 port directly.
 
+The scan is controlled through the same API — the dashboard's Start/Stop
+buttons, or a Termux shell:
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/scan/start   # {"scanning":true}
+curl -X POST http://127.0.0.1:8080/api/scan/stop    # {"scanning":false}
+```
+
+A refused start answers `409` with the reason (the Bluetooth permissions
+were never granted — open the app once — Bluetooth is off, the scanner is
+unavailable, or Android refused a background start). A stop pauses the scan
+but keeps the service, its idle notification and this API alive, so a
+headless session can resume later without the screen. The API lives as long
+as the service: open the app once (its status line shows the dashboard URL)
+and start a scan, and the service stays up — scanning or paused — until the
+app's own Stop.
+
 ```sh
 cargo xtask verify-dashboard-live
 ```
@@ -369,13 +386,16 @@ cargo xtask verify-api-live
 ```
 
 This runs the app's real `ApiHttpServer` — the class the APK ships, which
-references nothing in `android.*` — on the host JVM with fixture sources and
-the host `bleradar-jni` library, answers ten real HTTP requests over loopback
-(the dashboard bytes, the three JSON documents byte-identical to the browser
-fixtures, `404`/`405`/`400`, `no-store`, exact `Content-Length`), and then
-renders the committed dashboard from that server in headless Chromium. It
-needs a JDK and a Chromium/Chrome binary; CI's `gates` job runs it after the
-live JNI proof.
+references nothing in `android.*` — on the host JVM with fixture sources, a
+scripted `ScanControl` and the host `bleradar-jni` library, answers 26 real
+HTTP requests over loopback (the dashboard bytes, the three JSON documents
+byte-identical to the browser fixtures, `404`/`405`/`400`, `no-store`, exact
+`Content-Length`; scan control paused and resumed with every document
+reflecting it, the four documented refusals as `409`, a throwing control
+answered `500` with the server still up, a 64 KiB request body skipped), and
+then renders the committed dashboard from that server in headless Chromium.
+It needs a JDK and a Chromium/Chrome binary; CI's `gates` job runs it after
+the live JNI proof.
 
 ## Parity report
 
