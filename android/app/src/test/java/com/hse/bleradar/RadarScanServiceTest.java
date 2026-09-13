@@ -123,10 +123,13 @@ public class RadarScanServiceTest {
     }
 
     @Test
-    public void engine_is_stopped_on_destroy() {
-        // RadarScanService.onDestroy() calls engine.stop() to clean up
-        // the BLE scanner session. Without this, the scanner would linger
-        // and may be held by the dead service instance
+    public void engine_is_closed_on_destroy() {
+        // RadarScanService.onDestroy() calls engine.close(): the scan stops
+        // and every later start() is refused, so a request the HTTP handler
+        // is still serving cannot leave a scan running in the dead instance
+        // (the activity's relaunch unbinds and destroys the bound-only
+        // service while the API start is in flight — observed on the
+        // emulator, COR-035)
         String methodName = "onDestroy";
         assertNotNull("onDestroy lifecycle method must exist", methodName);
     }

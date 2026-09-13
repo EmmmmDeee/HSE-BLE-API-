@@ -66,6 +66,7 @@ Gradle by the Rust-native runner:
 ```sh
 cargo xtask build-apk
 cargo xtask verify-android-live   # JNI dual-path + build-apk + entry/DEX/JNI gates
+cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator (KVM)
 ```
 
 Live results, first on the 2026-09-09 host (Android SDK at
@@ -101,7 +102,8 @@ request-body cap and the idempotent accepted start):
 | The app's real `ApiHttpServer` on the host JVM: 27 real HTTP requests answered as documented — the three JSON documents byte-identical to the browser fixtures; scan control through a scripted `ScanControl` paused and resumed with every document reflecting it, refused four ways as `409`, a throwing control answered `500` with the server still up, a 64 KiB request body consumed before a clean close, a body declared beyond the 64 KiB cap refused with `413` at once — and the committed dashboard rendered from that server in headless Chromium with Start disabled and Stop offered (`cargo xtask verify-api-live`) | **Validated** (2026-09-13: 27 requests, `polls=4`, 3.0 s; run by the `gates` CI job) |
 | JNI export contract derived from `NativeRadar.java` (`check-jni-contract`: every `static native` ↔ one `Java_com_hse_bleradar_NativeRadar_*` export, no orphans) | **Validated** (2026-09-11, 25 ↔ 25 against the then-committed APK's `lib/arm64-v8a/libbleradar_jni.so`, SHA-256 `29d89f14…e8de02`; 2026-09-12, 27 ↔ 27 against the regenerated APK's `.so`, SHA-256 `c9d9e99a…d4b84`, then 31 ↔ 31 against the `.so` regenerated for decision #87, SHA-256 `e27e42ac…9253`) |
 | `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=8, `linked-natives=25`, 2026-09-11; abi=9, `linked-natives=27`, then abi=10, `linked-natives=31` with the string bridge exercised through real Java strings, 2026-09-12; run by CI) |
-| On-device install / BLE scan / original-oracle differential | **Unverified** — no emulator, physical device, or original signing key (MIG-003) |
+| The committed APK on a real Android runtime — install, first launch, the native library loading (`native_available` true), the dashboard and the documents served, scan control, the foreground promotion with its notification, the pause that keeps the foreground, the sticky restart after `kill -9`, no crash, the API ending with the app (`cargo xtask verify-android-emulator`: headless API 34 `google_apis` x86_64 emulator with ARM translation, on KVM) | **Validated** (2026-09-13, decision #93: boot 42 s, the API 0.3 s after the launch, the page byte-identical (19,974 bytes), promotion 2.5 s after the start, the restarted service resumed the scan 2.2 s after the kill, no crash; 2 min 33 s in the `android-emulator` CI job) |
+| BLE scan of real advertisers / update install / original-oracle differential on a physical device | **Unverified** — the emulator's adapter reports no devices; no physical device or original signing key (MIG-003, MIG-002) |
 
 Package identity from live `aapt dump badging`:
 `com.hse.bleradar` versionName `1.0.0`, minSdk 26, targetSdk 34, native-code

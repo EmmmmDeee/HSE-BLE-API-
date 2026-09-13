@@ -398,6 +398,28 @@ then renders the committed dashboard from that server in headless Chromium.
 It needs a JDK and a Chromium/Chrome binary; CI's `gates` job runs it after
 the live JNI proof.
 
+```sh
+cargo xtask verify-android-emulator
+```
+
+This runs the committed `HSE-BLE-Radar-arm64-v1.0.0.apk` on a real Android
+runtime: a throw-away AVD from the pinned API 34 `google_apis` x86_64 system
+image (whose ARM translation runs the arm64-only package as is) boots
+headless on KVM; the adapter is enabled and awaited, the APK installed with
+its runtime permissions granted, the activity launched and the loopback API
+forwarded to the host. It then requires, over real HTTP, `GET /` byte-identical
+to the committed dashboard, the three documents with their keys and
+`native_available` true, `POST /api/scan/start` answered `200` with
+`RadarScanService` promoted to the foreground and its "BLE Radar is scanning"
+notification, `POST /api/scan/stop` keeping the foreground with "BLE Radar is
+idle", a restarted service with the scan resumed after `kill -9` of the app
+process, no Java or native crash of the package in logcat, and the API
+unreachable after `am force-stop`; the AVD is deleted on every exit. It needs
+`/dev/kvm`, the SDK's `emulator`, `platform-tools` and the pinned image
+(`cargo xtask android-sdk-packages --emulator` prints them for `sdkmanager`)
+and a JDK; CI's `android-emulator` job runs it on every pull request and
+every push to `main` (2 min 33 s on the first green run).
+
 ## Parity report
 
 ```sh
@@ -426,6 +448,8 @@ cargo xtask check-jni-contract [lib.so]   # NativeRadar.java natives ↔ Java_* 
 cargo xtask verify-jni-live        # real JVM → JNI → Rust proof (needs a JDK)
 cargo xtask build-apk              # cross-compile + package + sign the Android app (needs SDK/NDK)
 cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/export checks
+cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator (needs KVM + SDK emulator)
+cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
 cargo xtask audit                  # cargo audit, offline, vendored advisory db
 cargo xtask deny                   # cargo deny check, offline, vendored advisory db
 cargo xtask gates                  # every gate, one command
