@@ -11,9 +11,13 @@
 //!   library loaded on the device), the device list is empty;
 //! * with the image's Bluetooth adapter enabled, `POST /api/scan/start` is
 //!   accepted, the service is in the foreground with the scanning
-//!   notification, a stop pauses it with the idle notification and keeps
-//!   it, and a `kill -9` of the app process is followed by the
-//!   `START_STICKY` restart that resumes the scan;
+//!   notification, a virtual advertiser — a second controller on netsimd's
+//!   HCI socket (`xtask/src/hci.rs`) — is listed by `/api/devices` with its
+//!   Rust-computed row and pruned by the core's freshness policy once it is
+//!   gone, a stop pauses the
+//!   scan with the idle notification and keeps the service, and a `kill -9`
+//!   of the app process is followed by the `START_STICKY` restart that
+//!   resumes the scan;
 //! * the update check the first launch starts ran to its decision and its
 //!   `dataSync` service finished (no record, no notification left);
 //! * `am force-stop` ends the app and, with it, the API;
@@ -36,6 +40,7 @@ use std::time::{Duration, Instant};
 
 use crate::apilive::{self, HttpResponse};
 use crate::dashboard::{self, SCAN_STARTED_JSON, SCAN_STOPPED_JSON};
+use crate::hci;
 
 /// The app's package, as `AndroidManifest.xml` declares it.
 pub const PACKAGE: &str = "com.hse.bleradar";
@@ -66,6 +71,26 @@ const SCANNING_TEXT: &str = "BLE Radar is scanning";
 const IDLE_TEXT: &str = "BLE Radar is idle";
 /// How long the adapter may take to report enabled after `svc bluetooth enable`.
 const BLUETOOTH_TIMEOUT: Duration = Duration::from_secs(30);
+/// The virtual advertiser the proof adds to the guest's radio medium as a
+/// second controller on netsimd's HCI socket: the name its advertising data
+/// carries and its static random address (what the guest reports as the
+/// device's address).
+const BEACON_NAME: &str = "bleradar-beacon";
+const BEACON_ADDRESS: &str = "C0:DE:BE:AC:0D:01";
+/// Its advertising interval in 0.625 ms units: 100 ms, the low-latency
+/// scan window the app asks for.
+const BEACON_INTERVAL: u16 = 0x00A0;
+/// How long the scan may take to list the beacon after it started.
+const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the row may outlive the beacon: the Standard tracking profile
+/// keeps a device "recent" for 30 s before it is stale and pruned.
+const PRUNE_TIMEOUT: Duration = Duration::from_secs(75);
+/// netsimd's HCI socket port unless `--hci-port` names another: the
+/// rootcanal default the daemon inherited.
+const HCI_PORT: u16 = 6402;
+/// A virtual controller answers in milliseconds; a command without its
+/// Command Complete by then went to a wrong port or a dead daemon.
+const HCI_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the command needs from the caller.
 pub struct Config<'a> {
@@ -212,6 +237,59 @@ pub fn emulator_process_lines(ps: &str) -> Vec<String> {
         })
         .map(|line| line.trim().to_string())
         .collect()
+}
+
+/// The device object in a `/api/devices` document whose `"key":"value"`
+/// matches, from its `{` to its `}` (a device row nests nothing).
+pub fn device_row<'a>(devices_json: &'a str, key: &str, value: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":\"{value}\"");
+    let at = devices_json.find(&needle)?;
+    let start = devices_json[..at].rfind('{')?;
+    let end = at + devices_json[at..].find('}')?;
+    Some(&devices_json[start..=end])
+}
+
+/// The port `--hci-port`/`--hci_port` names on netsimd's command line
+/// (`=value` or the next word), if the daemon was started with one.
+pub fn hci_port_argument(command_line: &str) -> Option<u16> {
+    let mut words = command_line.split_whitespace();
+    while let Some(word) = words.next() {
+        for flag in ["--hci-port", "--hci_port"] {
+            if word == flag {
+                return words.next()?.parse().ok();
+            }
+            if let Some(value) = word
+                .strip_prefix(flag)
+                .and_then(|rest| rest.strip_prefix('='))
+            {
+                return value.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+/// `Pkg.Revision` of an SDK package's `source.properties`.
+pub fn package_revision(properties: &str) -> Option<String> {
+    properties
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Pkg.Revision="))
+        .map(|revision| revision.trim().to_string())
+}
+
+/// The lines of the emulator's log about its radio simulation (netsimd,
+/// rootcanal, HCI), the last `count` of them.
+pub fn radio_log_lines(log: &str, count: usize) -> Vec<&str> {
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            ["netsim", "rootcanal", "hci", "bluetooth"]
+                .iter()
+                .any(|needle| lower.contains(needle))
+        })
+        .collect();
+    lines[lines.len().saturating_sub(count)..].to_vec()
 }
 
 /// The keys a document must carry, checked against what it does.
@@ -440,6 +518,124 @@ fn api_unreachable(port: u16, timeout: Duration) -> bool {
         thread::sleep(Duration::from_secs(1));
     }
     failures >= 3
+}
+
+/// The virtual advertiser: a second controller on netsimd's HCI socket
+/// (`xtask/src/hci.rs`). The emulator starts netsimd for its virtual radios
+/// — the guest's Bluetooth controller lives there — and every connection
+/// to the daemon's HCI port is a new controller on the same medium, gone
+/// with the connection. It is the daemon's one control surface in the
+/// emulator package: the first runs found no CLI shipped, no web server
+/// started, and the gRPC frontend unregistered (every `FrontendService`
+/// method answers UNIMPLEMENTED, and the binary embeds no path of it).
+struct Beacon {
+    controller: hci::Controller,
+    port: u16,
+    /// Where the port came from, for the report.
+    source: &'static str,
+    /// Whether `ss` attributes a listening socket on that port to netsimd.
+    listed: bool,
+    /// The controller's own public address, as rootcanal assigned it.
+    bd_addr: String,
+}
+
+impl Beacon {
+    /// Connects a controller to the HCI socket and starts it advertising; a
+    /// failure shows the daemon's command line and its sockets.
+    fn start() -> Result<Self, String> {
+        let command_line = process_lines("netsimd").join("\n");
+        let (port, source) = hci_port_argument(&command_line)
+            .map_or((HCI_PORT, "netsimd's default port"), |port| {
+                (port, "netsimd's --hci-port")
+            });
+        let sockets = listening_sockets();
+        let listed = netsimd_ports(&sockets).contains(&port);
+        let mut controller = hci::Controller::connect(port, HCI_TIMEOUT)
+            .and_then(|mut controller| controller.reset().map(|()| controller))
+            .map_err(|error| {
+                format!(
+                    "no virtual controller on netsimd's HCI socket 127.0.0.1:{port} ({source}): {error}\n-- netsimd command line --\n{}\n-- listening sockets --\n{}",
+                    if command_line.is_empty() {
+                        "(no netsimd process)"
+                    } else {
+                        &command_line
+                    },
+                    sockets
+                        .lines()
+                        .filter(|line| line.contains("netsim") || line.contains("LISTEN"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            })?;
+        let bd_addr = controller.read_bd_addr()?;
+        controller.advertise(BEACON_ADDRESS, BEACON_NAME, BEACON_INTERVAL)?;
+        Ok(Self {
+            controller,
+            port,
+            source,
+            listed,
+            bd_addr,
+        })
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "a second virtual controller on netsimd's HCI socket 127.0.0.1:{} ({}, {}), public address {}, advertising every {} ms as {BEACON_ADDRESS} {BEACON_NAME:?}",
+            self.port,
+            self.source,
+            if self.listed {
+                "the daemon's socket per ss"
+            } else {
+                "not attributed to the daemon by ss"
+            },
+            self.bd_addr,
+            u32::from(BEACON_INTERVAL) * 5 / 8
+        )
+    }
+
+    /// Ends the advertising, then the controller: the connection's end
+    /// removes it from the daemon's model.
+    fn remove(mut self) -> Result<(), String> {
+        self.controller.stop_advertising()
+    }
+}
+
+/// `ss -ltnp` (or nothing, where `ss` is absent): every listening TCP
+/// socket with its owning process.
+fn listening_sockets() -> String {
+    Command::new("ss")
+        .args(["-ltnp"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// The local ports of the sockets `ss -ltnp` attributes to netsimd, in
+/// listing order.
+pub fn netsimd_ports(ss: &str) -> Vec<u16> {
+    ss.lines()
+        .filter(|line| line.contains("\"netsimd\""))
+        .filter_map(|line| {
+            // LISTEN 0 128 127.0.0.1:7681 0.0.0.0:* users:(("netsimd",pid=…))
+            let local = line.split_whitespace().nth(3)?;
+            local.rsplit(':').next()?.parse().ok()
+        })
+        .collect()
+}
+
+/// The `ps` command lines naming `needle`.
+fn process_lines(needle: &str) -> Vec<String> {
+    Command::new("ps")
+        .args(["-eo", "pid,args"])
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.contains(needle))
+                .map(|line| line.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The app's process id, which must exist.
@@ -682,7 +878,12 @@ fn shutdown(adb: &Adb, emulator: &mut Child) {
 /// The report of one run: one line per verified fact.
 pub type Report = Vec<String>;
 
-fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), String> {
+fn exercise(
+    adb: &Adb,
+    config: &Config,
+    emulator_log: &Path,
+    report: &mut Report,
+) -> Result<(), String> {
     let dashboard_path = config.root.join(dashboard::DASHBOARD_ASSET_PATH);
     let dashboard_bytes = fs::read(&dashboard_path)
         .map_err(|e| format!("reading {}: {e}", dashboard_path.display()))?;
@@ -818,6 +1019,99 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
         report.push(format!(
             "scanning: status {status}; RadarScanService isForeground=true with \"{SCANNING_TEXT}\" {:.1}s after the start",
             promoted.as_secs_f64()
+        ));
+
+        println!("== a virtual advertiser: a second controller on netsimd's HCI socket ==");
+        // The guest's Bluetooth controller is virtual (netsimd, started by
+        // the emulator); a controller connected there advertises on the
+        // same medium, so the scan must report it — the one way to observe
+        // the Rust-computed device row on a runtime without a radio.
+        let beacon = Beacon::start()?;
+        report.push(format!("beacon: {}", beacon.describe()));
+        let created = Instant::now();
+        let mut listed = None;
+        let mut last = String::new();
+        loop {
+            let text = body_text(&get(port, "/api/devices")?);
+            // The bound is judged after the answer (a request retries on
+            // its own), so a row that arrived late never passes as on time.
+            let after = created.elapsed();
+            // The advertiser's address as the guest reports it, else the
+            // name the advertisement carries.
+            if let Some(row) = device_row(&text, "address", BEACON_ADDRESS)
+                .or_else(|| device_row(&text, "name", BEACON_NAME))
+            {
+                if after <= BEACON_TIMEOUT {
+                    listed = Some((row.to_string(), after));
+                }
+                break;
+            }
+            last = text;
+            if after >= BEACON_TIMEOUT {
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+        let (row, after) = listed.ok_or_else(|| {
+            let log = fs::read_to_string(emulator_log).unwrap_or_default();
+            format!(
+                "within {}s of the beacon's start /api/devices never listed {BEACON_ADDRESS} or {BEACON_NAME} (last: {last})\n-- the emulator log's radio lines --\n{}\n-- the guest's LE scan log --\n{}",
+                BEACON_TIMEOUT.as_secs(),
+                radio_log_lines(&log, 30).join("\n"),
+                adb.shell_lenient("logcat -d -s BtGatt.ScanManager:* bt_stack:* | tail -n 40")
+                    .trim()
+            )
+        })?;
+        // The row's values come from bleradar-core through the JNI façade:
+        // an RSSI, a finite distance, a proximity band.
+        if json_integer(&row, "rssi_dbm").is_none() {
+            return Err(format!("the beacon's row carries no rssi_dbm: {row}"));
+        }
+        if row.contains("\"distance_m\":null") || !row.contains("\"distance_m\":") {
+            return Err(format!(
+                "the beacon's row carries no distance (the Rust estimate never reached it): {row}"
+            ));
+        }
+        report.push(format!(
+            "beacon: listed {:.1}s after its start: {row}",
+            after.as_secs_f64()
+        ));
+
+        beacon.remove()?;
+        let removed = Instant::now();
+        let pruned = loop {
+            let response = get(port, "/api/devices")?;
+            let text = body_text(&response);
+            let after = removed.elapsed();
+            // Only a healthy document from a scan still running counts: an
+            // error answer or an idle engine has an empty list for other
+            // reasons than the freshness policy.
+            let observed = response.status == 200 && json_has(&text, "scanning", "true");
+            if observed
+                && device_row(&text, "address", BEACON_ADDRESS).is_none()
+                && device_row(&text, "name", BEACON_NAME).is_none()
+            {
+                if after > PRUNE_TIMEOUT {
+                    return Err(format!(
+                        "the row was gone only {:.1}s after the beacon's removal (bound {}s)",
+                        after.as_secs_f64(),
+                        PRUNE_TIMEOUT.as_secs()
+                    ));
+                }
+                break after;
+            }
+            if after > PRUNE_TIMEOUT {
+                return Err(format!(
+                    "{}s after the beacon's removal the row is still listed, or the document is not a healthy scanning one (status {}): {text}",
+                    PRUNE_TIMEOUT.as_secs(),
+                    response.status
+                ));
+            }
+            thread::sleep(Duration::from_secs(2));
+        };
+        report.push(format!(
+            "beacon removed: the row was pruned {:.1}s later (the core's freshness policy, on the runtime)",
+            pruned.as_secs_f64()
         ));
 
         let stop = post(port, "/api/scan/stop")?;
@@ -1040,7 +1334,21 @@ fn exercise(adb: &Adb, config: &Config, report: &mut Report) -> Result<(), Strin
             crashes
         ));
     }
-    report.push(format!("logcat: no Java or native crash of {PACKAGE}"));
+    // A binding the activity never released: the platform logs it as an
+    // error and keeps the service alive on the app's behalf (COR-036).
+    let leaks: Vec<&str> = crashes
+        .lines()
+        .filter(|line| line.contains(PACKAGE) && line.contains("ServiceConnectionLeaked"))
+        .collect();
+    if !leaks.is_empty() {
+        return Err(format!(
+            "the app leaked a ServiceConnection on the device:\n{}",
+            leaks.join("\n")
+        ));
+    }
+    report.push(format!(
+        "logcat: no Java or native crash of {PACKAGE}, no leaked ServiceConnection"
+    ));
     Ok(())
 }
 
@@ -1075,29 +1383,18 @@ pub fn run(config: &Config) -> Result<(), String> {
         serial: format!("emulator-{CONSOLE_PORT}"),
     };
     let mut report = Report::new();
-    // The tool identity and whether the SDK ships netsim (virtual radios):
-    // what the next proof step could build on.
-    let version = Command::new(&emulator_exe)
-        .arg("-version")
-        .env("ANDROID_SDK_ROOT", config.sdk_root)
-        .env("ANDROID_HOME", config.sdk_root)
-        .output()
-        .map(|output| {
-            // The launcher prints its banner on stderr on some versions.
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            )
-        })
-        .unwrap_or_default();
+    // The tool identity from the package's own metadata (`emulator -version`
+    // runs QEMU, which on a runner without libpulse prints only a loader
+    // error) and whether the SDK ships netsimd, the virtual radios the
+    // beacon step needs.
+    let revision = fs::read_to_string(config.sdk_root.join("emulator/source.properties"))
+        .ok()
+        .and_then(|text| package_revision(&text));
     report.push(format!(
-        "emulator: {}; netsimd {}",
-        version
-            .lines()
-            .find(|line| line.to_ascii_lowercase().contains("version"))
-            .unwrap_or("(version unknown)")
-            .trim(),
+        "emulator: package revision {}; netsimd {}",
+        revision
+            .as_deref()
+            .unwrap_or("unknown (no Pkg.Revision in emulator/source.properties)"),
         if config.sdk_root.join("emulator/netsimd").is_file() {
             "shipped"
         } else {
@@ -1114,7 +1411,7 @@ pub fn run(config: &Config) -> Result<(), String> {
                     config.image_package
                 ));
                 println!("guest booted after {:.0}s", boot.as_secs_f64());
-                exercise(&adb, config, &mut report)
+                exercise(&adb, config, &log, &mut report)
             });
             if outcome.is_err() {
                 println!("== diagnostics ==");
@@ -1308,5 +1605,54 @@ mod tests {
         assert!(lines[1].contains("emulator -avd"));
         assert!(lines[2].contains("netsimd"));
         assert!(emulator_process_lines("PID COMMAND\n").is_empty());
+    }
+
+    #[test]
+    fn device_rows_and_the_hci_port_are_found() {
+        let devices = r#"{"devices":[{"address":"AA:BB:CC:DD:EE:01","name":null,"distance_m":1.5,"rssi_dbm":-60,"proximity":"near"},{"address":"11:22:33:44:55:66","name":"bleradar-beacon","distance_m":0.8,"distance_lower_m":0.4,"distance_upper_m":1.6,"rssi_dbm":-52,"proximity":"immediate","trend":"steady","freshness":"live","confidence_percent":40,"last_seen_ago_ms":12}],"scanning":true,"native_available":true,"timestamp_ms":1}"#;
+        let row = device_row(devices, "address", "11:22:33:44:55:66").unwrap();
+        assert!(row.starts_with("{\"address\":\"11:22:33:44:55:66\""));
+        assert!(row.ends_with("\"last_seen_ago_ms\":12}"));
+        assert_eq!(json_integer(row, "rssi_dbm"), Some(-52));
+        assert_eq!(device_row(devices, "name", "bleradar-beacon"), Some(row));
+        assert!(device_row(devices, "address", "00:00:00:00:00:00").is_none());
+        assert!(device_row(r#"{"devices":[],"scanning":true}"#, "name", "x").is_none());
+
+        assert_eq!(hci_port_argument("netsimd --host-dns=127.0.0.53"), None);
+        assert_eq!(
+            hci_port_argument("2751 /sdk/emulator/netsimd --hci-port=7402 --host-dns=127.0.0.53"),
+            Some(7402)
+        );
+        assert_eq!(hci_port_argument("netsimd --hci_port 7403"), Some(7403));
+        assert_eq!(hci_port_argument("netsimd --hci-port"), None);
+        assert_eq!(hci_port_argument("netsimd --hci-port=lots"), None);
+        assert_eq!(hci_port_argument(""), None);
+
+        let ss = "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process\n\
+                  LISTEN 0      128    127.0.0.1:6402      0.0.0.0:*    users:((\"netsimd\",pid=2751,fd=22))\n\
+                  LISTEN 0      4096   [::1]:33259         [::]:*       users:((\"netsimd\",pid=2751,fd=19))\n\
+                  LISTEN 0      5      127.0.0.1:5554      0.0.0.0:*    users:((\"qemu-system-x86\",pid=2680,fd=47))\n";
+        assert_eq!(netsimd_ports(ss), vec![6402, 33259]);
+        assert!(netsimd_ports("").is_empty());
+
+        assert_eq!(
+            package_revision("Pkg.UserSrc=false\nPkg.Revision=35.6.11\nPkg.Path=emulator\n"),
+            Some("35.6.11".to_string())
+        );
+        assert_eq!(package_revision("Pkg.Path=emulator\n"), None);
+
+        let log = "INFO | Boot completed in 39321 ms\n\
+                   INFO | Successfully initialized netsim WiFi\n\
+                   INFO | Activated packet streamer for bluetooth emulation\n\
+                   WARNING | Failed to process .ini file\n";
+        assert_eq!(
+            radio_log_lines(log, 30),
+            vec![
+                "INFO | Successfully initialized netsim WiFi",
+                "INFO | Activated packet streamer for bluetooth emulation"
+            ]
+        );
+        assert_eq!(radio_log_lines(log, 1).len(), 1);
+        assert!(radio_log_lines("", 5).is_empty());
     }
 }

@@ -77,6 +77,9 @@ public final class MainActivity extends android.app.Activity {
     /** The last status text asked for, without the lines {@link #setStatus} appends. */
     private CharSequence baseStatus = "";
 
+    /** Whether {@link #onStart} bound the service (the binding to release in {@link #onStop}). */
+    private boolean bindRequested;
+
     private final Runnable refreshTicker = this::refreshUiLoop;
 
     @Override
@@ -103,7 +106,13 @@ public final class MainActivity extends android.app.Activity {
         // which is the only point where the Bluetooth runtime permissions the
         // connectedDevice foreground type requires on API 34+ are known to be
         // granted; promoting here, before any grant, would throw there.
-        bindService(serviceIntent(), connection, Context.BIND_AUTO_CREATE);
+        // The binding exists from this call, not from onServiceConnected:
+        // an activity stopped before the connection callback (the platform
+        // relaunches the first activity within milliseconds on some
+        // devices) must still unbind, or the platform reports a leaked
+        // ServiceConnection and keeps the service alive on its behalf
+        // (observed on the emulator, COR-036).
+        bindRequested = bindService(serviceIntent(), connection, Context.BIND_AUTO_CREATE);
 
         // Check for app updates on each activity start, respecting the daily throttle.
         // UpdateManager uses shouldCheckForUpdate to gate the check (returns quickly
@@ -142,10 +151,12 @@ public final class MainActivity extends android.app.Activity {
     @Override
     protected void onStop() {
         uiHandler.removeCallbacks(refreshTicker);
-        if (serviceBound) {
+        if (bindRequested) {
             unbindService(connection);
-            serviceBound = false;
+            bindRequested = false;
         }
+        boundService = null;
+        serviceBound = false;
         super.onStop();
     }
 
