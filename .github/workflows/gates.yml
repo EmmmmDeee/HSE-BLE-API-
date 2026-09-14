@@ -86,6 +86,19 @@ jobs:
         run: cargo xtask android-sdk-install
       - name: Build, sign and inspect the APK
         run: cargo xtask verify-android-live
+      # The emulator's upgrade proof installs a package and updates it to its
+      # successor; both must carry one signing key, which only one build
+      # directory has, so this job builds the pair and hands it over
+      # (docs/AUTONOMOUS_DECISIONS.md #99).
+      - name: Build the upgrade proof's packages (the committed version and its successor)
+        run: cargo xtask build-update-proof
+      - name: Hand the upgrade proof's packages to the emulator job
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-proof
+          path: target/android-apk/proof/
+          if-no-files-found: error
+          retention-days: 1
       # The shipped library is aarch64/Bionic; the JVM proof above runs on the
       # x86_64 host. Execute the crate's whole test suite on the target ABI
       # under qemu-user against a Bionic runtime extracted once from the
@@ -137,12 +150,20 @@ jobs:
     # control, the foreground service and its notification, the START_STICKY
     # restart after kill -9, the first launch's update check finishing, the
     # API ending with am force-stop, and a runtime permission revoked while
-    # scanning (docs/AUTONOMOUS_DECISIONS.md #93, #94, #95). Needs KVM, which the
-    # runner exposes once the udev rule below opens /dev/kvm to the runner
-    # user.
+    # scanning (docs/AUTONOMOUS_DECISIONS.md #93, #94, #95), and finally the
+    # app updating itself to a successor package served by a stand-in
+    # github.com (#99). Needs KVM, which the runner exposes once the udev rule
+    # below opens /dev/kvm to the runner user, and the packages the
+    # android-apk job built on one signing key.
+    needs: android-apk
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the upgrade proof's packages
+        uses: actions/download-artifact@v4
+        with:
+          name: update-proof
+          path: target/android-apk/proof/
       - name: Install pinned toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install pinned JDK (avdmanager runs on it)
