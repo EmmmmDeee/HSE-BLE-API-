@@ -297,6 +297,56 @@ pub fn tunnel_summary(tunnels: &[String]) -> TunnelSummary {
     summary
 }
 
+/// The guest's default network as `dumpsys connectivity` reports it: the id
+/// on the `Active default network:` line, and the transports and
+/// capabilities of that network's `NetworkAgentInfo` line.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ActiveNetwork {
+    pub id: String,
+    /// `WIFI`, `CELLULAR`, … (`|`-separated when several).
+    pub transports: String,
+    /// `NOT_METERED`, `INTERNET`, `VALIDATED`, … as the dump lists them.
+    pub capabilities: Vec<String>,
+}
+
+impl ActiveNetwork {
+    /// What `UpdateCheckService.detectNetworkType` reads as unmetered
+    /// (`NET_CAPABILITY_NOT_METERED`), the state the core's download gate
+    /// requires of a network the app may not use metered.
+    pub fn unmetered(&self) -> bool {
+        self.capabilities.iter().any(|c| c == "NOT_METERED")
+    }
+}
+
+/// Reads [`ActiveNetwork`] from a `dumpsys connectivity` dump; `None` when
+/// there is no default network (`none`) or its agent line is not found.
+pub fn active_default_network(dump: &str) -> Option<ActiveNetwork> {
+    let id = dump
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Active default network:"))?
+        .trim();
+    if id.is_empty() || id == "none" {
+        return None;
+    }
+    let needle = format!("network{{{id}}}");
+    let agent = dump
+        .lines()
+        .find(|line| line.contains("NetworkAgentInfo{") && line.contains(&needle))?;
+    let (_, after_transports) = agent.split_once("Transports:")?;
+    let (transports, after_capabilities) = after_transports.split_once("Capabilities:")?;
+    let capabilities = after_capabilities
+        .split_whitespace()
+        .next()?
+        .split('&')
+        .map(str::to_string)
+        .collect();
+    Some(ActiveNetwork {
+        id: id.to_string(),
+        transports: transports.trim().to_string(),
+        capabilities,
+    })
+}
+
 /// The host a refusal line names: `CONNECT host:port -> refused`, or the
 /// authority of the absolute URL a refused plain request carried.
 fn refused_host(line: &str) -> Option<String> {
@@ -895,6 +945,52 @@ mod tests {
         assert_eq!(summary.refused_hosts, ["?"]);
         assert_eq!(summary.other, odd[..2]);
         assert_eq!(tunnel_summary(&[]), TunnelSummary::default());
+    }
+
+    #[test]
+    fn the_default_network_is_read_from_the_connectivity_dump() {
+        // As ConnectivityService dumps it: the id, then every agent's line
+        // under "Current Networks:" (NetworkAgentInfo.toString, the
+        // capabilities in NetworkCapabilities.toString's form).
+        let dump = "NetworkProviders for: WifiNetworkFactory TelephonyNetworkProvider\n\
+                    \n\
+                    Active default network: 101\n\
+                    \n\
+                    Current Networks:\n\
+                    \x20 NetworkAgentInfo{network{100}  handle{429496729601}  ni{[type: MOBILE[LTE], state: CONNECTED/CONNECTED, reason: connected, extra: epc.tmobile.com]} Score(...) everValidated{true} nc{[ Transports: CELLULAR Capabilities: MMS&SUPL&DUN&FOTA&IMS&CBS&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED LinkUpBandwidth>=51200Kbps LinkDnBandwidth>=102400Kbps Specifier: <TelephonyNetworkSpecifier [mSubId = 1]> SubscriptionIds: {1} UnderlyingNetworks: Null]} }\n\
+                    \x20   Requests: REQUEST:3 LISTEN:5 BACKGROUND_REQUEST:0 total:8\n\
+                    \x20 NetworkAgentInfo{network{101}  handle{433791696901}  ni{[type: WIFI[], state: CONNECTED/CONNECTED, reason: (unspecified), extra: \"AndroidWifi\"]} Score(...) everValidated{true} nc{[ Transports: WIFI Capabilities: NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED LinkUpBandwidth>=1048576Kbps LinkDnBandwidth>=1048576Kbps TransportInfo: <SSID: \"AndroidWifi\", BSSID: 00:13:10:85:fe:01> SSID: \"AndroidWifi\" UnderlyingNetworks: Null]} }\n";
+        let network = active_default_network(dump).expect("the Wi-Fi network");
+        assert_eq!(network.id, "101");
+        assert_eq!(network.transports, "WIFI");
+        assert!(network.unmetered());
+        assert_eq!(network.capabilities[0], "NOT_METERED");
+        assert_eq!(network.capabilities.last().unwrap(), "NOT_VCN_MANAGED");
+
+        // Cellular as the default: found, and metered.
+        let cellular = dump.replace("Active default network: 101", "Active default network: 100");
+        let network = active_default_network(&cellular).expect("the cellular network");
+        assert_eq!(
+            (network.id.as_str(), network.transports.as_str()),
+            ("100", "CELLULAR")
+        );
+        assert!(!network.unmetered());
+
+        // No default network, an unknown id, no dump at all.
+        assert_eq!(
+            active_default_network(&dump.replace(
+                "Active default network: 101",
+                "Active default network: none"
+            )),
+            None
+        );
+        assert_eq!(
+            active_default_network(
+                &dump.replace("Active default network: 101", "Active default network: 7")
+            ),
+            None
+        );
+        assert_eq!(active_default_network(""), None);
     }
 
     #[test]

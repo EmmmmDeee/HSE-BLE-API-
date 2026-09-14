@@ -109,6 +109,9 @@ const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the installer may take to show its confirmation.
 const INSTALLER_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the guest may take to settle on an unmetered default network
+/// once mobile data is off.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(45);
 /// `DownloadManager`'s own process: forked before the trust store is
 /// shadowed, so it is ended and re-forked from the shadowed zygote.
 const DOWNLOADS_PROVIDER: &str = "com.android.providers.downloads";
@@ -1650,6 +1653,38 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
     Ok(())
 }
 
+/// Mobile data off, Wi-Fi on, and the guest's default network unmetered
+/// (`dumpsys connectivity`) within [`NETWORK_TIMEOUT`]: the state
+/// `UpdateCheckService.detectNetworkType` must find for the core's download
+/// gate to let the download start.
+fn wait_for_unmetered_network(adb: &Adb) -> Result<updateproof::ActiveNetwork, String> {
+    adb.shell("svc wifi enable")?;
+    adb.shell("svc data disable")?;
+    let started = Instant::now();
+    loop {
+        let dump = adb.shell("dumpsys connectivity")?;
+        if let Some(network) =
+            updateproof::active_default_network(&dump).filter(|network| network.unmetered())
+        {
+            return Ok(network);
+        }
+        if started.elapsed() > NETWORK_TIMEOUT {
+            let excerpt: Vec<&str> = dump
+                .lines()
+                .filter(|line| {
+                    line.contains("Active default network") || line.contains("NetworkAgentInfo{")
+                })
+                .collect();
+            return Err(format!(
+                "no unmetered default network within {}s of disabling mobile data; connectivity:\n{}",
+                NETWORK_TIMEOUT.as_secs(),
+                excerpt.join("\n")
+            ));
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
 /// The guest side of [`upgrade_phase`], with the stand-in up: trust, proxy,
 /// launch, the pathway's milestones from the service's log, the installer.
 fn upgrade_through(
@@ -1688,6 +1723,20 @@ fn upgrade_through(
         "trust anchor {}: the system store ({}) shadowed by a tmpfs copy carrying it, in the root, zygote and app namespaces",
         anchor.android_name,
         updateproof::GUEST_CACERTS_DIR
+    ));
+
+    // The core's download gate refuses a metered network (the app allows
+    // none): the emulator carries a cellular network, metered, beside its
+    // Wi-Fi, and a boot whose Wi-Fi never validated leaves cellular the
+    // default (run 173: `Download not ready (readiness=2)`). Mobile data
+    // goes off so Wi-Fi is the only candidate, and the default network must
+    // be unmetered before the launch.
+    let network = wait_for_unmetered_network(adb)?;
+    report.push(format!(
+        "network: the default network {} ({}, {}; mobile data disabled) — unmetered, as the core's download gate requires",
+        network.id,
+        network.transports,
+        network.capabilities.join("&")
     ));
 
     adb.shell(&format!(
