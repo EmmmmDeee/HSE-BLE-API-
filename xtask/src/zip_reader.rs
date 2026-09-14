@@ -68,9 +68,28 @@ fn find_eocd(data: &[u8]) -> Result<usize, ZipError> {
     Err(ZipError::NoEndOfCentralDirectory)
 }
 
+/// One central-directory entry: its name, and the CRC-32 and uncompressed
+/// size of its content — both recorded in the directory, so a census of
+/// what a package carries needs no decompression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// The entry name.
+    pub name: String,
+    /// CRC-32 of the uncompressed content.
+    pub crc32: u32,
+    /// The uncompressed size in bytes.
+    pub size: u32,
+}
+
 /// Returns every entry name recorded in `data`'s ZIP central directory, in
 /// on-disk (central directory) order.
 pub fn entry_names(data: &[u8]) -> Result<Vec<String>, ZipError> {
+    Ok(entries(data)?.into_iter().map(|entry| entry.name).collect())
+}
+
+/// Returns every entry recorded in `data`'s ZIP central directory, in
+/// on-disk (central directory) order.
+pub fn entries(data: &[u8]) -> Result<Vec<Entry>, ZipError> {
     let eocd = find_eocd(data)?;
     let total_entries = u16::from_le_bytes([data[eocd + 10], data[eocd + 11]]) as usize;
     let cd_size = u32::from_le_bytes([
@@ -89,7 +108,7 @@ pub fn entry_names(data: &[u8]) -> Result<Vec<String>, ZipError> {
         return Err(ZipError::Zip64Unsupported);
     }
 
-    let mut names = Vec::with_capacity(total_entries);
+    let mut entries = Vec::with_capacity(total_entries);
     let mut pos = cd_offset as usize;
     for _ in 0..total_entries {
         let header = data
@@ -98,6 +117,8 @@ pub fn entry_names(data: &[u8]) -> Result<Vec<String>, ZipError> {
         if header[0..4] != CENTRAL_DIR_SIGNATURE {
             return Err(ZipError::BadSignature);
         }
+        let crc32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
+        let size = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
         let name_len = u16::from_le_bytes([header[28], header[29]]) as usize;
         let extra_len = u16::from_le_bytes([header[30], header[31]]) as usize;
         let comment_len = u16::from_le_bytes([header[32], header[33]]) as usize;
@@ -109,24 +130,36 @@ pub fn entry_names(data: &[u8]) -> Result<Vec<String>, ZipError> {
         // APK/ZIP entry names are conventionally UTF-8 (or plain ASCII);
         // fall back to lossy conversion rather than failing the whole
         // census over a single exotic name.
-        names.push(String::from_utf8_lossy(name_bytes).into_owned());
+        entries.push(Entry {
+            name: String::from_utf8_lossy(name_bytes).into_owned(),
+            crc32,
+            size,
+        });
 
         pos = name_start + name_len + extra_len + comment_len;
     }
-    Ok(names)
+    Ok(entries)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Builds a minimal valid ZIP (two stored, empty-content entries) to
+    /// Builds a minimal valid ZIP (stored, empty-content entries) to
     /// exercise the central-directory walk end to end.
     fn build_test_zip(names: &[&str]) -> Vec<u8> {
+        build_test_zip_with(&names.iter().map(|name| (*name, 0, 0)).collect::<Vec<_>>())
+    }
+
+    /// Like [`build_test_zip`], with the CRC-32 and uncompressed size each
+    /// entry's central-directory record claims (the content stays empty:
+    /// the reader trusts the directory, as a census must).
+    fn build_test_zip_with(entries: &[(&str, u32, u32)]) -> Vec<u8> {
+        let names: Vec<&str> = entries.iter().map(|(name, _, _)| *name).collect();
         let mut data = Vec::new();
         let mut local_offsets = Vec::new();
 
-        for name in names {
+        for name in &names {
             local_offsets.push(data.len() as u32);
             data.extend_from_slice(&[0x50, 0x4b, 0x03, 0x04]); // local file header sig
             data.extend_from_slice(&0u16.to_le_bytes()); // version needed
@@ -143,7 +176,7 @@ mod tests {
         }
 
         let cd_start = data.len() as u32;
-        for (name, &offset) in names.iter().zip(local_offsets.iter()) {
+        for ((name, crc32, size), &offset) in entries.iter().zip(local_offsets.iter()) {
             data.extend_from_slice(&CENTRAL_DIR_SIGNATURE);
             data.extend_from_slice(&0u16.to_le_bytes()); // version made by
             data.extend_from_slice(&0u16.to_le_bytes()); // version needed
@@ -151,9 +184,9 @@ mod tests {
             data.extend_from_slice(&0u16.to_le_bytes()); // method
             data.extend_from_slice(&0u16.to_le_bytes()); // mod time
             data.extend_from_slice(&0u16.to_le_bytes()); // mod date
-            data.extend_from_slice(&0u32.to_le_bytes()); // crc32
+            data.extend_from_slice(&crc32.to_le_bytes()); // crc32
             data.extend_from_slice(&0u32.to_le_bytes()); // compressed size
-            data.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size
+            data.extend_from_slice(&size.to_le_bytes()); // uncompressed size
             data.extend_from_slice(&(name.len() as u16).to_le_bytes());
             data.extend_from_slice(&0u16.to_le_bytes()); // extra len
             data.extend_from_slice(&0u16.to_le_bytes()); // comment len
@@ -175,6 +208,33 @@ mod tests {
         data.extend_from_slice(&0u16.to_le_bytes()); // comment len
 
         data
+    }
+
+    #[test]
+    fn entries_carry_the_directory_crc_and_size() {
+        let zip = build_test_zip_with(&[
+            ("classes.dex", 0x67ee_51d9, 75_864),
+            ("META-INF/CERT.RSA", 0, 1),
+        ]);
+        assert_eq!(
+            entries(&zip).unwrap(),
+            vec![
+                Entry {
+                    name: "classes.dex".to_string(),
+                    crc32: 0x67ee_51d9,
+                    size: 75_864
+                },
+                Entry {
+                    name: "META-INF/CERT.RSA".to_string(),
+                    crc32: 0,
+                    size: 1
+                },
+            ]
+        );
+        assert_eq!(
+            entry_names(&zip).unwrap(),
+            vec!["classes.dex".to_string(), "META-INF/CERT.RSA".to_string()]
+        );
     }
 
     #[test]

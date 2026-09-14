@@ -85,6 +85,8 @@ fn main() -> ExitCode {
         "check-jni-contract" => cmd_check_jni_contract(&rest),
         "verify-jni-live" => cmd_verify_jni_live(),
         "verify-android-live" => cmd_verify_android_live(),
+        "check-app-version" => cmd_check_app_version(),
+        "release-manifest" => cmd_release_manifest(&rest),
         "oracle-differential" => cmd_oracle_differential(),
         "verify-jni-target" => cmd_verify_jni_target(),
         "prepare-bionic-sysroot" => cmd_prepare_bionic_sysroot(&rest),
@@ -132,6 +134,8 @@ fn print_usage() {
          \x20 check-jni-contract [lib]   fail unless NativeRadar.java's static natives and the library's Java_* exports match 1:1\n\
          \x20 verify-jni-live            run a live Java→JNI→Rust verification against NativeRadar.java\n\
          \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
+         \x20 check-app-version          fail unless the bundled release manifest repeats APP_VERSION_CODE/NAME and the committed APK carries the version's name\n\
+         \x20 release-manifest [--url <artifact url>] [--out <path>]  print (or write) the release manifest for the committed APK: its version, exact size and SHA-256\n\
          \x20 oracle-differential        execute the immutable oracle under qemu-aarch64 and check the committed executed-oracle vectors (see docs/ORACLE_DIFFERENTIAL.md)\n\
          \x20 verify-jni-target          run the bleradar-jni test suite cross-compiled for aarch64-linux-android under qemu-aarch64 against a Bionic runtime\n\
          \x20 prepare-bionic-sysroot <dir>  extract the Bionic runtime (linker64 + libc/libm/libdl/libc++) from the installed android-24 arm64 system image into <dir>, for BIONIC_SYSROOT\n\
@@ -1129,8 +1133,35 @@ fn cmd_check_jni_contract(args: &[String]) -> Result<(), String> {
 /// bridge for.
 const ANDROID_RUST_TARGET: &str = "aarch64-linux-android";
 
-/// Final signed APK's committed name at the repository root.
-const APK_OUTPUT_NAME: &str = "HSE-BLE-Radar-arm64-v1.0.0.apk";
+/// The app's version: the one authority `build-apk` stamps into the package
+/// (`--version-code`/`--version-name`), the committed APK is named after
+/// ([`apk_output_name`]), the bundled `release_manifest.txt` must repeat
+/// (`check-app-version`, a `gates` step), `verify-android-live` reads back
+/// from the built package (`aapt2 dump badging`) and `release-manifest`
+/// publishes. A release is a bump here, `build-apk`, and the generated
+/// manifest attached to the `v<version name>` GitHub release.
+const APP_VERSION_CODE: u32 = 1;
+const APP_VERSION_NAME: &str = "1.0.0";
+
+/// Final signed APK's committed name at the repository root, after the
+/// version, so an upgrade never reuses a name.
+fn apk_output_name() -> String {
+    format!("HSE-BLE-Radar-arm64-v{APP_VERSION_NAME}.apk")
+}
+
+/// The bundled release manifest, the offline fallback `UpdateCheckService`
+/// assesses when the remote one is unavailable (relative to the repo root).
+const BUNDLED_RELEASE_MANIFEST_PATH: &str = "android/app/src/main/assets/release_manifest.txt";
+
+/// Where a release's artifact lives: the asset of the GitHub release tagged
+/// `v<version name>` — the tag convention `release-manifest` assumes
+/// (`--url` overrides it).
+fn release_artifact_url() -> String {
+    format!(
+        "https://github.com/EmmmmDeee/HSE-BLE-API-/releases/download/v{APP_VERSION_NAME}/{}",
+        apk_output_name()
+    )
+}
 
 /// The Android SDK packages the Android proofs are built and executed with:
 /// the single authority `cargo xtask android-sdk-packages` prints for CI to
@@ -2295,7 +2326,8 @@ fn cmd_build_apk() -> Result<(), String> {
             .arg(&gen_dir)
             .args(["--min-sdk-version", &min_sdk.to_string()])
             .args(["--target-sdk-version", &target_sdk.to_string()])
-            .args(["--version-code", "1", "--version-name", "1.0.0"])
+            .args(["--version-code", &APP_VERSION_CODE.to_string()])
+            .args(["--version-name", APP_VERSION_NAME])
             .args(["-0", "arsc"])
             .arg("--auto-add-overlay");
         for flat in &flat_files {
@@ -2359,6 +2391,17 @@ fn cmd_build_apk() -> Result<(), String> {
         .map_err(|e| format!("copying {} into staging: {e}", so_path.display()))?;
     fs::copy(&classes_dex, staging_dir.join("classes.dex"))
         .map_err(|e| format!("copying {} into staging: {e}", classes_dex.display()))?;
+    // The copies would carry the build's wall clock into the package as
+    // their entry timestamps (aapt2's own entries are already 1980-01-01),
+    // so a rebuild from unchanged sources differed in bytes it should not:
+    // every packaged entry gets the ZIP epoch, and the zip step runs in UTC
+    // so the DOS timestamp it derives is the same on every host.
+    for file in [
+        lib_dir.join(NATIVE_LIB_FILE_NAME),
+        staging_dir.join("classes.dex"),
+    ] {
+        set_zip_epoch_mtime(&file)?;
+    }
 
     let unaligned_apk = build_dir.join("unaligned.apk");
     if unaligned_apk.is_file() {
@@ -2370,6 +2413,7 @@ fn cmd_build_apk() -> Result<(), String> {
         c.current_dir(&staging_dir).args(["-r", "-X", "-q"]);
         c.arg(&unaligned_apk);
         c.args([".", "-x", "lib/*", "-x", "resources.arsc"]);
+        c.env("TZ", "UTC");
         c
     })?;
     run_status({
@@ -2377,6 +2421,7 @@ fn cmd_build_apk() -> Result<(), String> {
         c.current_dir(&staging_dir).args(["-0", "-X", "-q"]);
         c.arg(&unaligned_apk);
         c.args(["lib/arm64-v8a/libbleradar_jni.so", "resources.arsc"]);
+        c.env("TZ", "UTC");
         c
     })?;
 
@@ -2445,7 +2490,7 @@ fn cmd_build_apk() -> Result<(), String> {
         c
     })?;
 
-    let output_path = root.join(APK_OUTPUT_NAME);
+    let output_path = root.join(apk_output_name());
     fs::copy(&signed_apk, &output_path)
         .map_err(|e| format!("copying final APK to {}: {e}", output_path.display()))?;
     let size = fs::metadata(&output_path)
@@ -2674,10 +2719,16 @@ fn cmd_verify_android_live() -> Result<(), String> {
     println!("== live JNI proof ==");
     cmd_verify_jni_live()?;
 
+    // The committed package, read before the build overwrites it: the
+    // fresh build must reproduce its entries (REQ-ANDROID-004).
+    let apk_path = root.join(apk_output_name());
+    let committed = read_bytes(&apk_path).map_err(|e| {
+        format!("the committed APK is missing ({e}); after a version bump run build-apk and commit its output")
+    })?;
+
     println!("== APK build proof ==");
     cmd_build_apk()?;
 
-    let apk_path = root.join(APK_OUTPUT_NAME);
     let apk_entries = zip_reader::entry_names(&read_bytes(&apk_path)?)
         .map_err(|e| format!("parsing {}: {e}", apk_path.display()))?;
     require_expected_members(&apk_entries, REQUIRED_APK_ENTRIES, "APK entry set")?;
@@ -2687,8 +2738,17 @@ fn cmd_verify_android_live() -> Result<(), String> {
         .map_err(|e| format!("parsing {}: {e}", dex_path.display()))?;
     require_expected_members(&dex_classes, REQUIRED_DEX_CLASSES, "DEX class set")?;
 
+    println!("== the built package's version (aapt2 dump badging ↔ APP_VERSION_CODE/NAME) ==");
+    let sdk_root = discover_sdk_root()?;
+    verify_apk_version(&discover_build_tools(&sdk_root)?, &apk_path)?;
+
+    println!(
+        "== the committed APK reproduces from the sources (entry names, sizes and CRC-32s ↔ the fresh build) =="
+    );
+    require_reproduced_entries(&committed, &read_bytes(&apk_path)?)?;
+
     println!("== Android lint NewApi (no library call above the manifest's minSdkVersion) ==");
-    verify_android_api_levels(&root, &discover_sdk_root()?)?;
+    verify_android_api_levels(&root, &sdk_root)?;
 
     println!("== jni export contract (NativeRadar.java ↔ cross-compiled library) ==");
     let native_lib_path = root
@@ -2698,6 +2758,242 @@ fn cmd_verify_android_live() -> Result<(), String> {
     verify_jni_export_contract(&java_source, &native_lib_path)?;
 
     println!("== verify-android-live complete ==");
+    Ok(())
+}
+
+/// The timestamp every packaged entry carries: ZIP's epoch, 1980-01-01
+/// 00:00 in the UTC the zip step runs in — what aapt2 stamps on its own
+/// entries — so a rebuild from unchanged sources is byte-identical.
+const ZIP_EPOCH_SECS: u64 = 315_532_800;
+
+/// Sets `path`'s modification time to [`ZIP_EPOCH_SECS`].
+fn set_zip_epoch_mtime(path: &Path) -> Result<(), String> {
+    let file = fs::File::options()
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("opening {} to fix its timestamp: {e}", path.display()))?;
+    file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(ZIP_EPOCH_SECS))
+        .map_err(|e| format!("fixing the timestamp of {}: {e}", path.display()))
+}
+
+/// The entries (name, uncompressed size, CRC-32) of the committed package
+/// that a fresh build does not reproduce, the signature block (`META-INF/`)
+/// aside — a different signing key (CI's throw-away debug keystore) changes
+/// nothing else — each named with what differs, sorted.
+fn reproduced_entry_mismatches(
+    committed: &[zip_reader::Entry],
+    fresh: &[zip_reader::Entry],
+) -> Vec<String> {
+    use std::collections::BTreeMap;
+    let census = |entries: &[zip_reader::Entry]| -> BTreeMap<String, (u32, u32)> {
+        entries
+            .iter()
+            .filter(|entry| !entry.name.starts_with("META-INF/"))
+            .map(|entry| (entry.name.clone(), (entry.size, entry.crc32)))
+            .collect()
+    };
+    let committed = census(committed);
+    let fresh = census(fresh);
+    let mut mismatches = Vec::new();
+    for (name, (size, crc32)) in &committed {
+        match fresh.get(name) {
+            None => mismatches.push(format!("{name}: missing from the fresh build")),
+            Some((fresh_size, fresh_crc32)) if (fresh_size, fresh_crc32) != (size, crc32) => {
+                mismatches.push(format!(
+                    "{name}: size {size} → {fresh_size}, crc32 {crc32:08x} → {fresh_crc32:08x}"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    for name in fresh.keys() {
+        if !committed.contains_key(name) {
+            mismatches.push(format!("{name}: not in the committed APK"));
+        }
+    }
+    mismatches.sort();
+    mismatches
+}
+
+/// Requires the fresh build to reproduce the committed package's entries
+/// (see [`reproduced_entry_mismatches`]): a stale committed APK, or a build
+/// that no longer reproduces, fails here by entry name.
+fn require_reproduced_entries(committed: &[u8], fresh: &[u8]) -> Result<(), String> {
+    let committed_entries =
+        zip_reader::entries(committed).map_err(|e| format!("parsing the committed APK: {e}"))?;
+    let fresh_entries =
+        zip_reader::entries(fresh).map_err(|e| format!("parsing the fresh build: {e}"))?;
+    let mismatches = reproduced_entry_mismatches(&committed_entries, &fresh_entries);
+    if !mismatches.is_empty() {
+        return Err(format!(
+            "the committed APK does not reproduce from the current sources:\n  {}\nrun `cargo xtask build-apk` and commit its output",
+            mismatches.join("\n  ")
+        ));
+    }
+    let compared = committed_entries
+        .iter()
+        .filter(|entry| !entry.name.starts_with("META-INF/"))
+        .count();
+    println!(
+        "committed APK reproduced: {compared} entries with equal sizes and CRC-32s (the signature block aside)"
+    );
+    Ok(())
+}
+
+/// The `key = value` fields of a release manifest text, in order, as the Rust
+/// core reads them: the first `=` splits, both sides trimmed, `#` and blank
+/// lines skipped. A line without `=` is ignored here (the core rejects it;
+/// this reader only locates fields).
+fn manifest_fields(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        .collect()
+}
+
+/// One `name='value'` attribute of an `aapt2 dump badging` line.
+fn badging_attr<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let rest = line.split(&format!("{name}='")).nth(1)?;
+    rest.split('\'').next()
+}
+
+/// The version `aapt2 dump badging` prints for a package
+/// (`package: name='…' versionCode='1' versionName='1.0.0' …`).
+fn badging_version(badging: &str) -> Option<(u32, String)> {
+    let line = badging.lines().find(|line| line.starts_with("package:"))?;
+    let code = badging_attr(line, "versionCode")?.parse().ok()?;
+    let name = badging_attr(line, "versionName")?.to_string();
+    Some((code, name))
+}
+
+/// Checks a bundled manifest's version fields against the constants: the
+/// offline fallback must describe the shipped build, or a device without
+/// the remote source would be offered — or refused — the wrong version.
+fn check_bundled_manifest_version(text: &str) -> Result<(), String> {
+    let fields = manifest_fields(text);
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let code = field("version_code").ok_or("the bundled release manifest has no version_code")?;
+    let name = field("version_name").ok_or("the bundled release manifest has no version_name")?;
+    if code != APP_VERSION_CODE.to_string() || name != APP_VERSION_NAME {
+        return Err(format!(
+            "the bundled release manifest says version_code = {code}, version_name = {name}; xtask's APP_VERSION_CODE / APP_VERSION_NAME are {APP_VERSION_CODE} / {APP_VERSION_NAME}"
+        ));
+    }
+    Ok(())
+}
+
+/// The release manifest that publishes `artifact` at `url`: the constants'
+/// version, the artifact's exact size and SHA-256 (what the core's
+/// `ArtifactVerifier` demands of a download), the app's `min_sdk`, not
+/// mandatory. `notes` must be one line.
+fn release_manifest_text(artifact: &[u8], url: &str, min_sdk: u32, notes: &str) -> String {
+    format!(
+        "version_code = {APP_VERSION_CODE}\nversion_name = {APP_VERSION_NAME}\nurl = {url}\nsize_bytes = {}\nsha256 = {}\nmin_sdk = {min_sdk}\nmandatory = false\nnotes = {notes}\n",
+        artifact.len(),
+        sha256::to_hex(&sha256::sha256(artifact))
+    )
+}
+
+/// Reads the version `aapt2 dump badging` sees in the built package and
+/// requires the constants: the build is the one place a stamped version
+/// could drift from the authority.
+fn verify_apk_version(build_tools: &Path, apk: &Path) -> Result<(), String> {
+    let output = Command::new(build_tools.join("aapt2"))
+        .args(["dump", "badging"])
+        .arg(apk)
+        .output()
+        .map_err(|e| format!("running aapt2 dump badging: {e}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        return Err(format!(
+            "aapt2 dump badging failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let (code, name) = badging_version(&text)
+        .ok_or_else(|| format!("aapt2 dump badging printed no package version line:\n{text}"))?;
+    if code != APP_VERSION_CODE || name != APP_VERSION_NAME {
+        return Err(format!(
+            "the built package is version {code} ({name}); APP_VERSION_CODE / APP_VERSION_NAME are {APP_VERSION_CODE} ({APP_VERSION_NAME})"
+        ));
+    }
+    println!("built package: versionCode {code}, versionName {name} — the version authority");
+    Ok(())
+}
+
+/// `cargo xtask check-app-version`: the bundled release manifest repeats the
+/// version constants and the committed APK carries the version's name.
+fn cmd_check_app_version() -> Result<(), String> {
+    let root = repo_root()?;
+    let manifest = read_to_string(&root.join(BUNDLED_RELEASE_MANIFEST_PATH))?;
+    check_bundled_manifest_version(&manifest)?;
+    let apk = root.join(apk_output_name());
+    if !apk.is_file() {
+        return Err(format!(
+            "the committed APK for version {APP_VERSION_NAME} is missing: {} (run build-apk after a version bump and commit its output)",
+            apk.display()
+        ));
+    }
+    println!(
+        "app version {APP_VERSION_CODE} ({APP_VERSION_NAME}): the bundled release manifest and the committed APK's name agree"
+    );
+    Ok(())
+}
+
+/// `cargo xtask release-manifest [--url <artifact url>] [--out <path>]`: the
+/// manifest to attach to the release of the committed APK, computed from the
+/// artifact itself so its size and SHA-256 are what the core will verify.
+fn cmd_release_manifest(args: &[String]) -> Result<(), String> {
+    let mut url = release_artifact_url();
+    let mut out: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--url" => url = iter.next().ok_or("--url needs a value")?.clone(),
+            "--out" => out = Some(PathBuf::from(iter.next().ok_or("--out needs a value")?)),
+            other => {
+                return Err(format!(
+                    "usage: cargo xtask release-manifest [--url <artifact url>] [--out <path>] (unknown argument {other})"
+                ));
+            }
+        }
+    }
+    if !url.starts_with("https://") {
+        return Err(format!(
+            "the artifact URL must be https (the core rejects anything else): {url}"
+        ));
+    }
+    let root = repo_root()?;
+    let apk = root.join(apk_output_name());
+    let artifact = read_bytes(&apk)?;
+    let manifest_xml = read_to_string(&root.join(ANDROID_APP_DIR).join("AndroidManifest.xml"))?;
+    let (min_sdk, _) = parse_uses_sdk(&manifest_xml)?;
+    let text = release_manifest_text(
+        &artifact,
+        &url,
+        min_sdk,
+        &format!("HSE BLE Radar {APP_VERSION_NAME}"),
+    );
+    match out {
+        Some(path) => {
+            fs::write(&path, &text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+            println!(
+                "release manifest for {} ({} bytes) written to {}",
+                apk.display(),
+                artifact.len(),
+                path.display()
+            );
+        }
+        None => print!("{text}"),
+    }
     Ok(())
 }
 
@@ -2789,7 +3085,7 @@ fn cmd_verify_api_live() -> Result<(), String> {
 fn cmd_verify_android_emulator() -> Result<(), String> {
     let root = repo_root()?;
     let sdk_root = discover_sdk_root()?;
-    let apk = root.join(APK_OUTPUT_NAME);
+    let apk = root.join(apk_output_name());
     let image = emulator_image_package();
     emulator::run(&emulator::Config {
         root: &root,
@@ -3453,6 +3749,11 @@ fn cmd_gates() -> Result<(), String> {
     println!("== oracle integrity ==");
     cmd_check_oracle_integrity()?;
 
+    println!(
+        "== app version authority (constants ↔ bundled release manifest ↔ committed APK name) =="
+    );
+    cmd_check_app_version()?;
+
     println!("== cargo audit (offline, vendored db) ==");
     cmd_audit()?;
 
@@ -4031,6 +4332,95 @@ mod tests {
         let targets = installed_rust_targets(stdout);
         assert!(targets.contains(&"aarch64-linux-android"));
         assert!(!targets.contains(&"aarch64-linux-androi"));
+    }
+
+    #[test]
+    fn reproduced_entries_are_compared_by_name_size_and_crc_without_the_signature() {
+        let entry = |name: &str, size: u32, crc32: u32| zip_reader::Entry {
+            name: name.to_string(),
+            size,
+            crc32,
+        };
+        let committed = vec![
+            entry("classes.dex", 75_864, 0x67ee_51d9),
+            entry("lib/arm64-v8a/libbleradar_jni.so", 347_304, 0x903e_4bef),
+            entry("META-INF/CERT.RSA", 1_300, 0x1111_1111),
+            entry("assets/dashboard.html", 19_974, 0xb169_4b82),
+        ];
+        let mut fresh = committed.clone();
+        fresh[2] = entry("META-INF/CERT.RSA", 1_301, 0x2222_2222);
+        assert!(reproduced_entry_mismatches(&committed, &fresh).is_empty());
+
+        fresh[0] = entry("classes.dex", 75_900, 0xdead_beef);
+        fresh.pop();
+        fresh.push(entry("assets/extra.txt", 3, 0x3333_3333));
+        assert_eq!(
+            reproduced_entry_mismatches(&committed, &fresh),
+            vec![
+                "assets/dashboard.html: missing from the fresh build".to_string(),
+                "assets/extra.txt: not in the committed APK".to_string(),
+                "classes.dex: size 75864 → 75900, crc32 67ee51d9 → deadbeef".to_string(),
+            ]
+        );
+        assert!(
+            require_reproduced_entries(b"not a zip", b"not a zip")
+                .unwrap_err()
+                .contains("parsing the committed APK")
+        );
+    }
+
+    #[test]
+    fn the_app_version_authority_is_read_from_manifests_badging_and_names() {
+        assert_eq!(
+            apk_output_name(),
+            format!("HSE-BLE-Radar-arm64-v{APP_VERSION_NAME}.apk")
+        );
+        assert!(
+            release_artifact_url()
+                .starts_with("https://github.com/EmmmmDeee/HSE-BLE-API-/releases/download/v")
+        );
+        assert!(release_artifact_url().ends_with(&apk_output_name()));
+
+        let manifest = "# comment\nversion_code = 7\nversion_name = 9.9.9\nurl = https://e/x.apk\n\nnotes = a = b\nbroken line\n";
+        assert_eq!(
+            manifest_fields(manifest),
+            vec![
+                ("version_code".to_string(), "7".to_string()),
+                ("version_name".to_string(), "9.9.9".to_string()),
+                ("url".to_string(), "https://e/x.apk".to_string()),
+                ("notes".to_string(), "a = b".to_string()),
+            ]
+        );
+        let matching = format!(
+            "version_code = {APP_VERSION_CODE}\nversion_name = {APP_VERSION_NAME}\nurl = https://e/x.apk\n"
+        );
+        assert!(check_bundled_manifest_version(&matching).is_ok());
+        let drifted = check_bundled_manifest_version(manifest).unwrap_err();
+        assert!(
+            drifted.contains("version_code = 7") && drifted.contains("9.9.9"),
+            "{drifted}"
+        );
+        assert!(check_bundled_manifest_version("url = https://e/x.apk\n").is_err());
+
+        let badging = "package: name='com.hse.bleradar' versionCode='1' versionName='1.0.0' platformBuildVersionName='16' platformBuildVersionCode='36' compileSdkVersion='36'\nsdkVersion:'26'\n";
+        assert_eq!(badging_version(badging), Some((1, "1.0.0".to_string())));
+        assert_eq!(badging_version("sdkVersion:'26'\n"), None);
+        assert_eq!(
+            badging_version("package: name='x' versionCode='lots'"),
+            None
+        );
+
+        // The generated manifest carries the artifact's exact size and
+        // SHA-256 (the digest of "hello"), the constants' version, and reads
+        // back through the same field reader the gate uses.
+        let text = release_manifest_text(b"hello", "https://e/x.apk", 26, "n");
+        assert!(text.starts_with(&format!(
+            "version_code = {APP_VERSION_CODE}\nversion_name = {APP_VERSION_NAME}\nurl = https://e/x.apk\n"
+        )));
+        assert!(text.ends_with(
+            "size_bytes = 5\nsha256 = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\nmin_sdk = 26\nmandatory = false\nnotes = n\n"
+        ));
+        assert!(check_bundled_manifest_version(&text).is_ok());
     }
 
     #[test]
