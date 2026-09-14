@@ -2779,36 +2779,53 @@ fn set_zip_epoch_mtime(path: &Path) -> Result<(), String> {
 /// The entries (name, uncompressed size, CRC-32) of the committed package
 /// that a fresh build does not reproduce, the signature block (`META-INF/`)
 /// aside — a different signing key (CI's throw-away debug keystore) changes
-/// nothing else — each named with what differs, sorted.
+/// nothing else — each named with what differs, sorted. A name carried more
+/// than once by either package is a mismatch in itself: ZIP readers resolve
+/// a duplicate differently, so such a package never counts as reproduced.
 fn reproduced_entry_mismatches(
     committed: &[zip_reader::Entry],
     fresh: &[zip_reader::Entry],
 ) -> Vec<String> {
-    use std::collections::BTreeMap;
-    let census = |entries: &[zip_reader::Entry]| -> BTreeMap<String, (u32, u32)> {
-        entries
+    use std::collections::{BTreeMap, BTreeSet};
+    let census = |entries: &[zip_reader::Entry]| -> BTreeMap<String, Vec<(u32, u32)>> {
+        let mut census: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+        for entry in entries
             .iter()
             .filter(|entry| !entry.name.starts_with("META-INF/"))
-            .map(|entry| (entry.name.clone(), (entry.size, entry.crc32)))
-            .collect()
+        {
+            census
+                .entry(entry.name.clone())
+                .or_default()
+                .push((entry.size, entry.crc32));
+        }
+        census
     };
     let committed = census(committed);
     let fresh = census(fresh);
+    let names: BTreeSet<&String> = committed.keys().chain(fresh.keys()).collect();
     let mut mismatches = Vec::new();
-    for (name, (size, crc32)) in &committed {
-        match fresh.get(name) {
-            None => mismatches.push(format!("{name}: missing from the fresh build")),
-            Some((fresh_size, fresh_crc32)) if (fresh_size, fresh_crc32) != (size, crc32) => {
+    for name in names {
+        let in_committed = committed.get(name).map_or(&[][..], Vec::as_slice);
+        let in_fresh = fresh.get(name).map_or(&[][..], Vec::as_slice);
+        match (in_committed, in_fresh) {
+            ([], _) => mismatches.push(format!("{name}: not in the committed APK")),
+            (_, []) => mismatches.push(format!("{name}: missing from the fresh build")),
+            ([_, _, ..], _) => mismatches.push(format!(
+                "{name}: {} entries in the committed APK",
+                in_committed.len()
+            )),
+            (_, [_, _, ..]) => mismatches.push(format!(
+                "{name}: {} entries in the fresh build",
+                in_fresh.len()
+            )),
+            ([(size, crc32)], [(fresh_size, fresh_crc32)])
+                if (size, crc32) != (fresh_size, fresh_crc32) =>
+            {
                 mismatches.push(format!(
                     "{name}: size {size} → {fresh_size}, crc32 {crc32:08x} → {fresh_crc32:08x}"
                 ));
             }
-            Some(_) => {}
-        }
-    }
-    for name in fresh.keys() {
-        if !committed.contains_key(name) {
-            mismatches.push(format!("{name}: not in the committed APK"));
+            _ => {}
         }
     }
     mismatches.sort();
@@ -2840,17 +2857,32 @@ fn require_reproduced_entries(committed: &[u8], fresh: &[u8]) -> Result<(), Stri
     Ok(())
 }
 
-/// The `key = value` fields of a release manifest text, in order, as the Rust
-/// core reads them: the first `=` splits, both sides trimmed, `#` and blank
-/// lines skipped. A line without `=` is ignored here (the core rejects it;
-/// this reader only locates fields).
-fn manifest_fields(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(|line| line.split_once('='))
-        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
-        .collect()
+/// The `key = value` fields of a release manifest text, in order, read the
+/// way the Rust core's `ReleaseManifest::parse` reads them — the first `=`
+/// splits, both sides trimmed, `#` and blank lines skipped — and refused the
+/// way it refuses them wherever that decides which value a field has: a
+/// line without `=` and a key given twice are errors (the core's
+/// `MalformedLine` and `DuplicateField`), never skipped or shadowed. The
+/// core's parser stays the authority for everything else, and parses the
+/// bundled asset itself in `crates/bleradar-core/tests/update.rs`.
+fn manifest_fields(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut fields: Vec<(String, String)> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            format!("release manifest line without `=` (the core rejects it): {line}")
+        })?;
+        let key = key.trim();
+        if fields.iter().any(|(seen, _)| seen == key) {
+            return Err(format!(
+                "release manifest field `{key}` given twice (the core rejects it)"
+            ));
+        }
+        fields.push((key.to_string(), value.trim().to_string()));
+    }
+    Ok(fields)
 }
 
 /// One `name='value'` attribute of an `aapt2 dump badging` line.
@@ -2870,9 +2902,12 @@ fn badging_version(badging: &str) -> Option<(u32, String)> {
 
 /// Checks a bundled manifest's version fields against the constants: the
 /// offline fallback must describe the shipped build, or a device without
-/// the remote source would be offered — or refused — the wrong version.
+/// the remote source would be offered — or refused — the wrong version. A
+/// text the core would refuse for a malformed line or a repeated field
+/// fails here as well, so the version this gate accepts is the one the
+/// parser will read, not the first of several.
 fn check_bundled_manifest_version(text: &str) -> Result<(), String> {
-    let fields = manifest_fields(text);
+    let fields = manifest_fields(text).map_err(|e| format!("the bundled release manifest: {e}"))?;
     let field = |name: &str| {
         fields
             .iter()
@@ -4362,6 +4397,18 @@ mod tests {
                 "classes.dex: size 75864 → 75900, crc32 67ee51d9 → deadbeef".to_string(),
             ]
         );
+        // A name carried twice never matches a single entry, whichever side
+        // carries it, even when every copy has the single entry's size and CRC.
+        let mut doubled = committed.clone();
+        doubled.push(entry("classes.dex", 75_864, 0x67ee_51d9));
+        assert_eq!(
+            reproduced_entry_mismatches(&doubled, &committed),
+            vec!["classes.dex: 2 entries in the committed APK".to_string()]
+        );
+        assert_eq!(
+            reproduced_entry_mismatches(&committed, &doubled),
+            vec!["classes.dex: 2 entries in the fresh build".to_string()]
+        );
         assert!(
             require_reproduced_entries(b"not a zip", b"not a zip")
                 .unwrap_err()
@@ -4381,15 +4428,26 @@ mod tests {
         );
         assert!(release_artifact_url().ends_with(&apk_output_name()));
 
-        let manifest = "# comment\nversion_code = 7\nversion_name = 9.9.9\nurl = https://e/x.apk\n\nnotes = a = b\nbroken line\n";
+        let manifest = "# comment\nversion_code = 7\nversion_name = 9.9.9\nurl = https://e/x.apk\n\nnotes = a = b\n";
         assert_eq!(
-            manifest_fields(manifest),
+            manifest_fields(manifest).unwrap(),
             vec![
                 ("version_code".to_string(), "7".to_string()),
                 ("version_name".to_string(), "9.9.9".to_string()),
                 ("url".to_string(), "https://e/x.apk".to_string()),
                 ("notes".to_string(), "a = b".to_string()),
             ]
+        );
+        // What the core refuses is refused here, never skipped or shadowed.
+        assert!(
+            manifest_fields(&format!("{manifest}broken line\n"))
+                .unwrap_err()
+                .contains("broken line")
+        );
+        assert!(
+            manifest_fields(&format!("{manifest}version_code = 8\n"))
+                .unwrap_err()
+                .contains("`version_code` given twice")
         );
         let matching = format!(
             "version_code = {APP_VERSION_CODE}\nversion_name = {APP_VERSION_NAME}\nurl = https://e/x.apk\n"
@@ -4401,6 +4459,19 @@ mod tests {
             "{drifted}"
         );
         assert!(check_bundled_manifest_version("url = https://e/x.apk\n").is_err());
+        // The right version followed by a conflicting repeat, or by a line the
+        // parser rejects, is not a manifest the device could fall back on.
+        let repeated = format!("{matching}version_code = {}\n", APP_VERSION_CODE + 1);
+        assert!(
+            check_bundled_manifest_version(&repeated)
+                .unwrap_err()
+                .contains("given twice")
+        );
+        assert!(
+            check_bundled_manifest_version(&format!("{matching}broken line\n"))
+                .unwrap_err()
+                .contains("broken line")
+        );
 
         let badging = "package: name='com.hse.bleradar' versionCode='1' versionName='1.0.0' platformBuildVersionName='16' platformBuildVersionCode='36' compileSdkVersion='36'\nsdkVersion:'26'\n";
         assert_eq!(badging_version(badging), Some((1, "1.0.0".to_string())));

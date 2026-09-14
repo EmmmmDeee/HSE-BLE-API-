@@ -220,12 +220,14 @@ before it is published. The steps are listed under "Releasing" in the README.
 
 ## Verifying it
 
-* `cargo test -p bleradar-core --test update` — 38 unit/invariant tests over every
+* `cargo test -p bleradar-core --test update` — 39 unit/invariant tests over every
   rule, transition, error path, the retry/backoff, rollback, and throttle logic,
   the remote-manifest disposition (every status 0–1000 × every failure kind
   against an independent restatement of the rule, plus the named boundaries),
-  and the pre-download gating (every branch, boundaries, precedence, plus a
-  20,000-case randomized cross-check against an independent reference).
+  the pre-download gating (every branch, boundaries, precedence, plus a
+  20,000-case randomized cross-check against an independent reference), and
+  the bundled `assets/release_manifest.txt` parsed by the parser itself, so
+  the offline fallback the app ships is proven parseable on every run.
 * `cargo test -p bleradar-core --test update_campaign` — a deterministic 200,000-op
   differential campaign against an independent reference state machine (zero
   divergence) that exercises offer/download/verify/install **plus retry and

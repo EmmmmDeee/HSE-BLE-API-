@@ -248,8 +248,6 @@ impl HttpResponse {
     }
 }
 
-/// Parses a complete `HTTP/1.1` response (the server closes the connection
-/// after every response, so the whole stream is one response).
 /// `text` as a Java string literal: quotes, backslashes and line breaks escaped.
 pub fn java_string_literal(text: &str) -> String {
     let mut literal = String::from("\"");
@@ -460,6 +458,8 @@ pub fn check_manifest_source_report(output: &str) -> Result<usize, String> {
     Ok(seen.len())
 }
 
+/// Parses a complete `HTTP/1.1` response (the server closes the connection
+/// after every response, so the whole stream is one response).
 pub fn parse_http_response(raw: &[u8]) -> Result<HttpResponse, String> {
     let split = raw
         .windows(4)
