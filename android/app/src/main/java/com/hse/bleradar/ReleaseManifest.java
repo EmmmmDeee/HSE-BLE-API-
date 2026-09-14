@@ -1,6 +1,7 @@
 package com.hse.bleradar;
 
-import android.util.Log;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * A release manifest as validated and canonicalized by the Rust update core
@@ -16,10 +17,15 @@ import android.util.Log;
  * form, and {@link #serialize()} returns that canonical form, which Rust
  * round-trips. Without the native core no manifest can be validated, so
  * {@link #parse} yields {@code null} and the update check does not proceed.
+ *
+ * <p>References nothing in {@code android.*} (logging goes through
+ * {@code java.util.logging}, which Android routes to logcat), so
+ * {@code cargo xtask verify-android-unit} runs its tests on the host JVM
+ * against the real native core.
  */
 public final class ReleaseManifest {
 
-    private static final String TAG = "ReleaseManifest";
+    private static final Logger LOG = Logger.getLogger("ReleaseManifest");
 
     private final String canonical;
     private final long versionCode;
@@ -62,22 +68,22 @@ public final class ReleaseManifest {
      */
     public static ReleaseManifest parse(String text) {
         if (!NativeRadar.isAvailable()) {
-            Log.w(TAG, "Native core unavailable; cannot validate a release manifest");
+            LOG.warning("Native core unavailable; cannot validate a release manifest");
             return null;
         }
         if (text == null) {
-            Log.w(TAG, "Manifest text is null");
+            LOG.warning("Manifest text is null");
             return null;
         }
         String canonical = NativeRadar.releaseManifestCanonical(text);
         if (canonical == null) {
-            Log.w(TAG, "Rejected release manifest: " + NativeRadar.releaseManifestError(text));
+            LOG.warning("Rejected release manifest: " + NativeRadar.releaseManifestError(text));
             return null;
         }
         try {
             return new ReleaseManifest(canonical);
         } catch (NumberFormatException e) {
-            Log.w(TAG, "Release manifest field does not fit a Java signed integer", e);
+            LOG.log(Level.WARNING, "Release manifest field does not fit a Java signed integer", e);
             return null;
         }
     }

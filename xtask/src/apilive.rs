@@ -35,12 +35,13 @@ use crate::dashboard::{
 
 /// The Java sources the server needs on a plain JVM: none of them may
 /// reference `android.*` (the compile below has no `android.jar`).
-const HOST_JAVA_SOURCES: &[&str] = &[
+pub(crate) const HOST_JAVA_SOURCES: &[&str] = &[
     "ApiHttpServer.java",
     "AssetSource.java",
     "Blip.java",
     "Json.java",
     "NativeRadar.java",
+    "ReleaseManifest.java",
     "ReleaseManifestSource.java",
     "ScanControl.java",
     "SnapshotSource.java",
@@ -73,7 +74,7 @@ const START_REFUSALS: [(&str, &str); 4] = [
 /// The `500` a control that throws must produce (the exception's class).
 const CONTROL_THREW_JSON: &str = r#"{"error":"Internal error: IllegalStateException"}"#;
 
-const JAVA_PACKAGE_DIR: &str = "android/app/src/main/java/com/hse/bleradar";
+pub(crate) const JAVA_PACKAGE_DIR: &str = "android/app/src/main/java/com/hse/bleradar";
 /// How long the JVM may take to print its bound port.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long one request may take end to end.

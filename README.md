@@ -412,6 +412,27 @@ It needs a JDK and a Chromium/Chrome binary; CI's `gates` job runs it after
 the live JNI proof.
 
 ```sh
+cargo xtask verify-android-unit
+```
+
+This runs the app's unit tests — `android/app/src/test/java/com/hse/bleradar`,
+written against JUnit 4's `@Test` and `Assert` — on the host JVM against the
+real host `bleradar-jni` library, with no JUnit jar and no Gradle: xtask
+generates the `org.junit.Test` marker, the `Assert` overloads the tests call
+(resolved by `javac` as JUnit would resolve them) and a reflection runner,
+compiles them with the host-executable app sources, and requires the native
+core loaded (half of `ReleaseManifestTest` asserts `null` results, which a
+JVM without the library would produce for the wrong reason), every listed
+class run with its pinned test count, and zero failures. The directory may
+hold only the listed classes — a test file the runner does not execute fails
+the gate — because until decision #98 every file there was dormant: 2,731
+lines of JUnit-style tests that had never run, 2,091 of them asserting
+literals against themselves. `BlipTest` (the RSSI window, the spread, the
+address-derived angle) and `ReleaseManifestTest` (the manifest contract
+through the real core) remain and run: 64 tests. It needs a JDK; CI's
+`gates` job runs it after `verify-api-live`.
+
+```sh
 cargo xtask verify-android-emulator
 ```
 
@@ -476,6 +497,7 @@ cargo xtask check-jni-contract [lib.so]   # NativeRadar.java natives ↔ Java_* 
 cargo xtask verify-jni-live        # real JVM → JNI → Rust proof (needs a JDK)
 cargo xtask build-apk              # cross-compile + package + sign the Android app (needs SDK/NDK)
 cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/export checks
+cargo xtask verify-android-unit    # the app's unit tests (android/app/src/test) on the host JVM against the real native core (needs a JDK)
 cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator (needs KVM + SDK emulator)
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
 cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)

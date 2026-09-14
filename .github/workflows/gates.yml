@@ -53,6 +53,11 @@ jobs:
       # Google Chrome (docs/AUTONOMOUS_DECISIONS.md #91).
       - name: Real ApiHttpServer on the host JVM → real dashboard → headless Chromium
         run: cargo xtask verify-api-live
+      # The app's unit tests (android/app/src/test: Blip's signal buffer, the
+      # manifest contract through the real core) on this JVM through xtask's
+      # generated JUnit-subset runner (docs/AUTONOMOUS_DECISIONS.md #98).
+      - name: Android unit tests on the host JVM through the JUnit-subset runner
+        run: cargo xtask verify-android-unit
 
   android-apk:
     # The app must build from a fresh checkout: cross-compile the JNI library,
