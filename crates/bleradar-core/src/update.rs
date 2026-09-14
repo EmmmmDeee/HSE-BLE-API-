@@ -479,6 +479,90 @@ pub fn should_check_for_update(now: u64, last_check: u64, min_interval: u64) -> 
     now.saturating_sub(last_check) >= min_interval
 }
 
+/// How a fetch of the remote release manifest ended, beyond the HTTP status
+/// the platform got: the caller performs the network I/O and reports it here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestFetchFailure {
+    /// An HTTP answer arrived: a status, and a body when the status was a
+    /// success (which [`ReleaseManifest::parse`] may still reject).
+    None,
+    /// No HTTP answer: name resolution, the connection, TLS or a timeout
+    /// failed — the network, not the source, is at fault.
+    Transport,
+    /// The body exceeded the caller's size cap: whatever it is, not a manifest.
+    TooLarge,
+    /// The body was not a manifest the core accepts.
+    Rejected,
+}
+
+/// What the caller should assess after a remote-manifest fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestSourceDecision {
+    /// The remote manifest: the fetch answered a success status with a body
+    /// the core accepts.
+    UseRemote,
+    /// The bundled manifest, and the fetch is retried with backoff: the fault
+    /// is transient (no answer, or a server-side status that says "later").
+    FallbackRetry,
+    /// The bundled manifest, with nothing to retry before the next scheduled
+    /// check: the source has no release to offer (`404`/`410`), refuses the
+    /// request (another `4xx`), redirects where the client must not follow
+    /// (a remaining `3xx`), or serves what is not a manifest.
+    FallbackNoRetry,
+}
+
+/// Decides, from the HTTP status a remote-manifest fetch got (`0` when none
+/// arrived) and its failure kind, whether the remote manifest is the one to
+/// assess and whether a failed fetch deserves a retry — so the retry budget
+/// is spent on faults a retry can fix and never on a repository without a
+/// release. A transient answer is `408`, `425`, `429` or any `5xx`; a
+/// success is any `2xx` whose body the core accepts.
+///
+/// # Examples
+/// ```
+/// use bleradar_core::update::{
+///     ManifestFetchFailure, ManifestSourceDecision, manifest_source_decision,
+/// };
+/// assert_eq!(
+///     manifest_source_decision(200, ManifestFetchFailure::None),
+///     ManifestSourceDecision::UseRemote
+/// );
+/// // No release published yet: the bundled manifest, no retry.
+/// assert_eq!(
+///     manifest_source_decision(404, ManifestFetchFailure::None),
+///     ManifestSourceDecision::FallbackNoRetry
+/// );
+/// assert_eq!(
+///     manifest_source_decision(503, ManifestFetchFailure::None),
+///     ManifestSourceDecision::FallbackRetry
+/// );
+/// assert_eq!(
+///     manifest_source_decision(0, ManifestFetchFailure::Transport),
+///     ManifestSourceDecision::FallbackRetry
+/// );
+/// assert_eq!(
+///     manifest_source_decision(200, ManifestFetchFailure::Rejected),
+///     ManifestSourceDecision::FallbackNoRetry
+/// );
+/// ```
+#[must_use]
+pub const fn manifest_source_decision(
+    http_status: u16,
+    failure: ManifestFetchFailure,
+) -> ManifestSourceDecision {
+    match failure {
+        ManifestFetchFailure::Transport => ManifestSourceDecision::FallbackRetry,
+        ManifestFetchFailure::TooLarge | ManifestFetchFailure::Rejected => {
+            ManifestSourceDecision::FallbackNoRetry
+        }
+        ManifestFetchFailure::None => match http_status {
+            200..=299 => ManifestSourceDecision::UseRemote,
+            408 | 425 | 429 | 500..=599 => ManifestSourceDecision::FallbackRetry,
+            _ => ManifestSourceDecision::FallbackNoRetry,
+        },
+    }
+}
+
 /// The kind of network connection currently available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkType {

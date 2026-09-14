@@ -1701,6 +1701,42 @@ public final class JniSmoke {{
         verifyUpdateDecisionSurface();
         verifyDeviceMapPolicySurface();
         verifyManifestSurface();
+        verifyManifestSourceSurface();
+    }}
+
+    /**
+     * Exercises the remote-manifest disposition native (ABI 11) across the
+     * real JVM->.so boundary: every disposition, and the drift sentinel that
+     * never buys a retry.
+     */
+    private static void verifyManifestSourceSurface() {{
+        require(
+                NativeRadar.remoteManifestDisposition(200, NativeRadar.MANIFEST_FETCH_ANSWERED)
+                        == NativeRadar.MANIFEST_SOURCE_USE_REMOTE,
+                "a 200 with a body must use the remote manifest");
+        require(
+                NativeRadar.remoteManifestDisposition(404, NativeRadar.MANIFEST_FETCH_ANSWERED)
+                        == NativeRadar.MANIFEST_SOURCE_FALLBACK_NO_RETRY,
+                "a 404 (no release) must fall back without a retry");
+        require(
+                NativeRadar.remoteManifestDisposition(503, NativeRadar.MANIFEST_FETCH_ANSWERED)
+                        == NativeRadar.MANIFEST_SOURCE_FALLBACK_RETRY,
+                "a 503 must fall back and retry");
+        require(
+                NativeRadar.remoteManifestDisposition(0, NativeRadar.MANIFEST_FETCH_TRANSPORT_FAILURE)
+                        == NativeRadar.MANIFEST_SOURCE_FALLBACK_RETRY,
+                "a transport failure must fall back and retry");
+        require(
+                NativeRadar.remoteManifestDisposition(200, NativeRadar.MANIFEST_FETCH_TOO_LARGE)
+                        == NativeRadar.MANIFEST_SOURCE_FALLBACK_NO_RETRY,
+                "an oversized body must fall back without a retry");
+        require(
+                NativeRadar.remoteManifestDisposition(200, NativeRadar.MANIFEST_FETCH_REJECTED)
+                        == NativeRadar.MANIFEST_SOURCE_FALLBACK_NO_RETRY,
+                "a rejected body must fall back without a retry");
+        require(
+                NativeRadar.remoteManifestDisposition(200, 99) == NativeRadar.MANIFEST_SOURCE_FALLBACK_NO_RETRY,
+                "an unknown failure kind must never retry");
     }}
 
     /**

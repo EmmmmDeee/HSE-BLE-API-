@@ -25,6 +25,9 @@ import android.util.Log;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Background service that periodically checks for app updates using the
@@ -34,7 +37,11 @@ import java.nio.charset.StandardCharsets;
  * <ul>
  *   <li>On each check cycle, evaluates whether enough time has passed since the
  *       last check (using {@link UpdateManager#shouldCheckForUpdate}).</li>
- *   <li>If a check is due, fetches or loads the release manifest.</li>
+ *   <li>If a check is due, fetches the release manifest from the repository's
+ *       latest release ({@link #RELEASE_MANIFEST_URL}) on a worker thread and,
+ *       when that fails, assesses the bundled manifest instead — retrying the
+ *       fetch with backoff only for the faults {@link NativeRadar#remoteManifestDisposition}
+ *       calls transient.</li>
  *   <li>Calls {@link UpdateManager#assessUpdate} to determine if the release is
  *       a safe upgrade.</li>
  *   <li>If an update is available, gates the download on network/battery/storage
@@ -54,6 +61,20 @@ public final class UpdateCheckService extends Service {
     private static final int MIN_BATTERY_PERCENT = 20;
     private static final long STORAGE_HEADROOM_BYTES = 100 * 1024 * 1024; // 100 MiB
 
+    /**
+     * Where a release announces itself: the {@code release_manifest.txt} asset
+     * of the repository's latest GitHub release (a stable URL that redirects to
+     * the asset). A repository without a release answers {@code 404}, which
+     * the Rust disposition reads as "the bundled manifest, no retry" — so a
+     * fresh install checks daily and never retries against nothing.
+     */
+    static final String RELEASE_MANIFEST_URL =
+            "https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt";
+    private static final int MANIFEST_CONNECT_TIMEOUT_MS = 10_000;
+    private static final int MANIFEST_READ_TIMEOUT_MS = 10_000;
+    /** A manifest is a few hundred bytes; anything past this is not one. */
+    private static final int MANIFEST_MAX_BYTES = 16 * 1024;
+
     private static final String PREFS_NAME = "UpdateCheckService";
     private static final String PREFS_DOWNLOAD_ID = "activeDownloadId";
     private static final String PREFS_RETRY_COUNT = "retryCount";
@@ -66,7 +87,20 @@ public final class UpdateCheckService extends Service {
     private UpdateManager updateManager;
     private DownloadManager downloadManager;
     private SharedPreferences prefs;
-    private long activeDownloadId = -1;
+    private volatile long activeDownloadId = -1;
+    /** The one worker the check runs on: network I/O may not run on the main thread. */
+    private final ExecutorService checkExecutor = Executors.newSingleThreadExecutor();
+    /**
+     * Guards {@link #checkInFlight} and {@link #latestStartId} together, so a
+     * start absorbed into a running check is always the id that check's
+     * finish() answers: the claim (start side) and the release (worker side)
+     * each read and write both under this lock.
+     */
+    private final Object checkLock = new Object();
+    /** Whether a check is running on the worker; a start that arrives meanwhile is served by it. */
+    private boolean checkInFlight;
+    /** The most recent start id, which the check's finish() answers. */
+    private int latestStartId;
 
     @Override
     public void onCreate() {
@@ -229,67 +263,205 @@ public final class UpdateCheckService extends Service {
             return START_NOT_STICKY;
         }
 
+        // One check at a time: a start that arrives while the worker is still
+        // fetching or assessing is served by that check, whose finish() uses
+        // the latest start id, so the service ends once and never mid-check.
+        if (!claimCheck(startId)) {
+            Log.d(TAG, "An update check is in flight; this start is served by it");
+            return START_NOT_STICKY;
+        }
+
         // Check if enough time has passed since the last check (skip for retries)
         if (!isRetry && !updateManager.shouldCheckForUpdate(UpdateManager.CHECK_INTERVAL_SECONDS)) {
             Log.d(TAG, "Not yet time for an update check; skipping");
-            finish(startId);
+            finish(releaseCheck());
             return START_NOT_STICKY;
         }
 
         // Record the check time (regardless of outcome)
         updateManager.recordCheckTime();
 
-        // Fetch or load the release manifest
-        ReleaseManifest manifest = loadReleaseManifest();
-        if (manifest == null) {
-            Log.w(TAG, "Could not load release manifest; skipping update check");
-            finish(startId);
-            return START_NOT_STICKY;
+        // The manifest fetch is network I/O, which the main thread may not
+        // perform (NetworkOnMainThreadException): the rest of the check runs
+        // on the worker and ends the service itself.
+        try {
+            checkExecutor.execute(this::runCheck);
+        } catch (RejectedExecutionException destroyed) {
+            Log.w(TAG, "The check worker is gone; skipping this check", destroyed);
+            finish(releaseCheck());
         }
-
-        // Assess whether the release is a safe upgrade
-        int decision = updateManager.assessUpdate(manifest.getVersionCode(), manifest.getMinSdk());
-        Log.d(TAG, "Update decision: " + decision + " (available=" + NativeRadar.UPDATE_AVAILABLE + ")");
-
-        if (decision != NativeRadar.UPDATE_AVAILABLE) {
-            Log.d(TAG, "No safe update available (decision=" + decision + ")");
-            clearRetryCount();
-            finish(startId);
-            return START_NOT_STICKY;
-        }
-
-        // Check download readiness: network, battery, storage
-        // Detect actual device state for download gating
-        int network = detectNetworkType();
-        int battery = detectBatteryLevel();
-        boolean charging = isCharging();
-        long freeStorage = detectFreeStorage();
-        boolean allowMetered = false;
-
-        int readiness = updateManager.checkDownloadReadiness(
-                network, battery, charging, freeStorage, allowMetered,
-                MIN_BATTERY_PERCENT, STORAGE_HEADROOM_BYTES, manifest.getSizeBytes());
-
-        if (readiness != NativeRadar.DOWNLOAD_READY) {
-            Log.d(TAG, "Download not ready (readiness=" + readiness + "); will retry later");
-            scheduleRetry();
-            finish(startId);
-            return START_NOT_STICKY;
-        }
-
-        // Download is ready; do NOT clear retry count yet (only clear on successful verification)
-        // Download and verify the APK
-        Log.d(TAG, "Downloading update from: " + manifest.getUrl());
-        downloadAndInstallUpdate(manifest, startId);
         return START_NOT_STICKY;
     }
 
     /**
-     * Loads the release manifest from the bundled assets.
-     *
-     * <p>The offline-first approach loads from {@code release_manifest.txt} in the app's assets.
-     * On failure, returns null, allowing the service to retry later. Future implementations
-     * can extend this to fetch a live manifest from a remote URL or combine bundled + remote sources.
+     * Records {@code startId} as the latest start and claims the check for it,
+     * or — when a check is already in flight — leaves the start absorbed into
+     * that check, which will finish with this id.
+     */
+    private boolean claimCheck(int startId) {
+        synchronized (checkLock) {
+            latestStartId = startId;
+            if (checkInFlight) {
+                return false;
+            }
+            checkInFlight = true;
+            return true;
+        }
+    }
+
+    /**
+     * Releases the check and returns the start id its finish() must answer:
+     * the latest start, absorbed ones included. Under the same lock as the
+     * claim, so no start can be absorbed between the release and the read.
+     */
+    private int releaseCheck() {
+        synchronized (checkLock) {
+            checkInFlight = false;
+            return latestStartId;
+        }
+    }
+
+    /** The check past its throttle, on the worker thread; every exit ends the service. */
+    private void runCheck() {
+        try {
+            ManifestSource source = resolveReleaseManifest();
+            if (source.manifest == null) {
+                Log.w(TAG, "Could not load a release manifest; skipping update check");
+                endCheck(true);
+                return;
+            }
+
+            // Assess whether the release is a safe upgrade
+            int decision = updateManager.assessUpdate(source.manifest.getVersionCode(), source.manifest.getMinSdk());
+            Log.d(TAG, "Update decision: " + decision + " (available=" + NativeRadar.UPDATE_AVAILABLE + ")");
+
+            if (decision != NativeRadar.UPDATE_AVAILABLE) {
+                Log.d(TAG, "No safe update available (decision=" + decision + ")");
+                // A retry scheduled for the fetch keeps its count: the backoff
+                // must keep growing until a fetch succeeds.
+                if (!source.retryScheduled) {
+                    clearRetryCount();
+                }
+                endCheck(true);
+                return;
+            }
+
+            // Check download readiness: network, battery, storage
+            // Detect actual device state for download gating
+            int network = detectNetworkType();
+            int battery = detectBatteryLevel();
+            boolean charging = isCharging();
+            long freeStorage = detectFreeStorage();
+            boolean allowMetered = false;
+
+            int readiness = updateManager.checkDownloadReadiness(
+                    network, battery, charging, freeStorage, allowMetered,
+                    MIN_BATTERY_PERCENT, STORAGE_HEADROOM_BYTES, source.manifest.getSizeBytes());
+
+            if (readiness != NativeRadar.DOWNLOAD_READY) {
+                Log.d(TAG, "Download not ready (readiness=" + readiness + "); will retry later");
+                scheduleRetry();
+                endCheck(true);
+                return;
+            }
+
+            // Download is ready; do NOT clear retry count yet (only clear on successful verification)
+            // Download and verify the APK
+            Log.d(TAG, "Downloading update from: " + source.manifest.getUrl());
+            // An enqueued download's completion receiver ends the service.
+            endCheck(!downloadAndInstallUpdate(source.manifest));
+        } catch (RuntimeException e) {
+            Log.e(TAG, "Update check failed", e);
+            endCheck(true);
+        }
+    }
+
+    /**
+     * Releases the in-flight guard and, unless a download now owns the
+     * service, ends it with the latest start id: a start absorbed while the
+     * check ran had no work of its own, so the service stops once the check
+     * that served it is over — and a start that arrives after the release
+     * claims its own check, which the older id cannot stop.
+     */
+    private void endCheck(boolean finishService) {
+        int startId = releaseCheck();
+        if (finishService) {
+            finish(startId);
+        }
+    }
+
+    /** The manifest a check assesses, and whether a fetch retry was scheduled for it. */
+    private static final class ManifestSource {
+        final ReleaseManifest manifest;
+        final boolean retryScheduled;
+
+        ManifestSource(ReleaseManifest manifest, boolean retryScheduled) {
+            this.manifest = manifest;
+            this.retryScheduled = retryScheduled;
+        }
+    }
+
+    /**
+     * The remote manifest when the fetch succeeds and the Rust core accepts
+     * the text, else the bundled one — with a retry scheduled only when the
+     * Rust disposition calls the failure transient. The one log line names
+     * the source, what the fetch got and what was decided.
+     */
+    private ManifestSource resolveReleaseManifest() {
+        if (!NativeRadar.isAvailable()) {
+            // No manifest can be validated without the core; the fetch would
+            // be wasted bytes.
+            Log.w(TAG, "Native core unavailable; not fetching the remote manifest");
+            return new ManifestSource(loadBundledManifest(), false);
+        }
+        ReleaseManifestSource.Fetch fetch = ReleaseManifestSource.fetch(
+                RELEASE_MANIFEST_URL, MANIFEST_CONNECT_TIMEOUT_MS, MANIFEST_READ_TIMEOUT_MS, MANIFEST_MAX_BYTES);
+        int failureKind = fetch.failureKind;
+        String detail = fetch.detail;
+        ReleaseManifest remote = null;
+        if (failureKind == NativeRadar.MANIFEST_FETCH_ANSWERED && fetch.text != null) {
+            remote = ReleaseManifest.parse(fetch.text);
+            if (remote == null) {
+                failureKind = NativeRadar.MANIFEST_FETCH_REJECTED;
+                // parse() also yields null for a text Rust accepts whose numeric
+                // field does not fit the app's signed types; that has no Rust
+                // reason and is named as its own cause.
+                String reason = NativeRadar.releaseManifestError(fetch.text);
+                detail = detail + (reason != null
+                        ? ", rejected by the Rust core: " + reason
+                        : ", accepted by the Rust core but a numeric field does not fit the app's signed types");
+            }
+        }
+        int disposition = NativeRadar.remoteManifestDisposition(fetch.httpStatus, failureKind);
+        Log.i(TAG, "Remote manifest " + RELEASE_MANIFEST_URL + ": " + detail
+                + " -> " + dispositionLabel(disposition));
+        if (disposition == NativeRadar.MANIFEST_SOURCE_USE_REMOTE && remote != null) {
+            return new ManifestSource(remote, false);
+        }
+        boolean retry = disposition == NativeRadar.MANIFEST_SOURCE_FALLBACK_RETRY;
+        if (retry) {
+            scheduleRetry();
+        }
+        return new ManifestSource(loadBundledManifest(), retry);
+    }
+
+    private static String dispositionLabel(int disposition) {
+        switch (disposition) {
+            case NativeRadar.MANIFEST_SOURCE_USE_REMOTE:
+                return "using the remote manifest";
+            case NativeRadar.MANIFEST_SOURCE_FALLBACK_RETRY:
+                return "using the bundled manifest; retry scheduled";
+            case NativeRadar.MANIFEST_SOURCE_FALLBACK_NO_RETRY:
+                return "using the bundled manifest; no retry";
+            default:
+                return "unknown disposition " + disposition + "; using the bundled manifest";
+        }
+    }
+
+    /**
+     * Loads the bundled release manifest, {@code release_manifest.txt} in the
+     * app's assets: the offline fallback that describes the shipped build, so
+     * a check without the remote source concludes "up to date".
      *
      * <p>The stream is drained by {@link Streams#readAllBytes}, not
      * {@code InputStream.readAllBytes()}: that method exists only from API 33
@@ -298,7 +470,7 @@ public final class UpdateCheckService extends Service {
      *
      * @return the parsed manifest, or null if loading or parsing fails
      */
-    private ReleaseManifest loadReleaseManifest() {
+    private ReleaseManifest loadBundledManifest() {
         try (InputStream in = getAssets().open("release_manifest.txt")) {
             String manifestText = new String(Streams.readAllBytes(in), StandardCharsets.UTF_8);
             return ReleaseManifest.parse(manifestText);
@@ -316,13 +488,15 @@ public final class UpdateCheckService extends Service {
 
     /**
      * Initiates a download of the update APK via DownloadManager, then verifies
-     * and installs it when complete.
+     * and installs it when complete. Returns whether the download is under way
+     * with its completion receiver registered — that receiver then ends the
+     * service; on any failure the job is abandoned, a retry scheduled, and
+     * {@code false} returned so the caller ends the service.
      */
-    private void downloadAndInstallUpdate(ReleaseManifest manifest, int startId) {
+    private boolean downloadAndInstallUpdate(ReleaseManifest manifest) {
         if (downloadManager == null) {
             Log.w(TAG, "DownloadManager unavailable");
-            finish(startId);
-            return;
+            return false;
         }
 
         try {
@@ -344,6 +518,7 @@ public final class UpdateCheckService extends Service {
             } else {
                 registerReceiver(receiver, filter);
             }
+            return true;
         } catch (Exception e) {
             Log.e(TAG, "Failed to start download", e);
             // enqueue() and saveDownloadState() may have succeeded before
@@ -351,7 +526,7 @@ public final class UpdateCheckService extends Service {
             // neither orphaned nor guarding out every later check, and retry.
             abandonActiveDownload();
             scheduleRetry();
-            finish(startId);
+            return false;
         }
     }
 
@@ -508,6 +683,9 @@ public final class UpdateCheckService extends Service {
 
     @Override
     public void onDestroy() {
+        // A check still on the worker is interrupted mid-fetch; its endCheck()
+        // then runs against a stopped service, where finish() is a no-op.
+        checkExecutor.shutdownNow();
         Log.d(TAG, "UpdateCheckService destroyed");
         super.onDestroy();
     }

@@ -6,10 +6,11 @@
 //! surface over randomized sequences with independent oracles.
 
 use bleradar_core::update::{
-    ArtifactVerifier, DownloadConditions, DownloadPolicy, DownloadReadiness, NetworkType,
-    ReleaseManifest, RetryDecision, RetryPolicy, UpdateDecision, UpdateError, UpdateSession,
-    UpdateStage, Version, check_update, download_readiness, should_check_for_update,
-    update_decision, verify_artifact,
+    ArtifactVerifier, DownloadConditions, DownloadPolicy, DownloadReadiness, ManifestFetchFailure,
+    ManifestSourceDecision, NetworkType, ReleaseManifest, RetryDecision, RetryPolicy,
+    UpdateDecision, UpdateError, UpdateSession, UpdateStage, Version, check_update,
+    download_readiness, manifest_source_decision, should_check_for_update, update_decision,
+    verify_artifact,
 };
 use bleradar_core::{Sha256, hex_encode};
 
@@ -1057,4 +1058,71 @@ fn download_readiness_randomized_matches_an_independent_reference() {
     }
     // Every outcome must actually occur in the sweep.
     assert!(ready > 0 && no_net > 0 && metered > 0 && low_batt > 0 && no_space > 0);
+}
+
+// ---- the remote manifest source ----
+
+/// The documented rule, restated independently of the implementation: a
+/// transport failure retries; an oversized or rejected body never does; an
+/// answer uses the remote manifest on 2xx, retries on 408/425/429/5xx, and
+/// falls back without a retry on everything else (404/410 above all: no
+/// release published).
+fn documented_manifest_source_decision(
+    status: u16,
+    failure: ManifestFetchFailure,
+) -> ManifestSourceDecision {
+    let transient = matches!(status, 408 | 425 | 429) || (500..=599).contains(&status);
+    match failure {
+        ManifestFetchFailure::Transport => ManifestSourceDecision::FallbackRetry,
+        ManifestFetchFailure::TooLarge | ManifestFetchFailure::Rejected => {
+            ManifestSourceDecision::FallbackNoRetry
+        }
+        ManifestFetchFailure::None if (200..=299).contains(&status) => {
+            ManifestSourceDecision::UseRemote
+        }
+        ManifestFetchFailure::None if transient => ManifestSourceDecision::FallbackRetry,
+        ManifestFetchFailure::None => ManifestSourceDecision::FallbackNoRetry,
+    }
+}
+
+#[test]
+fn manifest_source_decision_matches_the_documented_rule_for_every_status_and_failure() {
+    use ManifestFetchFailure::{None, Rejected, TooLarge, Transport};
+    use ManifestSourceDecision::{FallbackNoRetry, FallbackRetry, UseRemote};
+    for status in 0..=1000u16 {
+        for failure in [None, Transport, TooLarge, Rejected] {
+            assert_eq!(
+                manifest_source_decision(status, failure),
+                documented_manifest_source_decision(status, failure),
+                "status {status}, failure {failure:?}"
+            );
+        }
+    }
+    // The boundaries, named.
+    assert_eq!(manifest_source_decision(199, None), FallbackNoRetry);
+    assert_eq!(manifest_source_decision(200, None), UseRemote);
+    assert_eq!(manifest_source_decision(299, None), UseRemote);
+    // A remaining 3xx: a redirect the client refused to follow.
+    assert_eq!(manifest_source_decision(300, None), FallbackNoRetry);
+    assert_eq!(manifest_source_decision(404, None), FallbackNoRetry);
+    assert_eq!(manifest_source_decision(410, None), FallbackNoRetry);
+    assert_eq!(manifest_source_decision(408, None), FallbackRetry);
+    assert_eq!(manifest_source_decision(429, None), FallbackRetry);
+    assert_eq!(manifest_source_decision(499, None), FallbackNoRetry);
+    assert_eq!(manifest_source_decision(500, None), FallbackRetry);
+    assert_eq!(manifest_source_decision(599, None), FallbackRetry);
+    assert_eq!(manifest_source_decision(600, None), FallbackNoRetry);
+    assert_eq!(manifest_source_decision(0, None), FallbackNoRetry);
+    assert_eq!(manifest_source_decision(0, Transport), FallbackRetry);
+    assert_eq!(manifest_source_decision(200, TooLarge), FallbackNoRetry);
+    assert_eq!(manifest_source_decision(200, Rejected), FallbackNoRetry);
+    // The retry budget is never spent on a source without a release or one
+    // that refuses the request.
+    for status in [400u16, 401, 403, 404, 410, 451] {
+        assert_ne!(
+            manifest_source_decision(status, None),
+            FallbackRetry,
+            "{status}"
+        );
+    }
 }

@@ -32,4 +32,21 @@ final class Streams {
         }
         return out.toByteArray();
     }
+
+    /**
+     * Reads {@code in} to its end and returns every byte, or {@code null} as
+     * soon as more than {@code limit} bytes have arrived (never buffering more
+     * than {@code limit} plus one chunk); the caller closes the stream.
+     */
+    static byte[] readUpTo(InputStream in, int limit) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] chunk = new byte[CHUNK_BYTES];
+        for (int read = in.read(chunk); read >= 0; read = in.read(chunk)) {
+            if (out.size() + read > limit) {
+                return null;
+            }
+            out.write(chunk, 0, read);
+        }
+        return out.toByteArray();
+    }
 }
