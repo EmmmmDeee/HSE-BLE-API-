@@ -27,6 +27,14 @@
 //!   platform kill the app: no scan and no foreground service survive it,
 //!   and the report records whether the sticky restart ran the "revoked,
 //!   stopping" branch;
+//! * the app updates itself: with its successor package served by a stand-in
+//!   `github.com` the guest was made to trust (`xtask/src/updateproof.rs`),
+//!   the first check of a fresh install fetches the production release URL,
+//!   the Rust core takes the remote manifest and decides `Available`,
+//!   `DownloadManager` fetches the artifact, the core verifies its size and
+//!   SHA-256, the service hands it to the package installer, the proof taps
+//!   the installer's button, and the successor's `versionCode` is installed
+//!   and answers on the API;
 //! * the crash and main logs carry no Java or native crash of the app.
 //!
 //! Needs KVM (the emulator is started with `-accel on`), so it runs in CI's
@@ -43,6 +51,7 @@ use std::time::{Duration, Instant};
 use crate::apilive::{self, HttpResponse};
 use crate::dashboard::{self, SCAN_STARTED_JSON, SCAN_STOPPED_JSON};
 use crate::hci;
+use crate::updateproof::{self, GUEST_HOST_ALIAS, RELEASE_HOST};
 
 /// The app's package, as `AndroidManifest.xml` declares it.
 pub const PACKAGE: &str = "com.hse.bleradar";
@@ -93,6 +102,21 @@ const HCI_PORT: u16 = 6402;
 /// A virtual controller answers in milliseconds; a command without its
 /// Command Complete by then went to a wrong port or a dead daemon.
 const HCI_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the upgrade pathway may take from the launch to the installer
+/// hand-off (the fetch, the decision, the download, the verification).
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the package installer may take once its button is tapped.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long the installer may take to show its confirmation.
+const INSTALLER_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the guest may take to settle on an unmetered default network
+/// once mobile data is off.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(45);
+/// `DownloadManager`'s own process: forked before the trust store is
+/// shadowed, so it is ended and re-forked from the shadowed zygote.
+const DOWNLOADS_PROVIDER: &str = "com.android.providers.downloads";
+/// The confirmation button's texts across the installer's variants.
+const INSTALLER_BUTTONS: &[&str] = &["Update", "Install", "UPDATE", "INSTALL"];
 
 /// What the command needs from the caller.
 pub struct Config<'a> {
@@ -104,6 +128,44 @@ pub struct Config<'a> {
     pub apk: &'a Path,
     /// The `sdkmanager` package of the system image the AVD is created from.
     pub image_package: &'a str,
+    /// The upgrade proof's packages and manifest.
+    pub upgrade: &'a UpgradeProof,
+}
+
+/// What `cargo xtask build-update-proof` produced: the committed version
+/// and its successor built on one debug key (so the successor is an update
+/// the platform accepts), the successor's release manifest, and what the
+/// proof expects of it.
+pub struct UpgradeProof {
+    /// The committed version, built with the successor's key.
+    pub current_apk: PathBuf,
+    /// The successor package the stand-in serves.
+    pub successor_apk: PathBuf,
+    /// The successor's release manifest text (`release-manifest`'s form).
+    pub successor_manifest: PathBuf,
+    /// The `versionCode` the successor carries, which must end up installed.
+    pub successor_code: u32,
+    /// The URL the manifest names for the artifact (on [`RELEASE_HOST`]).
+    pub successor_artifact_url: String,
+}
+
+impl UpgradeProof {
+    /// The three files, or which one is missing.
+    fn check_files(&self) -> Result<(), String> {
+        for file in [
+            &self.current_apk,
+            &self.successor_apk,
+            &self.successor_manifest,
+        ] {
+            if !file.is_file() {
+                return Err(format!(
+                    "upgrade proof file missing: {} (run `cargo xtask build-update-proof` first)",
+                    file.display()
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 // ===== pure helpers (unit-tested) =====
@@ -680,6 +742,38 @@ fn app_pid(adb: &Adb) -> Result<u32, String> {
         .map_err(|e| format!("pidof {PACKAGE} gave no pid: {e}"))
 }
 
+/// `UpdateCheckService.RELEASE_MANIFEST_URL` as the Java source declares it:
+/// the production release URL, the authority every update-check step pins
+/// its observation to.
+fn release_manifest_url(config: &Config) -> Result<String, String> {
+    release_manifest_url_from(config.root)
+}
+
+/// [`release_manifest_url`] from the repository root (for the host-side
+/// proofs, which have no emulator `Config`).
+pub fn release_manifest_url_from(root: &Path) -> Result<String, String> {
+    let service_source =
+        root.join("android/app/src/main/java/com/hse/bleradar/UpdateCheckService.java");
+    fs::read_to_string(&service_source)
+        .ok()
+        .and_then(|source| java_static_final_string(&source, "RELEASE_MANIFEST_URL"))
+        .filter(|url| url.starts_with("https://"))
+        .ok_or_else(|| {
+            format!(
+                "no https RELEASE_MANIFEST_URL constant in {}",
+                service_source.display()
+            )
+        })
+}
+
+/// What is in front, for the report: the resumed activity from the activity
+/// manager, else the focused window from the window manager, else "unknown".
+fn activity_in_front(adb: &Adb) -> String {
+    updateproof::resumed_activity(&adb.shell_lenient("dumpsys activity activities"))
+        .or_else(|| updateproof::focused_window(&adb.shell_lenient("dumpsys window displays")))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Launches the activity (`am start -W`), which must report `Status: ok`.
 fn launch_activity(adb: &Adb) -> Result<(), String> {
     let launch = adb.shell(&format!("am start -W -n {ACTIVITY}"))?;
@@ -1213,19 +1307,7 @@ fn exercise(
     // bundled manifest, and finished — no service record and no "Checking
     // for updates..." notification left. Both are awaited, and every dump is
     // a fallible command, so a failed adb call never reads as "nothing left".
-    let service_source = config
-        .root
-        .join("android/app/src/main/java/com/hse/bleradar/UpdateCheckService.java");
-    let release_manifest_url = fs::read_to_string(&service_source)
-        .ok()
-        .and_then(|source| java_static_final_string(&source, "RELEASE_MANIFEST_URL"))
-        .filter(|url| url.starts_with("https://"))
-        .ok_or_else(|| {
-            format!(
-                "no https RELEASE_MANIFEST_URL constant in {}",
-                service_source.display()
-            )
-        })?;
+    let release_manifest_url = release_manifest_url(config)?;
     let decision_awaited = Instant::now();
     let (decision, update_lines, remote) = loop {
         let update_log = adb.shell("logcat -d -s UpdateCheckService:* UpdateManager:*")?;
@@ -1390,6 +1472,8 @@ fn exercise(
         revoked.elapsed().as_secs_f64()
     ));
 
+    upgrade_phase(adb, config, port, report)?;
+
     println!("== crash log ==");
     let crashes = adb.shell_lenient("logcat -d -b crash -b main -v brief");
     let headers = crash_headers(&crashes, PACKAGE);
@@ -1418,6 +1502,378 @@ fn exercise(
     Ok(())
 }
 
+/// The app updating itself on the runtime: the successor package served by a
+/// stand-in `github.com` the guest trusts, the app's production pathway
+/// unchanged — the release URL fetched, the remote manifest taken by the
+/// core, `Available` decided, the artifact downloaded by `DownloadManager`
+/// and verified by the core, handed to the package installer, installed.
+fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> Result<(), String> {
+    let proof = config.upgrade;
+    proof.check_files()?;
+    let release_manifest_url = release_manifest_url(config)?;
+    let latest_path = updateproof::release_url_path(&release_manifest_url)
+        .ok_or_else(|| {
+            format!(
+                "UpdateCheckService.RELEASE_MANIFEST_URL `{release_manifest_url}` is not on https://{RELEASE_HOST}/"
+            )
+        })?
+        .to_string();
+    let apk_path = updateproof::release_url_path(&proof.successor_artifact_url)
+        .ok_or_else(|| {
+            format!(
+                "the successor's artifact URL `{}` is not on https://{RELEASE_HOST}/",
+                proof.successor_artifact_url
+            )
+        })?
+        .to_string();
+    // The redirect's target: the manifest published beside the artifact, as
+    // `release-manifest`'s convention has it.
+    let manifest_path = format!(
+        "{}/release_manifest.txt",
+        apk_path.rsplit_once('/').map_or("", |(dir, _)| dir)
+    );
+    let manifest_text = fs::read_to_string(&proof.successor_manifest)
+        .map_err(|e| format!("reading {}: {e}", proof.successor_manifest.display()))?;
+    if !manifest_text.contains(&format!("url = {}", proof.successor_artifact_url)) {
+        return Err(format!(
+            "the successor's manifest does not name {} as its url:\n{manifest_text}",
+            proof.successor_artifact_url
+        ));
+    }
+
+    println!(
+        "== upgrade: the successor release served by a stand-in {RELEASE_HOST}, the app updating itself =="
+    );
+    // The installed package is the committed one on this machine's own debug
+    // key; the successor was built on the proof build's key, so the app the
+    // successor updates must be the proof build of the same version.
+    let _ = adb.shell_lenient(&format!("pm uninstall {PACKAGE}"));
+    let current = proof
+        .current_apk
+        .to_str()
+        .ok_or("the proof APK path is not UTF-8")?;
+    let install = adb.run(&["install", "-r", "-g", current])?;
+    if !install_succeeded(&install) {
+        return Err(format!(
+            "adb install of the proof build did not report Success: {}",
+            install.trim()
+        ));
+    }
+    // The installer refuses an app the user never allowed to install
+    // packages; on a device that is a Settings toggle, here the app op.
+    adb.shell(&format!(
+        "appops set {PACKAGE} REQUEST_INSTALL_PACKAGES allow"
+    ))?;
+    report.push(format!(
+        "upgrade: {} installed from the proof build (one signing key with its successor), install-unknown-apps allowed",
+        proof
+            .current_apk
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+
+    let work = crate::xtask_temp_dir("verify-android-emulator-upgrade");
+    crate::recreate_dirs(&[&work])?;
+    let anchor = updateproof::generate_trust_anchor(&work)?;
+    let host = updateproof::ReleaseHost::start(
+        &work,
+        &anchor,
+        &updateproof::Release {
+            latest_path: &latest_path,
+            manifest_path: &manifest_path,
+            manifest_file: &proof.successor_manifest,
+            apk_path: &apk_path,
+            apk_file: &proof.successor_apk,
+        },
+    )?;
+    println!(
+        "stand-in {RELEASE_HOST} on 127.0.0.1:{} behind the CONNECT proxy on 127.0.0.1:{} (the guest's {GUEST_HOST_ALIAS})",
+        host.https_port, host.proxy_port
+    );
+    let outcome = upgrade_through(
+        adb,
+        port,
+        &host,
+        &anchor,
+        &release_manifest_url,
+        proof,
+        report,
+    );
+    // The proxy setting must not outlive the stand-in, whatever happened;
+    // the stand-in's logs are complete only once it has stopped.
+    let _ = adb.shell_lenient("settings put global http_proxy :0");
+    let (requests, tunnels) = host.stop();
+    outcome?;
+
+    // The stand-in's own view: the release URL's redirect, the manifest, the
+    // artifact — each fetched, in that order, through a relayed tunnel.
+    let expected = [
+        format!("request GET {latest_path} -> 302"),
+        format!("request GET {manifest_path} -> 200"),
+        format!("request GET {apk_path} -> 200"),
+    ];
+    let mut cursor = 0;
+    for want in &expected {
+        cursor = requests[cursor..]
+            .iter()
+            .position(|line| line == want)
+            .map(|at| cursor + at + 1)
+            .ok_or_else(|| {
+                format!(
+                    "the stand-in did not answer `{want}` (in order) — requests: {}; tunnels: {}",
+                    requests.join(" | "),
+                    tunnels.join(" | ")
+                )
+            })?;
+    }
+    // The guest's global proxy also carries the platform's own traffic (its
+    // connectivity probes), which the proxy refuses as it must: reported by
+    // host, never a failure. Only a tunnel the stand-in itself turned away, or
+    // a request the proxy could not read, is out of the ordinary.
+    let summary = updateproof::tunnel_summary(&tunnels);
+    if !summary.other.is_empty() {
+        return Err(format!(
+            "the proxy logged what it should not have: {}",
+            summary.other.join(" | ")
+        ));
+    }
+    report.push(format!(
+        "stand-in {RELEASE_HOST}: {} tunnel(s) relayed ({RELEASE_HOST}:443 only), {} request(s) — {}; {} other request(s) from the guest refused by the proxy ({}: the platform's own traffic, which the global proxy carries too)",
+        summary.relayed,
+        requests.len(),
+        requests.join("; "),
+        summary.refused,
+        if summary.refused_hosts.is_empty() {
+            "no host".to_string()
+        } else {
+            summary.refused_hosts.join(", ")
+        }
+    ));
+    Ok(())
+}
+
+/// Mobile data off, Wi-Fi on, and the guest's default network unmetered
+/// (`dumpsys connectivity`) within [`NETWORK_TIMEOUT`]: the state
+/// `UpdateCheckService.detectNetworkType` must find for the core's download
+/// gate to let the download start.
+fn wait_for_unmetered_network(adb: &Adb) -> Result<updateproof::ActiveNetwork, String> {
+    adb.shell("svc wifi enable")?;
+    adb.shell("svc data disable")?;
+    let started = Instant::now();
+    loop {
+        let dump = adb.shell("dumpsys connectivity")?;
+        if let Some(network) =
+            updateproof::active_default_network(&dump).filter(|network| network.unmetered())
+        {
+            return Ok(network);
+        }
+        if started.elapsed() > NETWORK_TIMEOUT {
+            let excerpt: Vec<&str> = dump
+                .lines()
+                .filter(|line| {
+                    line.contains("Active default network") || line.contains("NetworkAgentInfo{")
+                })
+                .collect();
+            return Err(format!(
+                "no unmetered default network within {}s of disabling mobile data; connectivity:\n{}",
+                NETWORK_TIMEOUT.as_secs(),
+                excerpt.join("\n")
+            ));
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// The guest side of [`upgrade_phase`], with the stand-in up: trust, proxy,
+/// launch, the pathway's milestones from the service's log, the installer.
+fn upgrade_through(
+    adb: &Adb,
+    port: u16,
+    host: &updateproof::ReleaseHost,
+    anchor: &updateproof::TrustAnchor,
+    release_manifest_url: &str,
+    proof: &UpgradeProof,
+    report: &mut Report,
+) -> Result<(), String> {
+    println!(
+        "== trust anchor {} into the guest's system store ==",
+        anchor.android_name
+    );
+    let pem = anchor
+        .pem
+        .to_str()
+        .ok_or("the certificate path is not UTF-8")?;
+    let guest_cert = format!("{}/{}", updateproof::GUEST_PUSH_DIR, anchor.android_name);
+    adb.run(&["push", pem, &guest_cert])?;
+    let injected = adb.shell(&updateproof::trust_anchor_injection_script(
+        &anchor.android_name,
+    ))?;
+    if !injected.contains(&anchor.android_name) {
+        return Err(format!(
+            "the shadowed trust store does not list {}: {}",
+            anchor.android_name,
+            injected.trim()
+        ));
+    }
+    // DownloadManager's process may predate the shadow: end it so its next
+    // fork inherits the shadowed store like every other app.
+    let _ = adb.shell_lenient(&format!("am force-stop {DOWNLOADS_PROVIDER}"));
+    report.push(format!(
+        "trust anchor {}: the system store ({}) shadowed by a tmpfs copy carrying it, in the root, zygote and app namespaces",
+        anchor.android_name,
+        updateproof::GUEST_CACERTS_DIR
+    ));
+
+    // The core's download gate refuses a metered network (the app allows
+    // none): the emulator carries a cellular network, metered, beside its
+    // Wi-Fi, and a boot whose Wi-Fi never validated leaves cellular the
+    // default (run 173: `Download not ready (readiness=2)`). Mobile data
+    // goes off so Wi-Fi is the only candidate, and the default network must
+    // be unmetered before the launch.
+    let network = wait_for_unmetered_network(adb)?;
+    report.push(format!(
+        "network: the default network {} ({}, {}; mobile data disabled) — unmetered, as the core's download gate requires",
+        network.id,
+        network.transports,
+        network.capabilities.join("&")
+    ));
+
+    adb.shell(&format!(
+        "settings put global http_proxy {GUEST_HOST_ALIAS}:{}",
+        host.proxy_port
+    ))?;
+    report.push(format!(
+        "global http proxy {GUEST_HOST_ALIAS}:{} (a CONNECT relay to the stand-in on the host, {RELEASE_HOST}:443 only)",
+        host.proxy_port
+    ));
+
+    println!("== am start -W {ACTIVITY}: the fresh install's first check, against the stand-in ==");
+    // Only this launch's lines: logcat since the guest's clock now.
+    let since = adb.shell("date '+%m-%d %H:%M:%S.000'")?.trim().to_string();
+    launch_activity(adb)?;
+    let launched = Instant::now();
+    wait_for_api(port, API_TIMEOUT)?;
+    let logcat_since = format!("logcat -d -T '{since}' -s UpdateCheckService:* UpdateManager:*");
+    let (progress, log) = loop {
+        let log = adb.shell(&logcat_since)?;
+        let progress = updateproof::upgrade_progress(&log);
+        if progress.handed_off {
+            break (progress, log);
+        }
+        if let Some(failure) = &progress.failure {
+            return Err(format!(
+                "the upgrade pathway stopped short of the installer: {failure}\n{log}"
+            ));
+        }
+        if launched.elapsed() > UPGRADE_TIMEOUT {
+            return Err(format!(
+                "no installer hand-off within {}s of the launch; progress {progress:?}; the service's log:\n{log}",
+                UPGRADE_TIMEOUT.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_secs(1));
+    };
+    let handed_off_after = launched.elapsed();
+    let (url, remote) = remote_manifest_outcome(&log)
+        .ok_or_else(|| format!("the check logged no remote manifest fetch; its log:\n{log}"))?;
+    if url != release_manifest_url {
+        return Err(format!(
+            "the check fetched `{url}`, not UpdateCheckService.RELEASE_MANIFEST_URL `{release_manifest_url}`"
+        ));
+    }
+    if !remote.contains("using the remote manifest") || !remote.contains("HTTP 200") {
+        return Err(format!(
+            "the remote manifest was not taken from a 200 answer: `{remote}`; the service's log:\n{log}"
+        ));
+    }
+    let decision = update_decision_logged(&log)
+        .ok_or_else(|| format!("no update decision logged; the service's log:\n{log}"))?;
+    if decision != 1 {
+        return Err(format!(
+            "the update decision was {decision}, not 1 (available); the service's log:\n{log}"
+        ));
+    }
+    report.push(format!(
+        "upgrade check: remote manifest {remote} (the production URL, through the proxy and the trust anchor); decision {decision} (available); download {} enqueued, the artifact verified by the core (size and SHA-256) and handed to the installer {:.1}s after the launch",
+        progress
+            .download_id
+            .map_or("?".to_string(), |id| id.to_string()),
+        handed_off_after.as_secs_f64()
+    ));
+
+    println!("== the package installer ==");
+    // The installer's presence is proven by its confirmation button in the
+    // view hierarchy and by the version it installs; which activity is in
+    // front is recorded for the report, from the activity manager's dump.
+    let awaited = Instant::now();
+    let (front, tapped) = loop {
+        let _ = adb.shell_lenient("uiautomator dump /sdcard/upgrade-ui.xml");
+        let ui = adb.shell_lenient("cat /sdcard/upgrade-ui.xml");
+        if let Some((x, y, label)) = updateproof::ui_button_centre(&ui, INSTALLER_BUTTONS) {
+            let front = activity_in_front(adb);
+            adb.shell(&format!("input tap {x} {y}"))?;
+            break (front, label);
+        }
+        if awaited.elapsed() > INSTALLER_TIMEOUT {
+            let starts = adb.shell_lenient("logcat -d -s ActivityTaskManager:* ActivityManager:*");
+            let starts: Vec<&str> = starts
+                .lines()
+                .filter(|line| {
+                    line.contains("packageinstaller") || line.contains("ackground activity")
+                })
+                .collect();
+            return Err(format!(
+                "the installer showed none of {INSTALLER_BUTTONS:?} within {}s; in front: {}; installer-related activity starts:\n{}\nview hierarchy:\n{ui}",
+                INSTALLER_TIMEOUT.as_secs(),
+                activity_in_front(adb),
+                starts.join("\n")
+            ));
+        }
+        thread::sleep(Duration::from_secs(1));
+    };
+    let tapped_at = Instant::now();
+    let installed_after = loop {
+        let dump = adb.shell(&format!("dumpsys package {PACKAGE}"))?;
+        if updateproof::installed_version_code(&dump) == Some(proof.successor_code) {
+            break tapped_at.elapsed();
+        }
+        if tapped_at.elapsed() > INSTALL_TIMEOUT {
+            let ui = adb.shell_lenient(
+                "uiautomator dump /sdcard/upgrade-ui.xml && cat /sdcard/upgrade-ui.xml",
+            );
+            return Err(format!(
+                "versionCode {} was not installed within {}s of tapping `{tapped}` (installed: {:?}); the installer's view hierarchy:\n{ui}",
+                proof.successor_code,
+                INSTALL_TIMEOUT.as_secs(),
+                updateproof::installed_version_code(&dump)
+            ));
+        }
+        thread::sleep(Duration::from_secs(2));
+    };
+    report.push(format!(
+        "installer: {front} in front with `{tapped}`; tapped; versionCode {} installed {:.1}s later",
+        proof.successor_code,
+        installed_after.as_secs_f64()
+    ));
+    println!("== the successor running ==");
+    launch_activity(adb)?;
+    let api_after = wait_for_api(port, API_TIMEOUT)?;
+    let status = get(port, "/api/status")?;
+    if status.status != 200 || !json_has(&body_text(&status), "native_available", "true") {
+        return Err(format!(
+            "the successor's API did not answer 200 with native_available true: {} {}",
+            status.status,
+            body_text(&status)
+        ));
+    }
+    report.push(format!(
+        "after the upgrade: the successor launched, its API answered {:.1}s after the launch with native_available true",
+        api_after.as_secs_f64()
+    ));
+    Ok(())
+}
+
 /// The whole command.
 pub fn run(config: &Config) -> Result<(), String> {
     let adb_exe = tool(config.sdk_root, "platform-tools/adb")?;
@@ -1426,6 +1882,9 @@ pub fn run(config: &Config) -> Result<(), String> {
     if !config.apk.is_file() {
         return Err(format!("APK not found: {}", config.apk.display()));
     }
+    // The upgrade phase comes last; its inputs are checked before minutes go
+    // into a boot.
+    config.upgrade.check_files()?;
     let work = crate::xtask_temp_dir("verify-android-emulator");
     let avd_home = work.join("avd");
     crate::recreate_dirs(&[&work, &avd_home])?;
@@ -1506,6 +1965,7 @@ pub fn run(config: &Config) -> Result<(), String> {
                             "BleScanEngine",
                             "UpdateCheckService",
                             "AndroidRuntime",
+                            "packageinstaller",
                         ]
                         .iter()
                         .any(|needle| line.contains(needle))

@@ -978,8 +978,19 @@ pub fn run(root: &Path) -> Result<(), String> {
         apk_path.display(),
         artifact.len()
     );
+    // The emulator's upgrade proof rests on a stand-in github.com (a TLS
+    // server on a generated trust anchor behind a CONNECT proxy); its host
+    // side is proven here, on this JVM and curl, before any emulator boots.
+    println!("== the upgrade proof's stand-in release host, through its proxy over TLS (curl) ==");
+    let stand_in = crate::updateproof::self_check(
+        &crate::xtask_temp_dir("verify-api-live-stand-in"),
+        &crate::emulator::release_manifest_url_from(root)?,
+        &release_manifest,
+        &apk_path,
+    )?;
+    println!("{stand_in}");
     println!(
-        "verify-api-live: real ApiHttpServer + real dashboard + headless Chromium + the manifest source, all green"
+        "verify-api-live: real ApiHttpServer + real dashboard + headless Chromium + the manifest source + the upgrade proof's stand-in, all green"
     );
     Ok(())
 }

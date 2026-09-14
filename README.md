@@ -460,7 +460,21 @@ notification left), the API unreachable after
 foreground service surviving `pm revoke … BLUETOOTH_SCAN` (the report names
 the branch the platform took; on the first run the sticky restart found the
 permissions revoked and stopped the service), with no Java or native crash
-of the package and no leaked `ServiceConnection` in logcat; the AVD is
+of the package and no leaked `ServiceConnection` in logcat. Then the app
+upgrades itself through its own pathway (decision #99): the committed
+package is replaced by `build-update-proof`'s build of the same version
+(one signing key with its successor), a `keytool` certificate for
+`github.com` is injected into the guest's system trust store (a tmpfs copy
+of the Conscrypt APEX's store, bind-mounted over it in every zygote's
+namespace), a generated JDK `HttpsServer` on that certificate serves the
+release URL's redirect, the successor's manifest and its APK behind an xtask
+CONNECT proxy set as the guest's global proxy, and a relaunch must fetch the
+production URL (`HTTP 200 -> using the remote manifest`), decide 1, download,
+verify and hand the successor to the installer, whose `Update` the proof
+taps; the successor's versionCode must be installed and its API up with the
+native core, and the stand-in's log must show the redirect, the manifest and
+the artifact in order (on the first end-to-end run: handed to the installer
+5.8 s after the launch, installed 2.5 s after the tap). The AVD is
 deleted on every exit. It needs
 `/dev/kvm`, the SDK's `emulator`, `platform-tools` and the pinned image
 (`cargo xtask android-sdk-install --emulator` installs them: licenses
@@ -498,7 +512,8 @@ cargo xtask verify-jni-live        # real JVM → JNI → Rust proof (needs a JD
 cargo xtask build-apk              # cross-compile + package + sign the Android app (needs SDK/NDK)
 cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/export checks
 cargo xtask verify-android-unit    # the app's unit tests (android/app/src/test) on the host JVM against the real native core (needs a JDK)
-cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator (needs KVM + SDK emulator)
+cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator, then the app upgrading itself against a stand-in github.com (needs KVM + SDK emulator + target/android-apk/proof from build-update-proof)
+cargo xtask build-update-proof     # the current version and its successor on one key + the successor's release manifest, under target/android-apk/proof (needs SDK/NDK)
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
 cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)
 cargo xtask check-app-version      # the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME, no artifact of another version remains (a gates step)
@@ -541,7 +556,12 @@ cargo xtask release-manifest --out release_manifest.txt   # the APK's exact size
 
 `release-manifest` refuses a non-`https` URL, and `verify-api-live` serves
 the manifest it generates to the real core as the accepted-manifest scenario,
-so the text a release publishes is proven parseable before it is published.
+so the text a release publishes is proven parseable before it is published;
+`verify-android-emulator` runs the whole pathway past it — the fetch of the
+production URL, the download, the core's verification, the installer, the
+install — against a stand-in `github.com` on every pull request
+(`build-update-proof`, decision #99), so a real release's only untested
+link is GitHub itself.
 
 ## Distribution packaging
 

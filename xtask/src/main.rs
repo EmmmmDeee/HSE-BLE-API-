@@ -20,6 +20,7 @@ mod emulator;
 mod hci;
 mod javaunit;
 mod sha256;
+mod updateproof;
 mod vendor;
 mod zip_reader;
 
@@ -94,6 +95,7 @@ fn main() -> ExitCode {
         "verify-dashboard-live" => cmd_verify_dashboard_live(),
         "verify-api-live" => cmd_verify_api_live(),
         "verify-android-unit" => cmd_verify_android_unit(),
+        "build-update-proof" => cmd_build_update_proof(),
         "verify-android-emulator" => cmd_verify_android_emulator(),
         "android-sdk-packages" => cmd_android_sdk_packages(&rest),
         "android-sdk-install" => cmd_android_sdk_install(&rest),
@@ -144,6 +146,7 @@ fn print_usage() {
          \x20 verify-dashboard-live      render the web dashboard (assets/dashboard.html) in headless Chromium against a mock of the JSON contract and check the DOM\n\
          \x20 verify-api-live            run the app's real ApiHttpServer on the host JVM with fixture sources, check every HTTP contract by real requests (JSON byte-identical to the browser fixtures) and render the dashboard from it in headless Chromium\n\
          \x20 verify-android-unit        run the app's unit tests (android/app/src/test) on the host JVM against the real native core through a generated JUnit-subset runner; every test file must be listed with its pinned count\n\
+         \x20 build-update-proof         build the committed version and its successor (next patch version, next code) on one debug key under target/android-apk/proof/, with the successor's release manifest, for verify-android-emulator's upgrade proof\n\
          \x20 verify-android-emulator    install the committed APK on a headless Android emulator (KVM) and exercise the app's real lifecycle through the loopback API\n\
          \x20 android-sdk-packages [--system-image|--emulator]  print the pinned sdkmanager package set the Android proofs are built with (CI installs exactly this)\n\
          \x20 android-sdk-install [--system-image|--emulator]   install that set into the discovered SDK: licenses accepted, sdkmanager retried, every package checked complete and discoverable (what CI runs)\n\
@@ -1149,7 +1152,12 @@ const APP_VERSION_NAME: &str = "1.0.0";
 /// Final signed APK's committed name at the repository root, after the
 /// version, so an upgrade never reuses a name.
 fn apk_output_name() -> String {
-    format!("{APK_NAME_PREFIX}{APP_VERSION_NAME}.apk")
+    apk_output_name_for(APP_VERSION_NAME)
+}
+
+/// The artifact's name for a version name (`HSE-BLE-Radar-arm64-v<name>.apk`).
+fn apk_output_name_for(version_name: &str) -> String {
+    format!("{APK_NAME_PREFIX}{version_name}.apk")
 }
 
 /// What every committed artifact's name starts with; the version name follows.
@@ -1163,9 +1171,14 @@ const BUNDLED_RELEASE_MANIFEST_PATH: &str = "android/app/src/main/assets/release
 /// `v<version name>` — the tag convention `release-manifest` assumes
 /// (`--url` overrides it).
 fn release_artifact_url() -> String {
+    release_artifact_url_for(APP_VERSION_NAME)
+}
+
+/// The release asset URL of a version name's artifact (tag `v<name>`).
+fn release_artifact_url_for(version_name: &str) -> String {
     format!(
-        "https://github.com/EmmmmDeee/HSE-BLE-API-/releases/download/v{APP_VERSION_NAME}/{}",
-        apk_output_name()
+        "https://github.com/EmmmmDeee/HSE-BLE-API-/releases/download/v{version_name}/{}",
+        apk_output_name_for(version_name)
     )
 }
 
@@ -2221,6 +2234,167 @@ fn recreate_dirs(dirs: &[&Path]) -> Result<(), String> {
 
 fn cmd_build_apk() -> Result<(), String> {
     let root = repo_root()?;
+    let output = root.join(apk_output_name());
+    build_apk_package(
+        &root,
+        &ApkVersion {
+            code: APP_VERSION_CODE,
+            name: APP_VERSION_NAME.to_string(),
+        },
+        &root.join(ANDROID_APP_DIR).join("assets"),
+        &output,
+    )
+}
+
+/// A package's version, as `aapt2 link` writes it into the manifest.
+struct ApkVersion {
+    code: u32,
+    name: String,
+}
+
+/// Where `build-update-proof` writes and `verify-android-emulator` reads the
+/// upgrade proof's packages; under `target/`, never committed.
+const UPDATE_PROOF_DIR: &str = "target/android-apk/proof";
+/// The successor's release manifest, beside its package.
+const UPDATE_PROOF_MANIFEST_FILE: &str = "release_manifest.txt";
+
+/// The version the upgrade proof offers the installed app: the next code
+/// under the next patch name.
+fn update_proof_successor() -> ApkVersion {
+    ApkVersion {
+        code: APP_VERSION_CODE + 1,
+        name: next_patch_version(APP_VERSION_NAME),
+    }
+}
+
+/// `1.0.0` → `1.0.1`; a name whose last component is not a number gets `.1`.
+fn next_patch_version(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((head, patch)) => match patch.parse::<u32>() {
+            Ok(patch) => format!("{head}.{}", patch + 1),
+            Err(_) => format!("{name}.1"),
+        },
+        None => match name.parse::<u32>() {
+            Ok(whole) => (whole + 1).to_string(),
+            Err(_) => format!("{name}.1"),
+        },
+    }
+}
+
+/// `cargo xtask build-update-proof`: the two packages the emulator's upgrade
+/// proof installs — the committed version and its successor
+/// ([`update_proof_successor`]), both signed with this build directory's
+/// debug key so the successor is an acceptable update of the first — under
+/// `target/android-apk/proof/`, with the successor's release manifest as
+/// `release-manifest` would publish it (its exact size and SHA-256). CI's
+/// `android-apk` job builds them and the `android-emulator` job installs
+/// them; the "next release" the proof offers is whatever the sources are.
+fn cmd_build_update_proof() -> Result<(), String> {
+    let root = repo_root()?;
+    let proof_dir = root.join(UPDATE_PROOF_DIR);
+    let current = ApkVersion {
+        code: APP_VERSION_CODE,
+        name: APP_VERSION_NAME.to_string(),
+    };
+    let successor = update_proof_successor();
+    println!(
+        "== update proof: {} ({}) and its successor {} ({}) ==",
+        current.name, current.code, successor.name, successor.code
+    );
+    let assets = root.join(ANDROID_APP_DIR).join("assets");
+    build_apk_package(
+        &root,
+        &current,
+        &assets,
+        &proof_dir.join(apk_output_name_for(&current.name)),
+    )?;
+    // The successor ships a bundled manifest that describes itself, as a
+    // release of that version would (check-app-version's rule), so what the
+    // proof installs is a self-consistent package, not the current one
+    // relabelled.
+    let successor_assets = proof_dir.join("successor-assets");
+    recreate_dirs(&[&successor_assets])?;
+    for entry in fs::read_dir(&assets).map_err(|e| format!("listing {}: {e}", assets.display()))? {
+        let entry = entry.map_err(|e| format!("listing {}: {e}", assets.display()))?;
+        let from = entry.path();
+        if !from.is_file() {
+            return Err(format!(
+                "{} is not a file; the proof's asset staging copies files only",
+                from.display()
+            ));
+        }
+        fs::copy(&from, successor_assets.join(entry.file_name()))
+            .map_err(|e| format!("copying {}: {e}", from.display()))?;
+    }
+    let bundled = bundled_manifest_for(
+        &read_to_string(&root.join(BUNDLED_RELEASE_MANIFEST_PATH))?,
+        &successor,
+    )?;
+    let bundled_path = successor_assets.join(UPDATE_PROOF_MANIFEST_FILE);
+    fs::write(&bundled_path, &bundled)
+        .map_err(|e| format!("writing {}: {e}", bundled_path.display()))?;
+    let successor_apk = proof_dir.join(apk_output_name_for(&successor.name));
+    build_apk_package(&root, &successor, &successor_assets, &successor_apk)?;
+    let manifest_xml = read_to_string(&root.join(ANDROID_APP_DIR).join("AndroidManifest.xml"))?;
+    let (min_sdk, _) = parse_uses_sdk(&manifest_xml)?;
+    let artifact = read_bytes(&successor_apk)?;
+    let manifest = release_manifest_text_for(
+        &successor,
+        &artifact,
+        &release_artifact_url_for(&successor.name),
+        min_sdk,
+        &format!("HSE BLE Radar {} (upgrade proof)", successor.name),
+    );
+    let manifest_path = proof_dir.join(UPDATE_PROOF_MANIFEST_FILE);
+    fs::write(&manifest_path, &manifest)
+        .map_err(|e| format!("writing {}: {e}", manifest_path.display()))?;
+    println!(
+        "== update proof written: {} — the successor's manifest ({} bytes, sha256 {}) ==",
+        proof_dir.display(),
+        artifact.len(),
+        sha256::to_hex(&sha256::sha256(&artifact))
+    );
+    Ok(())
+}
+
+/// The bundled manifest text for `version`: the committed asset with its
+/// `version_code` and `version_name` lines rewritten and every other line
+/// kept, so a successor package ships a fallback that describes itself.
+/// Refuses a text the core would (a malformed line, a repeated field) or one
+/// without both version fields.
+fn bundled_manifest_for(text: &str, version: &ApkVersion) -> Result<String, String> {
+    let fields = manifest_fields(text)?;
+    for required in ["version_code", "version_name"] {
+        if !fields.iter().any(|(key, _)| key == required) {
+            return Err(format!("the bundled release manifest has no {required}"));
+        }
+    }
+    let rewritten: Vec<String> = text
+        .lines()
+        .map(|line| match line.trim().split_once('=') {
+            Some((key, _)) if key.trim() == "version_code" => {
+                format!("version_code = {}", version.code)
+            }
+            Some((key, _)) if key.trim() == "version_name" => {
+                format!("version_name = {}", version.name)
+            }
+            _ => line.to_string(),
+        })
+        .collect();
+    Ok(format!("{}\n", rewritten.join("\n")))
+}
+
+/// Cross-compiles `bleradar-jni`, compiles and packages the app as
+/// `version` with the assets under `assets_dir`, signs it with the build
+/// directory's debug key and writes the verified package to `output`.
+/// `cmd_build_apk` builds the committed version with the app's own assets;
+/// `cmd_build_update_proof` builds it and its successor.
+fn build_apk_package(
+    root: &Path,
+    version: &ApkVersion,
+    assets_dir: &Path,
+    output: &Path,
+) -> Result<(), String> {
     let app_dir = root.join(ANDROID_APP_DIR);
     let manifest_path = app_dir.join("AndroidManifest.xml");
     let manifest_text = read_to_string(&manifest_path)?;
@@ -2251,7 +2425,7 @@ fn cmd_build_apk() -> Result<(), String> {
         &staging_dir,
     ])?;
 
-    ensure_rustup_target_installed(&root, ANDROID_RUST_TARGET)?;
+    ensure_rustup_target_installed(root, ANDROID_RUST_TARGET)?;
     println!("== cross-compiling bleradar-jni for aarch64-linux-android (release) ==");
     let ndk_bin = ndk_root
         .join("toolchains/llvm/prebuilt")
@@ -2267,7 +2441,7 @@ fn cmd_build_apk() -> Result<(), String> {
     let llvm_ar = ndk_bin.join("llvm-ar");
     run_status({
         let mut c = Command::new("cargo");
-        c.current_dir(&root)
+        c.current_dir(root)
             .args([
                 "build",
                 "--release",
@@ -2325,15 +2499,15 @@ fn cmd_build_apk() -> Result<(), String> {
             // `getAssets().open(..)` in the app fails on the device
             // (decision #89), which `REQUIRED_APK_ENTRIES` now catches.
             .arg("-A")
-            .arg(app_dir.join("assets"))
+            .arg(assets_dir)
             .arg("-o")
             .arg(&base_apk)
             .arg("--java")
             .arg(&gen_dir)
             .args(["--min-sdk-version", &min_sdk.to_string()])
             .args(["--target-sdk-version", &target_sdk.to_string()])
-            .args(["--version-code", &APP_VERSION_CODE.to_string()])
-            .args(["--version-name", APP_VERSION_NAME])
+            .args(["--version-code", &version.code.to_string()])
+            .args(["--version-name", &version.name])
             .args(["-0", "arsc"])
             .arg("--auto-add-overlay");
         for flat in &flat_files {
@@ -2496,13 +2670,15 @@ fn cmd_build_apk() -> Result<(), String> {
         c
     })?;
 
-    let output_path = root.join(apk_output_name());
-    fs::copy(&signed_apk, &output_path)
-        .map_err(|e| format!("copying final APK to {}: {e}", output_path.display()))?;
-    let size = fs::metadata(&output_path)
-        .map_err(|e| format!("stat {}: {e}", output_path.display()))?
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+    fs::copy(&signed_apk, output)
+        .map_err(|e| format!("copying final APK to {}: {e}", output.display()))?;
+    let size = fs::metadata(output)
+        .map_err(|e| format!("stat {}: {e}", output.display()))?
         .len();
-    println!("== done: {} ({size} bytes) ==", output_path.display());
+    println!("== done: {} ({size} bytes) ==", output.display());
     Ok(())
 }
 
@@ -2935,8 +3111,31 @@ fn check_bundled_manifest_version(text: &str) -> Result<(), String> {
 /// `ArtifactVerifier` demands of a download), the app's `min_sdk`, not
 /// mandatory. `notes` must be one line.
 fn release_manifest_text(artifact: &[u8], url: &str, min_sdk: u32, notes: &str) -> String {
+    release_manifest_text_for(
+        &ApkVersion {
+            code: APP_VERSION_CODE,
+            name: APP_VERSION_NAME.to_string(),
+        },
+        artifact,
+        url,
+        min_sdk,
+        notes,
+    )
+}
+
+/// [`release_manifest_text`] for any version: what the upgrade proof
+/// publishes for the successor package.
+fn release_manifest_text_for(
+    version: &ApkVersion,
+    artifact: &[u8],
+    url: &str,
+    min_sdk: u32,
+    notes: &str,
+) -> String {
     format!(
-        "version_code = {APP_VERSION_CODE}\nversion_name = {APP_VERSION_NAME}\nurl = {url}\nsize_bytes = {}\nsha256 = {}\nmin_sdk = {min_sdk}\nmandatory = false\nnotes = {notes}\n",
+        "version_code = {}\nversion_name = {}\nurl = {url}\nsize_bytes = {}\nsha256 = {}\nmin_sdk = {min_sdk}\nmandatory = false\nnotes = {notes}\n",
+        version.code,
+        version.name,
         artifact.len(),
         sha256::to_hex(&sha256::sha256(artifact))
     )
@@ -3161,11 +3360,21 @@ fn cmd_verify_android_emulator() -> Result<(), String> {
     let sdk_root = discover_sdk_root()?;
     let apk = root.join(apk_output_name());
     let image = emulator_image_package();
+    let proof_dir = root.join(UPDATE_PROOF_DIR);
+    let successor = update_proof_successor();
+    let upgrade = emulator::UpgradeProof {
+        current_apk: proof_dir.join(apk_output_name_for(APP_VERSION_NAME)),
+        successor_apk: proof_dir.join(apk_output_name_for(&successor.name)),
+        successor_manifest: proof_dir.join(UPDATE_PROOF_MANIFEST_FILE),
+        successor_code: successor.code,
+        successor_artifact_url: release_artifact_url_for(&successor.name),
+    };
     emulator::run(&emulator::Config {
         root: &root,
         sdk_root: &sdk_root,
         apk: &apk,
         image_package: &image,
+        upgrade: &upgrade,
     })
 }
 
@@ -4484,6 +4693,39 @@ mod tests {
             ]
         );
         assert!(stale_artifacts(std::iter::once(apk_output_name())).is_empty());
+
+        // The successor's bundled manifest: the committed asset describing
+        // the successor, every other line untouched; what the core refuses
+        // is refused.
+        let successor = ApkVersion {
+            code: 7,
+            name: "2.5.0".to_string(),
+        };
+        assert_eq!(next_patch_version("1.0.0"), "1.0.1");
+        assert_eq!(next_patch_version("2.9"), "2.10");
+        assert_eq!(next_patch_version("3"), "4");
+        assert_eq!(next_patch_version("1.0.0-rc"), "1.0.0-rc.1");
+        assert_eq!(
+            bundled_manifest_for(
+                "# offline default\nversion_code = 1\nversion_name = 1.0.0\nurl = https://e/x.apk\nnotes = version_name = kept\n",
+                &successor
+            )
+            .unwrap(),
+            "# offline default\nversion_code = 7\nversion_name = 2.5.0\nurl = https://e/x.apk\nnotes = version_name = kept\n"
+        );
+        assert!(
+            bundled_manifest_for("version_code = 1\nurl = https://e/x.apk\n", &successor)
+                .unwrap_err()
+                .contains("no version_name")
+        );
+        assert!(
+            bundled_manifest_for(
+                "version_code = 1\nversion_name = 1.0.0\nversion_code = 2\n",
+                &successor
+            )
+            .unwrap_err()
+            .contains("given twice")
+        );
 
         let manifest = "# comment\nversion_code = 7\nversion_name = 9.9.9\nurl = https://e/x.apk\n\nnotes = a = b\n";
         assert_eq!(
