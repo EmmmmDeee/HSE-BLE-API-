@@ -397,9 +397,9 @@ body declared beyond the 64 KiB cap refused with `413` at once), then
 renders the committed dashboard from that server in headless Chromium, and
 then runs the real `ReleaseManifestSource` — the class that fetches the
 app's release manifest from the repository's latest release — against a
-scripted local server (a valid manifest, no release, a server fault, an
-oversized body, a body the Rust core rejects, a stalled answer, a refused
-connection, a malformed URL), requiring each fetch's classification and its
+scripted local server (a valid manifest, no release, a server fault, a
+redirect it cannot follow, an oversized body, a body the Rust core rejects,
+a stalled answer, a refused connection, a malformed URL), requiring each fetch's classification and its
 Rust disposition through the real library.
 It needs a JDK and a Chromium/Chrome binary; CI's `gates` job runs it after
 the live JNI proof.

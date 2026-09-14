@@ -61,6 +61,13 @@ final class ReleaseManifestSource {
             connection.setUseCaches(false);
             connection.setRequestProperty("Accept", "text/plain");
             int status = connection.getResponseCode();
+            if (status < 0) {
+                // No discernible status line: the peer closed or answered
+                // something that is not HTTP — a transport failure, not an
+                // answer to classify.
+                return new Fetch(0, NativeRadar.MANIFEST_FETCH_TRANSPORT_FAILURE, null,
+                        "no HTTP status line in the answer");
+            }
             if (status < 200 || status > 299) {
                 return new Fetch(status, NativeRadar.MANIFEST_FETCH_ANSWERED, null, "HTTP " + status);
             }

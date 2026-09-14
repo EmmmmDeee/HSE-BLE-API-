@@ -80,7 +80,7 @@ releases answers), refuses the request, redirects across protocols, or
 serves what is not a manifest. One log line,
 `Remote manifest <url>: <what the fetch got> -> <what was decided>`, records
 every attempt; `cargo xtask verify-android-emulator` requires it before the
-decision and reports it.
+decision, naming the URL the Java source declares, and reports it.
 
 The [`UpdateSession`] state machine is the one part still *not* bridged:
 exposing owned native state across JNI needs a handle-lifetime design that is
@@ -212,8 +212,8 @@ retry budget and the previous known-good version persist across a restart.
   unreachable without a genuine size+SHA-256 match.
 * `cargo xtask verify-api-live` — the real `ReleaseManifestSource` against a
   scripted JDK `HttpServer` on the host JVM: a valid manifest, `404`, `503`, a
-  body over the cap, a body the core rejects, a stalled answer, a refused
-  connection and a malformed URL, each fetch's classification and its Rust
+  `301` without `Location`, a body over the cap, a body the core rejects, a
+  stalled answer, a refused connection and a malformed URL, each fetch's classification and its Rust
   disposition required as documented through the real `libbleradar_jni.so`.
 * `cargo run -p bleradar-core --example update_flow` — the whole lifecycle over a
   real 64 KiB artifact and a real SHA-256, including a simulated crash mid-install

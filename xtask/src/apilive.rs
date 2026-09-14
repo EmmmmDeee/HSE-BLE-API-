@@ -251,9 +251,10 @@ impl HttpResponse {
 /// Parses a complete `HTTP/1.1` response (the server closes the connection
 /// after every response, so the whole stream is one response).
 /// The manifest-source harness: the real `ReleaseManifestSource` against a
-/// scripted local server (a valid manifest, no release, a server fault, an
-/// oversized body, a body the Rust core rejects, a stalled answer, a refused
-/// connection, a malformed URL), each fetch's outcome run through the real
+/// scripted local server (a valid manifest, no release, a server fault, a
+/// redirect the client cannot follow, an oversized body, a body the Rust core
+/// rejects, a stalled answer, a refused connection, a malformed URL), each
+/// fetch's outcome run through the real
 /// `remoteManifestDisposition` export and printed as one line.
 pub fn manifest_source_smoke_java_source() -> String {
     r#"package com.hse.bleradar;
@@ -287,6 +288,9 @@ public final class ManifestSourceSmoke {
         server.createContext("/ok", answer(200, MANIFEST));
         server.createContext("/missing", answer(404, "no release"));
         server.createContext("/down", answer(503, "later"));
+        // A redirect the client cannot follow (no Location header) is left
+        // as the 3xx it is: an answer, and one without a release.
+        server.createContext("/redirect", answer(301, "moved"));
         StringBuilder large = new StringBuilder();
         for (int i = 0; i <= MAX_BYTES; i++) {
             large.append('x');
@@ -312,6 +316,7 @@ public final class ManifestSourceSmoke {
             report("ok", fetch(base + "/ok", TIMEOUT_MS));
             report("missing", fetch(base + "/missing", TIMEOUT_MS));
             report("down", fetch(base + "/down", TIMEOUT_MS));
+            report("redirect", fetch(base + "/redirect", TIMEOUT_MS));
             report("large", fetch(base + "/large", TIMEOUT_MS));
             report("junk", fetch(base + "/junk", TIMEOUT_MS));
             report("slow", fetch(base + "/slow", SHORT_TIMEOUT_MS));
@@ -362,10 +367,11 @@ public final class ManifestSourceSmoke {
 /// What each manifest-source scenario must report: `(status, failure kind,
 /// accepted, disposition)` — the fetcher's classification and the Rust
 /// disposition of it. `0` status with kind `1` is a transport failure.
-const MANIFEST_SOURCE_EXPECTATIONS: [(&str, u16, u8, bool, u8); 8] = [
+const MANIFEST_SOURCE_EXPECTATIONS: [(&str, u16, u8, bool, u8); 9] = [
     ("ok", 200, 0, true, 0),
     ("missing", 404, 0, false, 2),
     ("down", 503, 0, false, 1),
+    ("redirect", 301, 0, false, 2),
     ("large", 200, 2, false, 2),
     ("junk", 200, 3, false, 2),
     ("slow", 0, 1, false, 1),
@@ -947,12 +953,13 @@ mod tests {
         let good = "scenario=ok status=200 failure=0 accepted=true disposition=0 detail=HTTP 200, 231 bytes\n\
                     scenario=missing status=404 failure=0 accepted=false disposition=2 detail=HTTP 404\n\
                     scenario=down status=503 failure=0 accepted=false disposition=1 detail=HTTP 503\n\
+                    scenario=redirect status=301 failure=0 accepted=false disposition=2 detail=HTTP 301\n\
                     scenario=large status=200 failure=2 accepted=false disposition=2 detail=HTTP 200, body over 16384 bytes\n\
                     scenario=junk status=200 failure=3 accepted=false disposition=2 detail=HTTP 200, 17 bytes\n\
                     scenario=slow status=0 failure=1 accepted=false disposition=1 detail=SocketTimeoutException: Read timed out\n\
                     scenario=refused status=0 failure=1 accepted=false disposition=1 detail=ConnectException: Connection refused\n\
                     scenario=malformed status=0 failure=1 accepted=false disposition=1 detail=MalformedURLException: no protocol: not a url\n";
-        assert_eq!(check_manifest_source_report(good), Ok(8));
+        assert_eq!(check_manifest_source_report(good), Ok(9));
         let wrong = good.replace(
             "scenario=down status=503 failure=0 accepted=false disposition=1",
             "scenario=down status=503 failure=0 accepted=false disposition=2",
@@ -970,7 +977,7 @@ mod tests {
         );
         let short: String = good
             .lines()
-            .take(7)
+            .take(8)
             .map(|line| format!("{line}\n"))
             .collect();
         assert!(

@@ -216,15 +216,35 @@ pub fn json_has(json: &str, key: &str, literal: &str) -> bool {
 }
 
 /// What `UpdateCheckService` logs about its remote manifest fetch (`Remote
-/// manifest <url>: <what the fetch got> -> <what was decided>`): the part
-/// after the URL, if the fetch path ran.
-pub fn remote_manifest_outcome(logcat: &str) -> Option<String> {
+/// manifest <url>: <what the fetch got> -> <what was decided>`): the URL it
+/// fetched and the part after it, from the first such line.
+pub fn remote_manifest_outcome(logcat: &str) -> Option<(String, String)> {
     logcat
         .lines()
         .filter_map(|line| line.split("Remote manifest ").nth(1))
         .filter_map(|rest| rest.split_once(": "))
-        .map(|(_, outcome)| outcome.trim().to_string())
+        .map(|(url, outcome)| (url.trim().to_string(), outcome.trim().to_string()))
         .next()
+}
+
+/// Whether the first `Remote manifest` line comes before the first `Update
+/// decision` line: the check fetched before it assessed.
+pub fn fetch_precedes_decision(logcat: &str) -> bool {
+    let position = |needle: &str| logcat.lines().position(|line| line.contains(needle));
+    matches!(
+        (position("Remote manifest "), position("Update decision: ")),
+        (Some(fetch), Some(decision)) if fetch < decision
+    )
+}
+
+/// The string a `static final String <name> =` constant is assigned in Java
+/// source (the literal may sit on the next line), without a Java parser.
+pub fn java_static_final_string(source: &str, name: &str) -> Option<String> {
+    let declaration = format!("static final String {name} =");
+    let rest = source.split(declaration.as_str()).nth(1)?;
+    let (_, after_quote) = rest.split_once('"')?;
+    let (value, _) = after_quote.split_once('"')?;
+    Some(value.to_string())
 }
 
 /// The `Update decision: N` line `UpdateCheckService` logs once it assessed
@@ -1193,6 +1213,19 @@ fn exercise(
     // bundled manifest, and finished — no service record and no "Checking
     // for updates..." notification left. Both are awaited, and every dump is
     // a fallible command, so a failed adb call never reads as "nothing left".
+    let service_source = config
+        .root
+        .join("android/app/src/main/java/com/hse/bleradar/UpdateCheckService.java");
+    let release_manifest_url = fs::read_to_string(&service_source)
+        .ok()
+        .and_then(|source| java_static_final_string(&source, "RELEASE_MANIFEST_URL"))
+        .filter(|url| url.starts_with("https://"))
+        .ok_or_else(|| {
+            format!(
+                "no https RELEASE_MANIFEST_URL constant in {}",
+                service_source.display()
+            )
+        })?;
     let decision_awaited = Instant::now();
     let (decision, update_lines, remote) = loop {
         let update_log = adb.shell("logcat -d -s UpdateCheckService:* UpdateManager:*")?;
@@ -1203,13 +1236,25 @@ fn exercise(
                     line.contains("UpdateCheckService") || line.contains("UpdateManager")
                 })
                 .count();
-            // The decision follows the fetch, so the fetch's line is there or
-            // the fetch path did not run — either way, named.
-            let remote = remote_manifest_outcome(&update_log).ok_or_else(|| {
+            // The fetch's line must be there, before the decision, and name
+            // the production source `UpdateCheckService.RELEASE_MANIFEST_URL`
+            // (read from the Java source, its authority): a check that
+            // assessed without fetching, or fetched elsewhere, fails here.
+            let (url, remote) = remote_manifest_outcome(&update_log).ok_or_else(|| {
                 format!(
                     "the update check reached its decision without logging its remote manifest fetch (the fetch path did not run); its log:\n{update_log}"
                 )
             })?;
+            if !fetch_precedes_decision(&update_log) {
+                return Err(format!(
+                    "the update check logged its decision before its remote manifest fetch; its log:\n{update_log}"
+                ));
+            }
+            if url != release_manifest_url {
+                return Err(format!(
+                    "the update check fetched `{url}`, not UpdateCheckService.RELEASE_MANIFEST_URL `{release_manifest_url}`"
+                ));
+            }
             break (decision, lines, remote);
         }
         if decision_awaited.elapsed() > PROMOTION_TIMEOUT {
@@ -1247,7 +1292,7 @@ fn exercise(
         thread::sleep(Duration::from_millis(500));
     }
     report.push(format!(
-        "update check: ran on the first launch — remote manifest {remote}; decision {decision} ({update_lines} log lines); the dataSync service finished — no record, no notification left"
+        "update check: ran on the first launch — remote manifest {remote} (the production URL, fetched before the decision); decision {decision} ({update_lines} log lines); the dataSync service finished — no record, no notification left"
     ));
 
     println!("== am force-stop: the API must end with the app ==");
@@ -1615,14 +1660,41 @@ mod tests {
 
         let remote = "09-14 08:00:01.000  3512  3540 I UpdateCheckService: Remote manifest https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt: HTTP 404 -> using the bundled manifest; no retry\n";
         assert_eq!(
-            remote_manifest_outcome(remote).as_deref(),
-            Some("HTTP 404 -> using the bundled manifest; no retry")
+            remote_manifest_outcome(remote),
+            Some((
+                "https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt".to_string(),
+                "HTTP 404 -> using the bundled manifest; no retry".to_string()
+            ))
         );
         assert_eq!(
-            remote_manifest_outcome("I UpdateCheckService: Remote manifest https://x/y: UnknownHostException: Unable to resolve host \"github.com\" -> using the bundled manifest; retry scheduled").as_deref(),
-            Some("UnknownHostException: Unable to resolve host \"github.com\" -> using the bundled manifest; retry scheduled")
+            remote_manifest_outcome("I UpdateCheckService: Remote manifest https://x/y: UnknownHostException: Unable to resolve host \"github.com\" -> using the bundled manifest; retry scheduled"),
+            Some((
+                "https://x/y".to_string(),
+                "UnknownHostException: Unable to resolve host \"github.com\" -> using the bundled manifest; retry scheduled".to_string()
+            ))
         );
         assert_eq!(remote_manifest_outcome(log), None);
+
+        // The fetch must come before the decision; a retry's later line does not count.
+        let ordered = format!("{remote}D UpdateCheckService: Update decision: 0 (available=1)\n");
+        assert!(fetch_precedes_decision(&ordered));
+        let reversed = format!("D UpdateCheckService: Update decision: 0 (available=1)\n{remote}");
+        assert!(!fetch_precedes_decision(&reversed));
+        assert!(!fetch_precedes_decision(remote));
+        assert!(!fetch_precedes_decision(log));
+
+        let java = "    static final String RELEASE_MANIFEST_URL =\n            \"https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt\";\n    private static final int MANIFEST_CONNECT_TIMEOUT_MS = 10_000;\n";
+        assert_eq!(
+            java_static_final_string(java, "RELEASE_MANIFEST_URL").as_deref(),
+            Some(
+                "https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt"
+            )
+        );
+        assert_eq!(java_static_final_string(java, "OTHER"), None);
+        assert_eq!(
+            java_static_final_string("static final String X = 1;", "X"),
+            None
+        );
 
         let ps = "    PID    PPID COMMAND         COMMAND\n\
                   2646       1 adb             adb -L tcp:5037 fork-server server --reply-fd 4\n\

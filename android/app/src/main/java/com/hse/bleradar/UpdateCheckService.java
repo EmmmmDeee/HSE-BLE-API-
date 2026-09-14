@@ -28,7 +28,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Background service that periodically checks for app updates using the
@@ -91,10 +90,17 @@ public final class UpdateCheckService extends Service {
     private volatile long activeDownloadId = -1;
     /** The one worker the check runs on: network I/O may not run on the main thread. */
     private final ExecutorService checkExecutor = Executors.newSingleThreadExecutor();
+    /**
+     * Guards {@link #checkInFlight} and {@link #latestStartId} together, so a
+     * start absorbed into a running check is always the id that check's
+     * finish() answers: the claim (start side) and the release (worker side)
+     * each read and write both under this lock.
+     */
+    private final Object checkLock = new Object();
     /** Whether a check is running on the worker; a start that arrives meanwhile is served by it. */
-    private final AtomicBoolean checkInFlight = new AtomicBoolean(false);
-    /** The most recent start id, which the worker's finish() answers. */
-    private volatile int latestStartId;
+    private boolean checkInFlight;
+    /** The most recent start id, which the check's finish() answers. */
+    private int latestStartId;
 
     @Override
     public void onCreate() {
@@ -237,7 +243,6 @@ public final class UpdateCheckService extends Service {
         if (updateManager == null) {
             return START_NOT_STICKY;
         }
-        latestStartId = startId;
 
         boolean isRetry = intent != null && intent.getBooleanExtra("is_retry", false);
         // Every start of this service arrives through startForegroundService()
@@ -261,7 +266,7 @@ public final class UpdateCheckService extends Service {
         // One check at a time: a start that arrives while the worker is still
         // fetching or assessing is served by that check, whose finish() uses
         // the latest start id, so the service ends once and never mid-check.
-        if (!checkInFlight.compareAndSet(false, true)) {
+        if (!claimCheck(startId)) {
             Log.d(TAG, "An update check is in flight; this start is served by it");
             return START_NOT_STICKY;
         }
@@ -269,8 +274,7 @@ public final class UpdateCheckService extends Service {
         // Check if enough time has passed since the last check (skip for retries)
         if (!isRetry && !updateManager.shouldCheckForUpdate(UpdateManager.CHECK_INTERVAL_SECONDS)) {
             Log.d(TAG, "Not yet time for an update check; skipping");
-            checkInFlight.set(false);
-            finish(startId);
+            finish(releaseCheck());
             return START_NOT_STICKY;
         }
 
@@ -284,10 +288,37 @@ public final class UpdateCheckService extends Service {
             checkExecutor.execute(this::runCheck);
         } catch (RejectedExecutionException destroyed) {
             Log.w(TAG, "The check worker is gone; skipping this check", destroyed);
-            checkInFlight.set(false);
-            finish(startId);
+            finish(releaseCheck());
         }
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Records {@code startId} as the latest start and claims the check for it,
+     * or — when a check is already in flight — leaves the start absorbed into
+     * that check, which will finish with this id.
+     */
+    private boolean claimCheck(int startId) {
+        synchronized (checkLock) {
+            latestStartId = startId;
+            if (checkInFlight) {
+                return false;
+            }
+            checkInFlight = true;
+            return true;
+        }
+    }
+
+    /**
+     * Releases the check and returns the start id its finish() must answer:
+     * the latest start, absorbed ones included. Under the same lock as the
+     * claim, so no start can be absorbed between the release and the read.
+     */
+    private int releaseCheck() {
+        synchronized (checkLock) {
+            checkInFlight = false;
+            return latestStartId;
+        }
     }
 
     /** The check past its throttle, on the worker thread; every exit ends the service. */
@@ -349,12 +380,11 @@ public final class UpdateCheckService extends Service {
      * Releases the in-flight guard and, unless a download now owns the
      * service, ends it with the latest start id: a start absorbed while the
      * check ran had no work of its own, so the service stops once the check
-     * that served it is over — and a start that arrives after the guard is
-     * released is not stopped by it.
+     * that served it is over — and a start that arrives after the release
+     * claims its own check, which the older id cannot stop.
      */
     private void endCheck(boolean finishService) {
-        int startId = latestStartId;
-        checkInFlight.set(false);
+        int startId = releaseCheck();
         if (finishService) {
             finish(startId);
         }
@@ -393,7 +423,13 @@ public final class UpdateCheckService extends Service {
             remote = ReleaseManifest.parse(fetch.text);
             if (remote == null) {
                 failureKind = NativeRadar.MANIFEST_FETCH_REJECTED;
-                detail = detail + ", rejected by the Rust core: " + NativeRadar.releaseManifestError(fetch.text);
+                // parse() also yields null for a text Rust accepts whose numeric
+                // field does not fit the app's signed types; that has no Rust
+                // reason and is named as its own cause.
+                String reason = NativeRadar.releaseManifestError(fetch.text);
+                detail = detail + (reason != null
+                        ? ", rejected by the Rust core: " + reason
+                        : ", accepted by the Rust core but a numeric field does not fit the app's signed types");
             }
         }
         int disposition = NativeRadar.remoteManifestDisposition(fetch.httpStatus, failureKind);
