@@ -196,14 +196,39 @@ and not hammer the server:
 Both `attempts` and the rollback target survive `serialize`/`deserialize`, so a
 retry budget and the previous known-good version persist across a restart.
 
+## Publishing a release
+
+The check fetches `releases/latest/download/release_manifest.txt`, the asset of
+the repository's newest release, so every release must carry both the APK and
+the manifest describing it, and the manifest's `size_bytes`/`sha256` must be
+those of the uploaded bytes exactly (`verify_artifact` refuses anything else).
+`cargo xtask release-manifest [--url <artifact url>] [--out <path>]` writes
+that manifest for the committed APK — `APP_VERSION_CODE`/`APP_VERSION_NAME`
+(the one version authority, `xtask/src/main.rs`), the file's exact size and
+SHA-256, `min_sdk` from `AndroidManifest.xml`, and by default the URL of the
+asset on the `v<version name>` release
+(`https://github.com/EmmmmDeee/HSE-BLE-API-/releases/download/v1.0.0/HSE-BLE-Radar-arm64-v1.0.0.apk`);
+a non-`https` URL is refused. `cargo xtask check-app-version` (a `gates`
+step) requires the bundled `assets/release_manifest.txt` to repeat the
+version, the committed APK's name to carry it and no artifact of another
+version to remain committed beside it, `verify-android-live` reads
+the built package's version back and requires the committed APK to reproduce
+from the sources entry by entry (`build-apk` stores every entry at the ZIP
+epoch, so a rebuild on one signing key is byte-identical), and
+`verify-api-live` serves the generated manifest to the real core as its
+accepted-manifest scenario — so what a release publishes is proven parseable
+before it is published. The steps are listed under "Releasing" in the README.
+
 ## Verifying it
 
-* `cargo test -p bleradar-core --test update` — 38 unit/invariant tests over every
+* `cargo test -p bleradar-core --test update` — 39 unit/invariant tests over every
   rule, transition, error path, the retry/backoff, rollback, and throttle logic,
   the remote-manifest disposition (every status 0–1000 × every failure kind
   against an independent restatement of the rule, plus the named boundaries),
-  and the pre-download gating (every branch, boundaries, precedence, plus a
-  20,000-case randomized cross-check against an independent reference).
+  the pre-download gating (every branch, boundaries, precedence, plus a
+  20,000-case randomized cross-check against an independent reference), and
+  the bundled `assets/release_manifest.txt` parsed by the parser itself, so
+  the offline fallback the app ships is proven parseable on every run.
 * `cargo test -p bleradar-core --test update_campaign` — a deterministic 200,000-op
   differential campaign against an independent reference state machine (zero
   divergence) that exercises offer/download/verify/install **plus retry and

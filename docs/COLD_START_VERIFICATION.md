@@ -86,9 +86,14 @@ decision #91 sources (exit 0; APK SHA-256 `3559634d…353e`, 406,094 bytes;
 `classes.dex` 67,680 bytes with the server's seams and `Json` added), and
 from the decision #92 sources (exit 0 in 11 s warm; APK SHA-256
 `9e179cb1…db2f`, 406,094 bytes; `classes.dex` 70,468 bytes with scan
-control added), and from the decision #93 sources (exit 0; APK SHA-256
+control added), from the decision #93 sources (exit 0; APK SHA-256
 `f67958c8…afca`, 406,094 bytes; `classes.dex` 70,848 bytes with the
-request-body cap and the idempotent accepted start):
+request-body cap and the idempotent accepted start), and — after the #94,
+#95 and #96 regenerations — from the decision #97 sources (exit 0; APK
+SHA-256 `f049dce0…3aff`, 406,094 bytes; `classes.dex` 75,864 bytes; every
+entry stored at the ZIP epoch, the committed package's 8 entries reproduced
+by the fresh build with equal sizes and CRC-32s, the built version read back
+as `versionCode 1, versionName 1.0.0`):
 
 | Check | Outcome |
 |---|---|
@@ -103,20 +108,35 @@ request-body cap and the idempotent accepted start):
 | JNI export contract derived from `NativeRadar.java` (`check-jni-contract`: every `static native` ↔ one `Java_com_hse_bleradar_NativeRadar_*` export, no orphans) | **Validated** (2026-09-11, 25 ↔ 25 against the then-committed APK's `lib/arm64-v8a/libbleradar_jni.so`, SHA-256 `29d89f14…e8de02`; 2026-09-12, 27 ↔ 27 against the regenerated APK's `.so`, SHA-256 `c9d9e99a…d4b84`, then 31 ↔ 31 against the `.so` regenerated for decision #87, SHA-256 `e27e42ac…9253`; 2026-09-14, 32 ↔ 32 against the `.so` regenerated for decision #96, SHA-256 `2c62e06f…`) |
 | `cargo xtask verify-jni-live` failure + success paths (host JVM) | **Validated** (abi=8, `linked-natives=25`, 2026-09-11; abi=9, `linked-natives=27`, then abi=10, `linked-natives=31` with the string bridge exercised through real Java strings, 2026-09-12; abi=11, `linked-natives=32` with the remote-manifest disposition surface, 2026-09-14; run by CI) |
 | The committed APK on a real Android runtime — install, first launch, the native library loading (`native_available` true), the dashboard and the documents served, scan control, the foreground promotion with its notification, a virtual advertiser (a second controller on netsimd's HCI socket) listed by `/api/devices` with its Rust-computed row and pruned once gone, the pause that keeps the foreground, the sticky restart after `kill -9`, the first launch's update check fetching the repository's release manifest (the outcome reported) and finishing, the API ending with the app, a runtime permission revoked while scanning, no crash, no leaked `ServiceConnection` (`cargo xtask verify-android-emulator`: headless API 34 `google_apis` x86_64 emulator with ARM translation, on KVM) | **Validated** (2026-09-13, decision #93: boot 42 s, the API 0.3 s after the launch, the page byte-identical (19,974 bytes), promotion 2.5 s after the start, the restarted service resumed the scan 2.2 s after the kill, no crash; 2 min 33 s in the `android-emulator` CI job. Decision #94: the update check reached its decision and its service finished; `pm revoke BLUETOOTH_SCAN` → the platform killed the app, the sticky restart found the permissions revoked and stopped the service, the API unreachable 22.8 s later; proof step 1 min 54 s. Decision #95: a virtual advertiser on netsimd's HCI socket (emulator package 37.1.11) listed 1.0 s after its start with the core's row — `rssi_dbm` 20.0, `distance_m` 1.12e-4, `IMMEDIATE`, `STABLE`, `LIVE`, confidence 85 — and pruned 30.2 s after its removal; no leaked `ServiceConnection`; proof step 2 min 12 s, job 4 min 00 s. Decision #96 (2026-09-14): the first launch's update check fetched the repository's release manifest URL on the runtime — `HTTP 404 -> using the bundled manifest; no retry` — and finished; proof step 1 min 58 s, job 3 min 32 s) |
+| The app version has one authority (`APP_VERSION_CODE`/`APP_VERSION_NAME` in `xtask/src/main.rs`): `cargo xtask check-app-version` (a `gates` step) requires the bundled `release_manifest.txt` and the committed APK's name to repeat it, `verify-android-live` reads the built package's version back from `aapt2 dump badging` and requires the committed APK's entries (name, size, CRC-32) to reproduce from the sources; `cargo xtask release-manifest` writes the manifest a release publishes (the committed APK's exact size and SHA-256), which `verify-api-live` feeds to the real core as its accepted manifest | **Validated** (2026-09-14, decision #97: "app version 1 (1.0.0): the bundled release manifest and the committed APK's name agree"; "versionCode 1, versionName 1.0.0"; "committed APK reproduced: 8 entries with equal sizes and CRC-32s"; two successive builds byte-identical, SHA-256 `f049dce0…3aff`; the generated manifest — `size_bytes = 406094`, `sha256 = f049dce0…` — accepted through the real `.so`; falsified by one changed Java string literal, `classes.dex: size 75864 → 75868, crc32 67ee51d9 → f9ed9f04`; run by the `gates` and `android-apk` CI jobs) |
 | BLE scan of real advertisers on a physical radio / update install / original-oracle differential on a physical device | **Unverified** — the scan → Rust row path is verified with a virtual advertiser on the emulator (decision #95); a radio's RSSI physics, the update install and the original signing key need a physical device and the key (MIG-003, MIG-002) |
 
 Package identity from live `aapt dump badging`:
 `com.hse.bleradar` versionName `1.0.0`, minSdk 26, targetSdk 34, native-code
 `arm64-v8a`, launchable `com.hse.bleradar.MainActivity`.
 
-**Reproducibility note (live 2026-09-09):** two successive `cargo xtask build-apk`
-runs produced **bit-identical** zip payloads for every entry
-(`AndroidManifest.xml`, `classes.dex`, `lib/arm64-v8a/libbleradar_jni.so`,
-resources, icons). The outer APK SHA-256 can still differ between builds
-because the APK Signature Block embeds a wall-clock signing time that
-`apksigner` does not fully pin even under `SOURCE_DATE_EPOCH`. Treat
-per-entry content hashes (or `cargo xtask verify-android-live`) as the
-authoritative completeness proof, not a single whole-file digest.
+**Reproducibility note (live 2026-09-09; cause found and removed 2026-09-14):**
+two successive `cargo xtask build-apk` runs produced **bit-identical** zip
+payloads for every entry (`AndroidManifest.xml`, `classes.dex`,
+`lib/arm64-v8a/libbleradar_jni.so`, resources, icons) while the outer APK
+SHA-256 still differed, which this note had attributed to a wall-clock
+signing time in the APK Signature Block. Decision #97 read the two files
+entry by entry and found the actual cause: `build-apk` staged `classes.dex`
+and the native library as fresh copies carrying the build's mtime, which
+`zip` stored in those two entries (`2026-09-14 09:17:42` in the #96 build),
+while every entry `aapt2 link` wrote already sat at the ZIP epoch. Both
+staged files are now set to `1980-01-01 00:00:00` and `zip` runs under
+`TZ=UTC`, and two successive builds are **byte-identical, signature block
+included** (SHA-256 `f049dce0…3aff`, 2026-09-14). `cargo xtask
+verify-android-live` requires the fresh build's entries (name, size, CRC-32;
+`META-INF/` aside, since the debug key is per machine) to equal the committed
+APK's, so a committed package that no longer matches the sources fails CI
+naming the entry — falsified by one changed Java string literal
+(`classes.dex: size 75864 → 75868, crc32 67ee51d9 → f9ed9f04`). A rebuild on
+another machine still differs in `META-INF/` (its own debug key, MIG-002);
+the whole-file digest a release manifest carries is therefore the digest of
+the committed bytes (`cargo xtask release-manifest`), and reproduction is
+checked entry by entry.
 
 **Cross-host reproducibility (live 2026-09-10):** rebuilding the then-committed
 APK on a different host reproduced `libbleradar_jni.so`

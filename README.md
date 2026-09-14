@@ -333,8 +333,15 @@ entrypoints `NativeRadar.java` declares (the same export-contract rule as
 `gates`, applied to the `aarch64-linux-android` build). It also runs Android
 lint's `NewApi` check over the app sources, so a `java.*`/`android.*` call
 newer than the manifest's `minSdkVersion` (which `javac` and `d8` accept and
-which crashes older devices at run time) fails the build. Design decisions
-for the app itself are recorded in `docs/ANDROID_APP.md`.
+which crashes older devices at run time) fails the build. It reads the built
+package's version back (`aapt2 dump badging` ↔ `APP_VERSION_CODE`/
+`APP_VERSION_NAME`, the one version authority in `xtask/src/main.rs`) and
+requires the fresh build's entries (name, size, CRC-32) to equal the
+committed `HSE-BLE-Radar-arm64-v1.0.0.apk`'s, so a committed package that no
+longer matches the sources fails on every pull request; `build-apk` stores
+every entry at the ZIP epoch, so two builds on one signing key are
+byte-identical. Design decisions for the app itself are recorded in
+`docs/ANDROID_APP.md`.
 
 ## Web dashboard (Termux / browser on the device)
 
@@ -472,6 +479,8 @@ cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/expor
 cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator (needs KVM + SDK emulator)
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
 cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)
+cargo xtask check-app-version      # the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME, no artifact of another version remains (a gates step)
+cargo xtask release-manifest [--url <artifact url>] [--out <path>]   # the manifest a release publishes: the committed APK's version, exact size and SHA-256
 cargo xtask audit                  # cargo audit, offline, vendored advisory db
 cargo xtask deny                   # cargo deny check, offline, vendored advisory db
 cargo xtask gates                  # every gate, one command
@@ -487,6 +496,30 @@ BLERADAR_FUSION_CAMPAIGN_ITERATIONS=300000 cargo test -p bleradar-core --release
 BLERADAR_VERIFICATION_CAMPAIGN_SEQUENCES=20000 cargo test -p bleradar-core --release --test verification_campaign   # scale the verification engine campaign
 BLERADAR_ADVANCEMENT_CAMPAIGN_SEQUENCES=50000 cargo test -p bleradar-core --release --test advancement_campaign   # scale the advancement engine campaign
 ```
+
+## Releasing
+
+The app checks `https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt`
+daily (`docs/AUTO_UPDATE.md`), so a release is a GitHub release carrying two
+assets — the APK and the manifest that describes it — and the version has one
+authority, `APP_VERSION_CODE`/`APP_VERSION_NAME` in `xtask/src/main.rs`:
+
+```sh
+# 1. bump APP_VERSION_CODE / APP_VERSION_NAME in xtask/src/main.rs and the
+#    version_code / version_name lines of android/app/src/main/assets/release_manifest.txt
+cargo xtask build-apk                      # HSE-BLE-Radar-arm64-v<version name>.apk, byte-reproducible on one key
+git rm HSE-BLE-Radar-arm64-v<previous>.apk # one artifact is committed: check-app-version refuses a stale one
+cargo xtask check-app-version              # the bundled manifest, the artifact's name, no stale artifact (also a `gates` step)
+cargo xtask verify-android-live            # the built version read back; the package's entries reproduced by a second build
+git add HSE-BLE-Radar-arm64-v<version name>.apk
+git tag v<version name>                    # the tag `release-manifest`'s default URL assumes
+cargo xtask release-manifest --out release_manifest.txt   # the APK's exact size and SHA-256
+# 2. create the GitHub release for the tag with both files attached, unmodified
+```
+
+`release-manifest` refuses a non-`https` URL, and `verify-api-live` serves
+the manifest it generates to the real core as the accepted-manifest scenario,
+so the text a release publishes is proven parseable before it is published.
 
 ## Distribution packaging
 

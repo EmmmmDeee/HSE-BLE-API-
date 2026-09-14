@@ -133,6 +133,22 @@ fn manifest_rejects_each_missing_required_field() {
 }
 
 #[test]
+fn the_bundled_release_manifest_is_accepted_by_the_parser() {
+    // The offline fallback the app ships (`assets/release_manifest.txt`) is
+    // what this parser reads on every check the remote source cannot serve;
+    // a bundled text the parser refused would leave a device with no manifest
+    // at all. `cargo xtask check-app-version` holds its version to the
+    // build's; this holds its parseability to the parser itself.
+    let text = include_str!("../../../android/app/src/main/assets/release_manifest.txt");
+    let manifest = ReleaseManifest::parse(text).expect("the bundled release manifest must parse");
+    assert!(!manifest.version.name.is_empty());
+    assert_eq!(
+        ReleaseManifest::parse(&manifest.serialize()).unwrap(),
+        manifest
+    );
+}
+
+#[test]
 fn manifest_rejects_duplicate_unknown_and_malformed() {
     let base = manifest_text(1, "1", b"z", 21, false);
     assert!(matches!(
