@@ -50,12 +50,12 @@ use std::io::{ErrorKind, Read};
 
 use bleradar_core::{
     ArtifactVerifier, CalibrationProfile, DownloadConditions, DownloadPolicy, DownloadReadiness,
-    FreshnessClass, NetworkType, ProximityBand, ReleaseManifest, RetryPolicy, SignalTrend,
-    TrackingProfile, TrackingSnapshot, TrackingSnapshotInput, UpdateError, ble_distance_m,
-    ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
-    download_readiness, filtered_rssi, hex_encode, proximity_label, should_check_for_update,
-    signal_confidence_percent, signal_trend, tracking_profile_from_ordinal, tracking_snapshot,
-    update_decision,
+    FreshnessClass, ManifestFetchFailure, ManifestSourceDecision, NetworkType, ProximityBand,
+    ReleaseManifest, RetryPolicy, SignalTrend, TrackingProfile, TrackingSnapshot,
+    TrackingSnapshotInput, UpdateError, ble_distance_m, ble_distance_range_m, calibration_profile,
+    calibration_profile_from_ordinal, download_readiness, filtered_rssi, hex_encode,
+    manifest_source_decision, proximity_label, should_check_for_update, signal_confidence_percent,
+    signal_trend, tracking_profile_from_ordinal, tracking_snapshot, update_decision,
 };
 
 pub mod env;
@@ -417,6 +417,44 @@ const fn download_readiness_ordinal_of(readiness: DownloadReadiness) -> i32 {
         DownloadReadiness::LowBattery => 3,
         DownloadReadiness::InsufficientStorage { .. } => 4,
     }
+}
+
+/// The failure kind a `NativeRadar.MANIFEST_FETCH_*` ordinal names, or `None`
+/// for an ordinal the façade does not define.
+const fn manifest_fetch_failure_from_ordinal(kind: i32) -> Option<ManifestFetchFailure> {
+    match kind {
+        0 => Some(ManifestFetchFailure::None),
+        1 => Some(ManifestFetchFailure::Transport),
+        2 => Some(ManifestFetchFailure::TooLarge),
+        3 => Some(ManifestFetchFailure::Rejected),
+        _ => None,
+    }
+}
+
+/// The `NativeRadar.MANIFEST_SOURCE_*` ordinal of a decision.
+const fn manifest_source_decision_ordinal_of(decision: ManifestSourceDecision) -> i32 {
+    match decision {
+        ManifestSourceDecision::UseRemote => 0,
+        ManifestSourceDecision::FallbackRetry => 1,
+        ManifestSourceDecision::FallbackNoRetry => 2,
+    }
+}
+
+/// Pure, unit-testable core of `NativeRadar.remoteManifestDisposition(int, int)`.
+///
+/// The [`manifest_source_decision`] ordinal for the HTTP status a fetch got
+/// (`0` when none arrived; a status outside `0..=65535` reads as `0`) and its
+/// `MANIFEST_FETCH_*` failure kind. A failure ordinal the façade does not
+/// define answers "fall back, no retry": an encoding drift may cost one
+/// remote check, never a retry storm.
+#[must_use]
+pub fn manifest_source_decision_ordinal(http_status: i32, failure_kind: i32) -> i32 {
+    let status = u16::try_from(http_status).unwrap_or(0);
+    let decision = match manifest_fetch_failure_from_ordinal(failure_kind) {
+        Some(failure) => manifest_source_decision(status, failure),
+        None => ManifestSourceDecision::FallbackNoRetry,
+    };
+    manifest_source_decision_ordinal_of(decision)
 }
 
 /// Pure, unit-testable core of `NativeRadar.downloadReadiness(...)`.
@@ -1009,6 +1047,21 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_retryBackoffDelaySecond
     retry_backoff_delay_secs(attempt, base_delay_secs, max_delay_secs)
 }
 
+/// `NativeRadar.remoteManifestDisposition(int, int): int` — see
+/// [`manifest_source_decision_ordinal`].
+///
+/// # Safety note
+/// Ignores `_env`/`_class`; never dereferences them.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_remoteManifestDisposition(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    http_status: i32,
+    failure_kind: i32,
+) -> i32 {
+    manifest_source_decision_ordinal(http_status, failure_kind)
+}
+
 /// `NativeRadar.deviceShouldPrune(int): boolean` — see [`device_should_prune`].
 ///
 /// # Safety note
@@ -1258,11 +1311,12 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(
 /// device-map policy surface (`deviceShouldPrune`, `deviceRankKey`) was added,
 /// and to `10` when the string bridge and the release-manifest / artifact
 /// surface (`releaseManifestCanonical`, `releaseManifestError`,
-/// `releaseManifestField`, `artifactVerifyFile`) were added.
+/// `releaseManifestField`, `artifactVerifyFile`) were added, and to `11` when
+/// the remote-manifest disposition (`remoteManifestDisposition`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    10
+    11
 }

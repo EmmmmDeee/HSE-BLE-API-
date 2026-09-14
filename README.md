@@ -393,8 +393,14 @@ byte-identical to the browser fixtures, `404`/`405`/`400`, `no-store`, exact
 `Content-Length`; scan control paused and resumed with every document
 reflecting it, the four documented refusals as `409`, a throwing control
 answered `500` with the server still up, a 64 KiB request body consumed, a
-body declared beyond the 64 KiB cap refused with `413` at once), and
-then renders the committed dashboard from that server in headless Chromium.
+body declared beyond the 64 KiB cap refused with `413` at once), then
+renders the committed dashboard from that server in headless Chromium, and
+then runs the real `ReleaseManifestSource` — the class that fetches the
+app's release manifest from the repository's latest release — against a
+scripted local server (a valid manifest, no release, a server fault, an
+oversized body, a body the Rust core rejects, a stalled answer, a refused
+connection, a malformed URL), requiring each fetch's classification and its
+Rust disposition through the real library.
 It needs a JDK and a Chromium/Chrome binary; CI's `gates` job runs it after
 the live JNI proof.
 
@@ -418,8 +424,10 @@ are simulated there), advertising as `bleradar-beacon` — listed by
 30 s and pruned by the core's freshness policy within 75 s of its removal,
 `POST /api/scan/stop` keeping the foreground with "BLE Radar is
 idle", a restarted service with the scan resumed after `kill -9` of the app
-process, the first launch's update check finished (its decision logged, no
-service record or notification left), the API unreachable after
+process, the first launch's update check finished (its fetch of the
+repository's release manifest logged with its outcome — a `404` until a
+release is published —, its decision logged, no service record or
+notification left), the API unreachable after
 `am force-stop`, and — after a relaunch and a new scan — no scan and no
 foreground service surviving `pm revoke … BLUETOOTH_SCAN` (the report names
 the branch the platform took; on the first run the sticky restart found the

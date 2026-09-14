@@ -96,10 +96,11 @@ pub use tracking::{
     TrackingSnapshotInput, tracking_profile, tracking_profile_from_ordinal, tracking_snapshot,
 };
 pub use update::{
-    ArtifactVerifier, DownloadConditions, DownloadPolicy, DownloadReadiness, NetworkType,
-    ReleaseManifest, RetryDecision, RetryPolicy, UpdateDecision, UpdateError, UpdateSession,
-    UpdateStage, Version, check_update, download_readiness, should_check_for_update,
-    update_decision, verify_artifact,
+    ArtifactVerifier, DownloadConditions, DownloadPolicy, DownloadReadiness, ManifestFetchFailure,
+    ManifestSourceDecision, NetworkType, ReleaseManifest, RetryDecision, RetryPolicy,
+    UpdateDecision, UpdateError, UpdateSession, UpdateStage, Version, check_update,
+    download_readiness, manifest_source_decision, should_check_for_update, update_decision,
+    verify_artifact,
 };
 pub use verification::{
     DifferentialCase, DifferentialReport, DifferentialViolation, ExecutionOutcome, FailureCause,

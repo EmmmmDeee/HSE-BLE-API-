@@ -18,8 +18,10 @@
 //!   scan with the idle notification and keeps the service, and a `kill -9`
 //!   of the app process is followed by the `START_STICKY` restart that
 //!   resumes the scan;
-//! * the update check the first launch starts ran to its decision and its
-//!   `dataSync` service finished (no record, no notification left);
+//! * the update check the first launch starts fetched the repository's
+//!   release manifest — or fell back to the bundled one, the outcome
+//!   reported — ran to its decision and its `dataSync` service finished (no
+//!   record, no notification left);
 //! * `am force-stop` ends the app and, with it, the API;
 //! * after a relaunch and a new scan, revoking `BLUETOOTH_SCAN` makes the
 //!   platform kill the app: no scan and no foreground service survive it,
@@ -213,8 +215,20 @@ pub fn json_has(json: &str, key: &str, literal: &str) -> bool {
     json.contains(&format!("\"{key}\":{literal}"))
 }
 
+/// What `UpdateCheckService` logs about its remote manifest fetch (`Remote
+/// manifest <url>: <what the fetch got> -> <what was decided>`): the part
+/// after the URL, if the fetch path ran.
+pub fn remote_manifest_outcome(logcat: &str) -> Option<String> {
+    logcat
+        .lines()
+        .filter_map(|line| line.split("Remote manifest ").nth(1))
+        .filter_map(|rest| rest.split_once(": "))
+        .map(|(_, outcome)| outcome.trim().to_string())
+        .next()
+}
+
 /// The `Update decision: N` line `UpdateCheckService` logs once it assessed
-/// the bundled manifest: the ordinal, if the check ran that far.
+/// a manifest: the ordinal, if the check ran that far.
 pub fn update_decision_logged(logcat: &str) -> Option<i64> {
     logcat
         .lines()
@@ -1180,7 +1194,7 @@ fn exercise(
     // for updates..." notification left. Both are awaited, and every dump is
     // a fallible command, so a failed adb call never reads as "nothing left".
     let decision_awaited = Instant::now();
-    let (decision, update_lines) = loop {
+    let (decision, update_lines, remote) = loop {
         let update_log = adb.shell("logcat -d -s UpdateCheckService:* UpdateManager:*")?;
         if let Some(decision) = update_decision_logged(&update_log) {
             let lines = update_log
@@ -1189,7 +1203,14 @@ fn exercise(
                     line.contains("UpdateCheckService") || line.contains("UpdateManager")
                 })
                 .count();
-            break (decision, lines);
+            // The decision follows the fetch, so the fetch's line is there or
+            // the fetch path did not run — either way, named.
+            let remote = remote_manifest_outcome(&update_log).ok_or_else(|| {
+                format!(
+                    "the update check reached its decision without logging its remote manifest fetch (the fetch path did not run); its log:\n{update_log}"
+                )
+            })?;
+            break (decision, lines, remote);
         }
         if decision_awaited.elapsed() > PROMOTION_TIMEOUT {
             return Err(format!(
@@ -1226,7 +1247,7 @@ fn exercise(
         thread::sleep(Duration::from_millis(500));
     }
     report.push(format!(
-        "update check: ran on the first launch to decision {decision} ({update_lines} log lines) and the dataSync service finished — no record, no notification left"
+        "update check: ran on the first launch — remote manifest {remote}; decision {decision} ({update_lines} log lines); the dataSync service finished — no record, no notification left"
     ));
 
     println!("== am force-stop: the API must end with the app ==");
@@ -1591,6 +1612,17 @@ mod tests {
             None
         );
         assert_eq!(update_decision_logged(""), None);
+
+        let remote = "09-14 08:00:01.000  3512  3540 I UpdateCheckService: Remote manifest https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt: HTTP 404 -> using the bundled manifest; no retry\n";
+        assert_eq!(
+            remote_manifest_outcome(remote).as_deref(),
+            Some("HTTP 404 -> using the bundled manifest; no retry")
+        );
+        assert_eq!(
+            remote_manifest_outcome("I UpdateCheckService: Remote manifest https://x/y: UnknownHostException: Unable to resolve host \"github.com\" -> using the bundled manifest; retry scheduled").as_deref(),
+            Some("UnknownHostException: Unable to resolve host \"github.com\" -> using the bundled manifest; retry scheduled")
+        );
+        assert_eq!(remote_manifest_outcome(log), None);
 
         let ps = "    PID    PPID COMMAND         COMMAND\n\
                   2646       1 adb             adb -L tcp:5037 fork-server server --reply-fd 4\n\

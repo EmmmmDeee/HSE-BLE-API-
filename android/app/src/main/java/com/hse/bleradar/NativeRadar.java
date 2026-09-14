@@ -8,7 +8,8 @@ package com.hse.bleradar;
  * {@code signal_confidence_percent}, {@code signal_trend},
  * {@code tracking_snapshot}), plus the app's automatic-update <em>decision</em>
  * core ({@code update_decision}, {@code should_check_for_update},
- * {@code download_readiness}, {@code RetryPolicy::backoff_delay_secs}). Keeping
+ * {@code download_readiness}, {@code RetryPolicy::backoff_delay_secs},
+ * {@code manifest_source_decision}). Keeping
  * every native declaration and ordinal mapping in one file makes the Java/Rust
  * ABI contract easy to audit against {@code crates/bleradar-jni/src/lib.rs}.
  *
@@ -91,8 +92,24 @@ public final class NativeRadar {
     /** Download-readiness result: not enough free storage for the artifact plus the required headroom. */
     public static final int DOWNLOAD_INSUFFICIENT_STORAGE = 4;
 
+    /** {@link #remoteManifestDisposition(int, int)} failure kind: the fetch got an HTTP answer (a status, and a body on success). */
+    public static final int MANIFEST_FETCH_ANSWERED = 0;
+    /** {@link #remoteManifestDisposition(int, int)} failure kind: no HTTP answer (name resolution, the connection, TLS or a timeout failed). */
+    public static final int MANIFEST_FETCH_TRANSPORT_FAILURE = 1;
+    /** {@link #remoteManifestDisposition(int, int)} failure kind: the body exceeded the size cap. */
+    public static final int MANIFEST_FETCH_TOO_LARGE = 2;
+    /** {@link #remoteManifestDisposition(int, int)} failure kind: the body was not a manifest the Rust core accepts. */
+    public static final int MANIFEST_FETCH_REJECTED = 3;
+
+    /** {@link #remoteManifestDisposition(int, int)} result: assess the remote manifest. */
+    public static final int MANIFEST_SOURCE_USE_REMOTE = 0;
+    /** {@link #remoteManifestDisposition(int, int)} result: assess the bundled manifest and retry the fetch with backoff (a transient fault). */
+    public static final int MANIFEST_SOURCE_FALLBACK_RETRY = 1;
+    /** {@link #remoteManifestDisposition(int, int)} result: assess the bundled manifest; nothing to retry before the next scheduled check. */
+    public static final int MANIFEST_SOURCE_FALLBACK_NO_RETRY = 2;
+
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 10;
+    public static final int EXPECTED_ABI_VERSION = 11;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -397,6 +414,19 @@ public final class NativeRadar {
             int attempt,
             long baseDelaySeconds,
             long maxDelaySeconds);
+
+    /**
+     * What to assess after a fetch of the remote release manifest, from the
+     * HTTP status it got ({@code 0} when none arrived) and its
+     * {@code MANIFEST_FETCH_*} failure kind: one of the {@code MANIFEST_SOURCE_*}
+     * constants. The remote manifest on a {@code 2xx} with an accepted body;
+     * the bundled manifest with a retry on a transport failure or a
+     * {@code 408}/{@code 425}/{@code 429}/{@code 5xx}; the bundled manifest
+     * without a retry on everything else ({@code 404}/{@code 410}: no release
+     * published; another {@code 4xx}; an oversized or rejected body). An
+     * unknown failure kind never buys a retry. Never performs I/O.
+     */
+    public static native int remoteManifestDisposition(int httpStatus, int failureKind);
 
     /** Build-time sanity check; should equal {@link #EXPECTED_ABI_VERSION}. */
     public static native int abiVersion();

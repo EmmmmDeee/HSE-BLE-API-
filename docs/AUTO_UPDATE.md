@@ -12,8 +12,8 @@ An in-app auto-update has two halves:
 
 | Half | Owner | Why |
 | --- | --- | --- |
-| Version comparison, OS/downgrade policy, manifest parsing, artifact integrity (size + SHA-256), the lifecycle state machine, persistence, and interruption recovery | **`bleradar_core::update` (this engine)** | Pure and deterministic, so it is exhaustively testable, falsifiable, and identical on every caller. |
-| Fetching bytes over the network; handing the verified APK to the OS package installer | **The platform** (Android `DownloadManager`/OkHttp + `PackageInstaller`; a host CLI + process spawn) | Inherently platform-specific and unobservable off-device; no code here can prove it flawless without a device. |
+| Version comparison, OS/downgrade policy, manifest parsing, what a remote-manifest fetch outcome means (assess it, fall back and retry, fall back and wait), artifact integrity (size + SHA-256), the lifecycle state machine, persistence, and interruption recovery | **`bleradar_core::update` (this engine)** | Pure and deterministic, so it is exhaustively testable, falsifiable, and identical on every caller. |
+| Fetching the release manifest and the artifact bytes over the network; handing the verified APK to the OS package installer | **The platform** (Android `HttpURLConnection` + `DownloadManager` + `PackageInstaller`; a host CLI + process spawn) | Inherently platform-specific and unobservable off-device; no code here can prove it flawless without a device. |
 
 The engine never performs I/O. The caller drives it: it feeds downloaded bytes
 in (so the engine can verify integrity as they stream), and it performs the
@@ -22,8 +22,9 @@ actual OS install only once the engine has reached [`UpdateStage::Verified`].
 ## Reaching it from the Android app (the JNI boundary)
 
 So the decision core is not merely *implemented* but *reachable* from the app,
-its four **pure decision** functions — and, since ABI 10, the manifest parser
-and the streaming artifact verifier — are exported through the same
+its pure **decision** functions (four since ABI 8, the remote-manifest
+disposition since ABI 11) — and, since ABI 10, the manifest parser and the
+streaming artifact verifier — are exported through the same
 dependency-free JNI façade as the signal/tracking math
 (`crates/bleradar-jni/src/lib.rs` ↔
 `android/app/src/main/java/com/hse/bleradar/NativeRadar.java`, enforced exact by
@@ -39,19 +40,47 @@ the audited bridge in `crates/bleradar-jni/src/env.rs`. The live
 | `shouldCheckForUpdate(nowSeconds, lastCheckSeconds, minIntervalSeconds)` | [`should_check_for_update`] | `boolean` |
 | `downloadReadiness(network, batteryPercent, charging, freeStorageBytes, allowMetered, minBatteryPercent, storageHeadroomBytes, artifactSizeBytes)` | [`download_readiness`] | a `DOWNLOAD_*` ordinal (`0` Ready, `1` NoNetwork, `2` MeteredBlocked, `3` LowBattery, `4` InsufficientStorage); `network` is a `NETWORK_*` ordinal |
 | `retryBackoffDelaySeconds(attempt, baseDelaySeconds, maxDelaySeconds)` | [`RetryPolicy::backoff_delay_secs`] | `long` seconds |
+| `remoteManifestDisposition(httpStatus, failureKind)` | [`manifest_source_decision`] | a `MANIFEST_SOURCE_*` ordinal (`0` UseRemote, `1` FallbackRetry, `2` FallbackNoRetry); `failureKind` is a `MANIFEST_FETCH_*` ordinal (`0` answered, `1` transport failure, `2` too large, `3` rejected) and an unknown kind answers `2` |
 | `releaseManifestCanonical(text)` / `releaseManifestError(text)` / `releaseManifestField(text, field)` | [`ReleaseManifest::parse`] / [`ReleaseManifest::serialize`] | the canonical manifest text, or `null` when rejected; the rejection reason, or `null` when accepted; one field as canonical text (a `MANIFEST_FIELD_*` selector), or `null` |
 | `artifactVerifyFile(path, manifestText)` | [`ArtifactVerifier`], streamed over the file | an `ARTIFACT_*` ordinal (`0` Verified, `1` ManifestInvalid — checked before the file is touched, `2` Unreadable, `3` SizeMismatch, `4` HashMismatch) |
 
 The app therefore makes every self-update *safety* decision — when to poll,
-whether a release is a safe upgrade, whether conditions permit a download, how
+whether a release is a safe upgrade, which manifest to assess and whether a
+failed fetch deserves a retry, whether conditions permit a download, how
 long to back off, whether a manifest is acceptable at all, and whether a
 downloaded artifact is exactly the intended one — in the exact verified Rust,
 never a Java re-implementation. `ReleaseManifest.java` is a thin holder over
 the canonical form Rust emits (Java parses nothing; the manifest is persisted in
 that form), and `UpdateCheckService` installs only what `artifactVerifyFile`
 reports as `ARTIFACT_VERIFIED`. Adding the decision surface bumped the JNI ABI
-7 → 8 and the manifest/artifact surface 9 → 10 (`EXPECTED_ABI_VERSION` /
-`abiVersion()`), so a stale `.so` is rejected at load.
+7 → 8, the manifest/artifact surface 9 → 10 and the remote-manifest
+disposition 10 → 11 (`EXPECTED_ABI_VERSION` / `abiVersion()`), so a stale
+`.so` is rejected at load.
+
+### The manifest source
+
+A release announces itself in one place: `release_manifest.txt` attached to
+the repository's latest GitHub release, at
+`UpdateCheckService.RELEASE_MANIFEST_URL`
+(`https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt`,
+a stable URL that redirects to the asset). `ReleaseManifestSource.java` GETs
+it on the service's worker thread (network I/O may not run on the main
+thread) with 10 s connect and read timeouts and a 16 KiB cap, never throws,
+and reports the HTTP status, a `MANIFEST_FETCH_*` failure kind and a
+one-line detail. The text is then the core's to accept
+(`releaseManifestCanonical`) and the outcome the core's to judge
+(`remoteManifestDisposition`): the remote manifest is assessed on a `2xx`
+with an accepted body; the bundled manifest (`assets/release_manifest.txt`,
+the descriptor of the shipped build, so the check concludes "up to date")
+is assessed otherwise — with the Rust-paced retry scheduled only when the
+fault is transient (no answer, `408`/`425`/`429`/`5xx`) and the retry count
+kept until a fetch succeeds, and without one when the source has nothing to
+offer (`404`/`410`: no release published, which is what a repository without
+releases answers), refuses the request, redirects across protocols, or
+serves what is not a manifest. One log line,
+`Remote manifest <url>: <what the fetch got> -> <what was decided>`, records
+every attempt; `cargo xtask verify-android-emulator` requires it before the
+decision and reports it.
 
 The [`UpdateSession`] state machine is the one part still *not* bridged:
 exposing owned native state across JNI needs a handle-lifetime design that is
@@ -85,6 +114,11 @@ enforced regardless by the OS installer.
 * [`UpdateSession::rollback`] — revert to the previous known-good version after a
   bad update.
 * [`should_check_for_update`] — a re-check throttle (minimum poll interval).
+* [`manifest_source_decision`] — what a remote-manifest fetch outcome means
+  ([`ManifestFetchFailure`] + the HTTP status → [`ManifestSourceDecision`]:
+  assess the remote manifest, fall back and retry, or fall back and wait),
+  so the retry budget is spent on transient faults and never on a source
+  that has no release.
 * [`download_readiness`] — pre-download gating on network / battery / free storage
   ([`DownloadPolicy`] + [`DownloadConditions`] → [`DownloadReadiness`]).
 
@@ -164,8 +198,10 @@ retry budget and the previous known-good version persist across a restart.
 
 ## Verifying it
 
-* `cargo test -p bleradar-core --test update` — 37 unit/invariant tests over every
+* `cargo test -p bleradar-core --test update` — 38 unit/invariant tests over every
   rule, transition, error path, the retry/backoff, rollback, and throttle logic,
+  the remote-manifest disposition (every status 0–1000 × every failure kind
+  against an independent restatement of the rule, plus the named boundaries),
   and the pre-download gating (every branch, boundaries, precedence, plus a
   20,000-case randomized cross-check against an independent reference).
 * `cargo test -p bleradar-core --test update_campaign` — a deterministic 200,000-op
@@ -174,6 +210,11 @@ retry budget and the previous known-good version persist across a restart.
   rollback**, with a serialize→deserialize identity + `recover` idempotence check
   after every step, plus a 50,000-trial integrity oracle proving an install is
   unreachable without a genuine size+SHA-256 match.
+* `cargo xtask verify-api-live` — the real `ReleaseManifestSource` against a
+  scripted JDK `HttpServer` on the host JVM: a valid manifest, `404`, `503`, a
+  body over the cap, a body the core rejects, a stalled answer, a refused
+  connection and a malformed URL, each fetch's classification and its Rust
+  disposition required as documented through the real `libbleradar_jni.so`.
 * `cargo run -p bleradar-core --example update_flow` — the whole lifecycle over a
   real 64 KiB artifact and a real SHA-256, including a simulated crash mid-install
   (persist → restart → recover → finish), an idempotent re-install, pre-download
@@ -183,8 +224,9 @@ retry budget and the previous known-good version persist across a restart.
 Falsified (each restored): allowing a downgrade, bypassing the SHA-256 check,
 recovering `Installing` to `Installed` (unsafe), a linear (non-exponential)
 backoff, an off-by-one retry give-up, a rollback that fails to consume the
-previous version, an off-by-one battery or storage gate, and a reordered
-download-gating precedence — each breaks the tests or campaign.
+previous version, an off-by-one battery or storage gate, a reordered
+download-gating precedence, and a `404` that retries — each breaks the tests
+or campaign.
 
 [`Version`]: https://docs.rs/bleradar-core
 [`ReleaseManifest`]: https://docs.rs/bleradar-core
@@ -198,6 +240,9 @@ download-gating precedence — each breaks the tests or campaign.
 [`UpdateStage::Verified`]: https://docs.rs/bleradar-core
 [`RetryPolicy`]: https://docs.rs/bleradar-core
 [`RetryPolicy::backoff_delay_secs`]: https://docs.rs/bleradar-core
+[`manifest_source_decision`]: https://docs.rs/bleradar-core
+[`ManifestFetchFailure`]: https://docs.rs/bleradar-core
+[`ManifestSourceDecision`]: https://docs.rs/bleradar-core
 [`RetryDecision`]: https://docs.rs/bleradar-core
 [`RetryDecision::RetryAfter`]: https://docs.rs/bleradar-core
 [`RetryDecision::GaveUp`]: https://docs.rs/bleradar-core

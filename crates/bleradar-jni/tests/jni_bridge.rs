@@ -20,14 +20,15 @@ use bleradar_jni::{
     calibration_profile_path_loss_exponent_or_nan, calibration_profile_rssi_at_1m_dbm_or_nan,
     default_calibration_profile_ordinal, default_tracking_profile_ordinal, device_rank_key,
     device_should_prune, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
-    download_readiness_ordinal, filtered_rssi_or_nan, proximity_label_ordinal,
-    release_manifest_canonical, release_manifest_error, release_manifest_field,
-    retry_backoff_delay_secs, should_check_for_update_flag, signal_confidence_percent_or_negative,
-    signal_trend_ordinal, tracking_confidence_percent_or_negative,
-    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
-    tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
-    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
-    tracking_trend_ordinal, update_decision_ordinal,
+    download_readiness_ordinal, filtered_rssi_or_nan, manifest_source_decision_ordinal,
+    proximity_label_ordinal, release_manifest_canonical, release_manifest_error,
+    release_manifest_field, retry_backoff_delay_secs, should_check_for_update_flag,
+    signal_confidence_percent_or_negative, signal_trend_ordinal,
+    tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
+    tracking_distance_m_or_nan, tracking_distance_proximity_ordinal,
+    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
+    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
+    update_decision_ordinal,
 };
 
 use common::MockEnv;
@@ -902,4 +903,49 @@ fn device_rank_key_agrees_with_the_reference_comparator_on_random_pairs() {
             "{left:?} (key {left_key}) vs {right:?} (key {right_key})"
         );
     }
+}
+
+#[test]
+fn manifest_source_decision_ordinal_maps_every_disposition_and_never_retries_on_drift() {
+    // MANIFEST_FETCH_ANSWERED (0): the status decides.
+    assert_eq!(manifest_source_decision_ordinal(200, 0), 0, "use remote");
+    assert_eq!(manifest_source_decision_ordinal(204, 0), 0);
+    assert_eq!(
+        manifest_source_decision_ordinal(404, 0),
+        2,
+        "no release: no retry"
+    );
+    assert_eq!(manifest_source_decision_ordinal(403, 0), 2);
+    assert_eq!(
+        manifest_source_decision_ordinal(503, 0),
+        1,
+        "server-side: retry"
+    );
+    assert_eq!(manifest_source_decision_ordinal(429, 0), 1);
+    // The other failure kinds.
+    assert_eq!(
+        manifest_source_decision_ordinal(0, 1),
+        1,
+        "transport: retry"
+    );
+    assert_eq!(
+        manifest_source_decision_ordinal(200, 2),
+        2,
+        "too large: no retry"
+    );
+    assert_eq!(
+        manifest_source_decision_ordinal(200, 3),
+        2,
+        "rejected: no retry"
+    );
+    // Encoding drift and impossible statuses never buy a retry.
+    assert_eq!(manifest_source_decision_ordinal(200, 4), 2);
+    assert_eq!(manifest_source_decision_ordinal(200, -1), 2);
+    assert_eq!(manifest_source_decision_ordinal(-1, 0), 2);
+    assert_eq!(manifest_source_decision_ordinal(70_000, 0), 2);
+    assert_eq!(
+        manifest_source_decision_ordinal(i32::MIN, 1),
+        1,
+        "the kind still reads"
+    );
 }

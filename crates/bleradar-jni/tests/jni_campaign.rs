@@ -1,7 +1,7 @@
 //! Differential campaign over every exported JNI symbol
 //! (`docs/AUTONOMOUS_DECISIONS.md` #65).
 //!
-//! The Android app calls the 31 `Java_com_hse_bleradar_NativeRadar_*` exports
+//! The Android app calls the 32 `Java_com_hse_bleradar_NativeRadar_*` exports
 //! (the signal/tracking surface, the four automatic-update decision bridges —
 //! `updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
 //! `retryBackoffDelaySeconds` — the two device-map policy bridges —
@@ -41,9 +41,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use bleradar_core::{
     CalibrationProfile, DownloadConditions, DownloadPolicy, DownloadReadiness, FreshnessClass,
-    NetworkType, ProximityBand, ReleaseManifest, RetryPolicy, SignalTrend, TrackingProfile,
-    TrackingSnapshotInput, ble_distance_m, ble_distance_range_m, calibration_profile,
-    calibration_profile_from_ordinal, download_readiness, filtered_rssi, proximity_label,
+    ManifestFetchFailure, ManifestSourceDecision, NetworkType, ProximityBand, ReleaseManifest,
+    RetryPolicy, SignalTrend, TrackingProfile, TrackingSnapshotInput, ble_distance_m,
+    ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
+    download_readiness, filtered_rssi, manifest_source_decision, proximity_label,
     proximity_label_from_distance_m, should_check_for_update, signal_confidence_percent,
     signal_trend, tracking_profile, tracking_profile_from_ordinal, tracking_snapshot,
     update_decision,
@@ -66,6 +67,7 @@ use bleradar_jni::{
     Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical,
     Java_com_hse_bleradar_NativeRadar_releaseManifestError,
     Java_com_hse_bleradar_NativeRadar_releaseManifestField,
+    Java_com_hse_bleradar_NativeRadar_remoteManifestDisposition,
     Java_com_hse_bleradar_NativeRadar_retryBackoffDelaySeconds,
     Java_com_hse_bleradar_NativeRadar_shouldCheckForUpdate,
     Java_com_hse_bleradar_NativeRadar_signalConfidencePercent,
@@ -84,14 +86,14 @@ use bleradar_jni::{
     calibration_profile_rssi_at_1m_dbm_or_nan, default_calibration_profile_ordinal,
     default_tracking_profile_ordinal, device_rank_key, device_should_prune,
     distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan, download_readiness_ordinal,
-    filtered_rssi_or_nan, proximity_label_ordinal, release_manifest_canonical,
-    release_manifest_error, release_manifest_field, retry_backoff_delay_secs,
-    should_check_for_update_flag, signal_confidence_percent_or_negative, signal_trend_ordinal,
-    tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
-    tracking_distance_m_or_nan, tracking_distance_proximity_ordinal,
-    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
-    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
-    update_decision_ordinal,
+    filtered_rssi_or_nan, manifest_source_decision_ordinal, proximity_label_ordinal,
+    release_manifest_canonical, release_manifest_error, release_manifest_field,
+    retry_backoff_delay_secs, should_check_for_update_flag, signal_confidence_percent_or_negative,
+    signal_trend_ordinal, tracking_confidence_percent_or_negative,
+    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
+    tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
+    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
+    tracking_trend_ordinal, update_decision_ordinal,
 };
 
 const DEFAULT_ITERATIONS: u64 = 20_000;
@@ -956,6 +958,48 @@ fn check_update(rng: &mut Rng) -> Result<(), String> {
             "downloadReadiness export/core/bleradar-core disagree \
              [network={network} battery={battery} charging={charging} free={free} \
               allow_metered={allow_metered} min_battery={min_battery} headroom={headroom} size={size}]"
+        ));
+    }
+
+    // --- The remote-manifest disposition ---
+    // Small ordinals and real statuses most of the time, anything at all the rest.
+    let status = if rng.below(4) == 0 {
+        int(rng)
+    } else {
+        i32::try_from(rng.below(700)).unwrap_or(0)
+    };
+    let failure_kind = if rng.below(8) == 0 {
+        int(rng)
+    } else {
+        i32::try_from(rng.below(5)).unwrap_or(0)
+    };
+    let disposition = Java_com_hse_bleradar_NativeRadar_remoteManifestDisposition(
+        null(),
+        null(),
+        status,
+        failure_kind,
+    );
+    let failure = match failure_kind {
+        0 => Some(ManifestFetchFailure::None),
+        1 => Some(ManifestFetchFailure::Transport),
+        2 => Some(ManifestFetchFailure::TooLarge),
+        3 => Some(ManifestFetchFailure::Rejected),
+        _ => None,
+    };
+    let expected_disposition = match failure
+        .map_or(ManifestSourceDecision::FallbackNoRetry, |failure| {
+            manifest_source_decision(u16::try_from(status).unwrap_or(0), failure)
+        }) {
+        ManifestSourceDecision::UseRemote => 0,
+        ManifestSourceDecision::FallbackRetry => 1,
+        ManifestSourceDecision::FallbackNoRetry => 2,
+    };
+    if disposition != manifest_source_decision_ordinal(status, failure_kind)
+        || disposition != expected_disposition
+    {
+        return Err(format!(
+            "remoteManifestDisposition export/core/bleradar-core disagree \
+             [status={status} failure_kind={failure_kind}]"
         ));
     }
     if !(0..=4).contains(&readiness) {
