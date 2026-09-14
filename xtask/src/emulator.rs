@@ -1624,17 +1624,28 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
                 )
             })?;
     }
-    if tunnels.iter().any(|line| line.contains("refused")) {
+    // The guest's global proxy also carries the platform's own traffic (its
+    // connectivity probes), which the proxy refuses as it must: reported by
+    // host, never a failure. Only a tunnel the stand-in itself turned away, or
+    // a request the proxy could not read, is out of the ordinary.
+    let summary = updateproof::tunnel_summary(&tunnels);
+    if !summary.other.is_empty() {
         return Err(format!(
-            "the proxy was asked for a tunnel it must refuse: {}",
-            tunnels.join(" | ")
+            "the proxy logged what it should not have: {}",
+            summary.other.join(" | ")
         ));
     }
     report.push(format!(
-        "stand-in {RELEASE_HOST}: {} tunnel(s) relayed, {} request(s) — {}",
-        tunnels.len(),
+        "stand-in {RELEASE_HOST}: {} tunnel(s) relayed ({RELEASE_HOST}:443 only), {} request(s) — {}; {} other request(s) from the guest refused by the proxy ({}: the platform's own traffic, which the global proxy carries too)",
+        summary.relayed,
         requests.len(),
-        requests.join("; ")
+        requests.join("; "),
+        summary.refused,
+        if summary.refused_hosts.is_empty() {
+            "no host".to_string()
+        } else {
+            summary.refused_hosts.join(", ")
+        }
     ));
     Ok(())
 }

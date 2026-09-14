@@ -259,6 +259,71 @@ pub fn tunnel_allowed(host: &str, port: u16) -> bool {
     host.eq_ignore_ascii_case(RELEASE_HOST) && port == 443
 }
 
+/// The proxy's log, summarised: how many tunnels reached the stand-in and
+/// which hosts it refused. A guest's *global* proxy carries the platform's
+/// own traffic too — its connectivity probes to `connectivitycheck.gstatic.com`
+/// and `www.google.com`, Play's `generate_204` — so refusals are expected on
+/// a runtime and reported, not failed; the app's own requests are held to the
+/// stand-in's request log instead.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TunnelSummary {
+    /// Tunnels relayed to the stand-in (`github.com:443` only, by construction).
+    pub relayed: usize,
+    /// Requests refused, tunnel or plain.
+    pub refused: usize,
+    /// The distinct hosts refused, in the order first seen (`?` when a plain
+    /// request carried no absolute URL to read one from).
+    pub refused_hosts: Vec<String>,
+    /// Lines that were neither: a stand-in that refused the upstream
+    /// connection, an unreadable request.
+    pub other: Vec<String>,
+}
+
+/// Reads the proxy's log lines (as [`serve_tunnel`] writes them).
+pub fn tunnel_summary(tunnels: &[String]) -> TunnelSummary {
+    let mut summary = TunnelSummary::default();
+    for line in tunnels {
+        if line.ends_with("-> relayed to the stand-in") {
+            summary.relayed += 1;
+        } else if let Some(host) = refused_host(line) {
+            summary.refused += 1;
+            if !summary.refused_hosts.contains(&host) {
+                summary.refused_hosts.push(host);
+            }
+        } else {
+            summary.other.push(line.clone());
+        }
+    }
+    summary
+}
+
+/// The host a refusal line names: `CONNECT host:port -> refused`, or the
+/// authority of the absolute URL a refused plain request carried.
+fn refused_host(line: &str) -> Option<String> {
+    if let Some(target) = line
+        .strip_prefix("CONNECT ")
+        .and_then(|rest| rest.strip_suffix(" -> refused"))
+    {
+        return Some(
+            target
+                .rsplit_once(':')
+                .map_or(target, |(host, _)| host)
+                .to_string(),
+        );
+    }
+    let request_line = line.strip_prefix("refused a non-CONNECT request: ")?;
+    let target = request_line.split_whitespace().nth(1).unwrap_or("");
+    let authority = target
+        .split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or(""))
+        .unwrap_or("");
+    Some(if authority.is_empty() {
+        "?".to_string()
+    } else {
+        authority.to_string()
+    })
+}
+
 /// The stand-in release host and the proxy in front of it. Its logs are
 /// read once, complete, by [`ReleaseHost::stop`]: the stand-in prints a
 /// request's line after answering it, so a snapshot taken while it runs
@@ -781,6 +846,55 @@ mod tests {
         assert!(!tunnel_allowed("github.com", 80));
         assert!(!tunnel_allowed("api.github.com", 443));
         assert!(!tunnel_allowed("example.com", 443));
+    }
+
+    #[test]
+    fn the_proxy_log_is_summarised_with_the_platforms_refused_hosts() {
+        // The lines CI's first end-to-end run logged: the app's two tunnels
+        // and the API 34 guest's own probes through the global proxy.
+        let log: Vec<String> = [
+            "CONNECT github.com:443 -> relayed to the stand-in",
+            "CONNECT github.com:443 -> relayed to the stand-in",
+            "refused a non-CONNECT request: GET http://connectivitycheck.gstatic.com/generate_204 HTTP/1.1",
+            "CONNECT www.google.com:443 -> refused",
+            "refused a non-CONNECT request: GET http://play.googleapis.com/generate_204 HTTP/1.1",
+            "CONNECT infinitedata-pa.googleapis.com:443 -> refused",
+            "CONNECT www.google.com:443 -> refused",
+            "refused a non-CONNECT request: GET http://connectivitycheck.gstatic.com/generate_204 HTTP/1.1",
+        ]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+        let summary = tunnel_summary(&log);
+        assert_eq!(summary.relayed, 2);
+        assert_eq!(summary.refused, 6);
+        assert_eq!(
+            summary.refused_hosts,
+            [
+                "connectivitycheck.gstatic.com",
+                "www.google.com",
+                "play.googleapis.com",
+                "infinitedata-pa.googleapis.com"
+            ]
+        );
+        assert!(summary.other.is_empty());
+
+        // What the summary does not absorb: the stand-in turning a tunnel
+        // away, an unreadable request, and a plain request without a host.
+        let odd: Vec<String> = [
+            "CONNECT github.com:443 -> the stand-in refused: Connection refused (os error 111)",
+            "unreadable request: early end of stream",
+            "refused a non-CONNECT request: GET /generate_204 HTTP/1.1",
+        ]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+        let summary = tunnel_summary(&odd);
+        assert_eq!(summary.relayed, 0);
+        assert_eq!(summary.refused, 1);
+        assert_eq!(summary.refused_hosts, ["?"]);
+        assert_eq!(summary.other, odd[..2]);
+        assert_eq!(tunnel_summary(&[]), TunnelSummary::default());
     }
 
     #[test]
