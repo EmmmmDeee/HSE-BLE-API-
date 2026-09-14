@@ -579,12 +579,27 @@ pub fn ui_button_centre(ui_xml: &str, texts: &[&str]) -> Option<(u32, u32, Strin
     None
 }
 
-/// The window `dumpsys window windows` reports as focused (`mCurrentFocus=Window{… pkg/activity}`).
+/// The window a `dumpsys window displays` dump reports as focused
+/// (`mCurrentFocus=Window{… pkg/activity}`; since Android 10 the `windows`
+/// dump no longer carries it).
 pub fn focused_window(dumpsys_window: &str) -> Option<String> {
     dumpsys_window
         .lines()
         .find_map(|line| line.split("mCurrentFocus=").nth(1))
         .map(|rest| rest.trim().to_string())
+}
+
+/// The activity `dumpsys activity activities` reports as resumed
+/// (`topResumedActivity=ActivityRecord{… u0 pkg/activity t12}`): its
+/// `pkg/activity`.
+pub fn resumed_activity(dumpsys_activity: &str) -> Option<String> {
+    dumpsys_activity
+        .lines()
+        .filter(|line| line.contains("ResumedActivity"))
+        .find_map(|line| line.split("ActivityRecord{").nth(1))
+        .and_then(|record| record.split('}').next())
+        .and_then(|record| record.split_whitespace().nth(2))
+        .map(str::to_string)
 }
 
 /// The host side proven on the host, before an emulator is involved: the
@@ -841,5 +856,20 @@ mod tests {
             Some("Window{abc u0 com.google.android.packageinstaller/com.android.packageinstaller.PackageInstallerActivity}".to_string())
         );
         assert_eq!(focused_window("nothing"), None);
+        let activities = "  Task id #12\n    topResumedActivity=ActivityRecord{6d0f8a2 u0 com.google.android.packageinstaller/com.android.packageinstaller.PackageInstallerActivity t12}\n";
+        assert_eq!(
+            resumed_activity(activities).as_deref(),
+            Some(
+                "com.google.android.packageinstaller/com.android.packageinstaller.PackageInstallerActivity"
+            )
+        );
+        assert_eq!(
+            resumed_activity(
+                "  ResumedActivity: ActivityRecord{abc u0 com.hse.bleradar/.MainActivity t9}\n"
+            )
+            .as_deref(),
+            Some("com.hse.bleradar/.MainActivity")
+        );
+        assert_eq!(resumed_activity("no such line"), None);
     }
 }

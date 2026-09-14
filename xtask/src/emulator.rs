@@ -758,6 +758,14 @@ fn release_manifest_url(config: &Config) -> Result<String, String> {
         })
 }
 
+/// What is in front, for the report: the resumed activity from the activity
+/// manager, else the focused window from the window manager, else "unknown".
+fn activity_in_front(adb: &Adb) -> String {
+    updateproof::resumed_activity(&adb.shell_lenient("dumpsys activity activities"))
+        .or_else(|| updateproof::focused_window(&adb.shell_lenient("dumpsys window displays")))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Launches the activity (`am start -W`), which must report `Status: ok`.
 fn launch_activity(adb: &Adb) -> Result<(), String> {
     let launch = adb.shell(&format!("am start -W -n {ACTIVITY}"))?;
@@ -1731,34 +1739,31 @@ fn upgrade_through(
     ));
 
     println!("== the package installer ==");
+    // The installer's presence is proven by its confirmation button in the
+    // view hierarchy and by the version it installs; which activity is in
+    // front is recorded for the report, from the activity manager's dump.
     let awaited = Instant::now();
-    let focus = loop {
-        let windows = adb.shell("dumpsys window windows")?;
-        if let Some(window) = updateproof::focused_window(&windows)
-            && window.contains("packageinstaller")
-        {
-            break window;
-        }
-        if awaited.elapsed() > INSTALLER_TIMEOUT {
-            return Err(format!(
-                "the package installer did not take the focus within {}s; focus: {:?}",
-                INSTALLER_TIMEOUT.as_secs(),
-                updateproof::focused_window(&windows)
-            ));
-        }
-        thread::sleep(Duration::from_secs(1));
-    };
-    let tapped = loop {
+    let (front, tapped) = loop {
         let _ = adb.shell_lenient("uiautomator dump /sdcard/upgrade-ui.xml");
         let ui = adb.shell_lenient("cat /sdcard/upgrade-ui.xml");
         if let Some((x, y, label)) = updateproof::ui_button_centre(&ui, INSTALLER_BUTTONS) {
+            let front = activity_in_front(adb);
             adb.shell(&format!("input tap {x} {y}"))?;
-            break label;
+            break (front, label);
         }
         if awaited.elapsed() > INSTALLER_TIMEOUT {
+            let starts = adb.shell_lenient("logcat -d -s ActivityTaskManager:* ActivityManager:*");
+            let starts: Vec<&str> = starts
+                .lines()
+                .filter(|line| {
+                    line.contains("packageinstaller") || line.contains("ackground activity")
+                })
+                .collect();
             return Err(format!(
-                "the installer showed none of {INSTALLER_BUTTONS:?} within {}s; its view hierarchy:\n{ui}",
-                INSTALLER_TIMEOUT.as_secs()
+                "the installer showed none of {INSTALLER_BUTTONS:?} within {}s; in front: {}; installer-related activity starts:\n{}\nview hierarchy:\n{ui}",
+                INSTALLER_TIMEOUT.as_secs(),
+                activity_in_front(adb),
+                starts.join("\n")
             ));
         }
         thread::sleep(Duration::from_secs(1));
@@ -1783,7 +1788,7 @@ fn upgrade_through(
         thread::sleep(Duration::from_secs(2));
     };
     report.push(format!(
-        "installer: {focus}; `{tapped}` tapped; versionCode {} installed {:.1}s later",
+        "installer: {front} in front with `{tapped}`; tapped; versionCode {} installed {:.1}s later",
         proof.successor_code,
         installed_after.as_secs_f64()
     ));
@@ -1896,6 +1901,7 @@ pub fn run(config: &Config) -> Result<(), String> {
                             "BleScanEngine",
                             "UpdateCheckService",
                             "AndroidRuntime",
+                            "packageinstaller",
                         ]
                         .iter()
                         .any(|needle| line.contains(needle))
