@@ -217,7 +217,10 @@ from the sources entry by entry (`build-apk` stores every entry at the ZIP
 epoch, so a rebuild on one signing key is byte-identical), and
 `verify-api-live` serves the generated manifest to the real core as its
 accepted-manifest scenario — so what a release publishes is proven parseable
-before it is published. The steps are listed under "Releasing" in the README.
+before it is published, and the emulator proof runs the pathway past the
+decision — the download, the verification, the installer, the install —
+against a stand-in release host on every pull request ("Verifying it"
+below). The steps are listed under "Releasing" in the README.
 
 ## Verifying it
 
@@ -239,7 +242,21 @@ before it is published. The steps are listed under "Releasing" in the README.
   scripted JDK `HttpServer` on the host JVM: a valid manifest, `404`, `503`, a
   `301` without `Location`, a body over the cap, a body the core rejects, a
   stalled answer, a refused connection and a malformed URL, each fetch's classification and its Rust
-  disposition required as documented through the real `libbleradar_jni.so`.
+  disposition required as documented through the real `libbleradar_jni.so`;
+  and the emulator proof's stand-in `github.com` self-checked on the host —
+  the production release URL redirected to the generated manifest, the
+  artifact it names fetched byte-identical, a tunnel elsewhere refused.
+* `cargo xtask verify-android-emulator` — the pathway past the decision, on
+  a real Android runtime (decision #99): a stand-in `github.com` (a JDK
+  `HttpsServer` on a `keytool` certificate the guest is made to trust, behind
+  an xtask CONNECT proxy set as the guest's global proxy) serves a
+  versionCode-2 release built by `cargo xtask build-update-proof` on the
+  installed app's key; the check must fetch the production URL and accept
+  the remote manifest, decide 1, download, verify the file through the core
+  and hand it to the platform installer, whose `Update` the proof taps; the
+  successor must be installed and run with its native core. First
+  end-to-end run: handed to the installer 5.8 s after the launch, installed
+  2.5 s after the tap.
 * `cargo run -p bleradar-core --example update_flow` — the whole lifecycle over a
   real 64 KiB artifact and a real SHA-256, including a simulated crash mid-install
   (persist → restart → recover → finish), an idempotent re-install, pre-download
