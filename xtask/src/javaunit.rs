@@ -218,13 +218,20 @@ public final class JUnitLiteRunner {
                     continue;
                 }
                 classTests++;
-                Object instance = cls.getDeclaredConstructor().newInstance();
                 try {
+                    Object instance = cls.getDeclaredConstructor().newInstance();
                     method.invoke(instance);
                     System.out.println("ok   " + cls.getSimpleName() + "#" + method.getName());
                 } catch (InvocationTargetException e) {
+                    // The constructor or the test method threw: that throwable
+                    // is the failure, as under JUnit.
                     classFailed++;
                     System.out.println("FAIL " + cls.getSimpleName() + "#" + method.getName() + ": " + e.getCause());
+                } catch (ReflectiveOperationException | RuntimeException e) {
+                    // No accessible no-arg constructor, or the reflection
+                    // itself failed: the test cannot run, so it fails.
+                    classFailed++;
+                    System.out.println("FAIL " + cls.getSimpleName() + "#" + method.getName() + ": " + e);
                 }
             }
             System.out.println("class " + cls.getName() + " tests=" + classTests + " failed=" + classFailed);
