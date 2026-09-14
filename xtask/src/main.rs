@@ -18,6 +18,7 @@ mod dex;
 mod elf;
 mod emulator;
 mod hci;
+mod javaunit;
 mod sha256;
 mod vendor;
 mod zip_reader;
@@ -92,6 +93,7 @@ fn main() -> ExitCode {
         "prepare-bionic-sysroot" => cmd_prepare_bionic_sysroot(&rest),
         "verify-dashboard-live" => cmd_verify_dashboard_live(),
         "verify-api-live" => cmd_verify_api_live(),
+        "verify-android-unit" => cmd_verify_android_unit(),
         "verify-android-emulator" => cmd_verify_android_emulator(),
         "android-sdk-packages" => cmd_android_sdk_packages(&rest),
         "android-sdk-install" => cmd_android_sdk_install(&rest),
@@ -141,6 +143,7 @@ fn print_usage() {
          \x20 prepare-bionic-sysroot <dir>  extract the Bionic runtime (linker64 + libc/libm/libdl/libc++) from the installed android-24 arm64 system image into <dir>, for BIONIC_SYSROOT\n\
          \x20 verify-dashboard-live      render the web dashboard (assets/dashboard.html) in headless Chromium against a mock of the JSON contract and check the DOM\n\
          \x20 verify-api-live            run the app's real ApiHttpServer on the host JVM with fixture sources, check every HTTP contract by real requests (JSON byte-identical to the browser fixtures) and render the dashboard from it in headless Chromium\n\
+         \x20 verify-android-unit        run the app's unit tests (android/app/src/test) on the host JVM against the real native core through a generated JUnit-subset runner; every test file must be listed with its pinned count\n\
          \x20 verify-android-emulator    install the committed APK on a headless Android emulator (KVM) and exercise the app's real lifecycle through the loopback API\n\
          \x20 android-sdk-packages [--system-image|--emulator]  print the pinned sdkmanager package set the Android proofs are built with (CI installs exactly this)\n\
          \x20 android-sdk-install [--system-image|--emulator]   install that set into the discovered SDK: licenses accepted, sdkmanager retried, every package checked complete and discoverable (what CI runs)\n\
@@ -2965,6 +2968,12 @@ fn verify_apk_version(build_tools: &Path, apk: &Path) -> Result<(), String> {
     }
     println!("built package: versionCode {code}, versionName {name} — the version authority");
     Ok(())
+}
+
+/// `cargo xtask verify-android-unit`: the app's unit tests on the host JVM
+/// (see `javaunit`).
+fn cmd_verify_android_unit() -> Result<(), String> {
+    javaunit::run(&repo_root()?)
 }
 
 /// `cargo xtask check-app-version`: the bundled release manifest repeats the
