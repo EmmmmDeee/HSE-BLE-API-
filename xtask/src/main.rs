@@ -134,7 +134,7 @@ fn print_usage() {
          \x20 check-jni-contract [lib]   fail unless NativeRadar.java's static natives and the library's Java_* exports match 1:1\n\
          \x20 verify-jni-live            run a live Java→JNI→Rust verification against NativeRadar.java\n\
          \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
-         \x20 check-app-version          fail unless the bundled release manifest repeats APP_VERSION_CODE/NAME and the committed APK carries the version's name\n\
+         \x20 check-app-version          fail unless the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME and no artifact of another version remains\n\
          \x20 release-manifest [--url <artifact url>] [--out <path>]  print (or write) the release manifest for the committed APK: its version, exact size and SHA-256\n\
          \x20 oracle-differential        execute the immutable oracle under qemu-aarch64 and check the committed executed-oracle vectors (see docs/ORACLE_DIFFERENTIAL.md)\n\
          \x20 verify-jni-target          run the bleradar-jni test suite cross-compiled for aarch64-linux-android under qemu-aarch64 against a Bionic runtime\n\
@@ -1146,8 +1146,11 @@ const APP_VERSION_NAME: &str = "1.0.0";
 /// Final signed APK's committed name at the repository root, after the
 /// version, so an upgrade never reuses a name.
 fn apk_output_name() -> String {
-    format!("HSE-BLE-Radar-arm64-v{APP_VERSION_NAME}.apk")
+    format!("{APK_NAME_PREFIX}{APP_VERSION_NAME}.apk")
 }
+
+/// What every committed artifact's name starts with; the version name follows.
+const APK_NAME_PREFIX: &str = "HSE-BLE-Radar-arm64-v";
 
 /// The bundled release manifest, the offline fallback `UpdateCheckService`
 /// assesses when the remote one is unavailable (relative to the repo root).
@@ -2977,10 +2980,37 @@ fn cmd_check_app_version() -> Result<(), String> {
             apk.display()
         ));
     }
+    let names = fs::read_dir(&root)
+        .map_err(|e| format!("listing {}: {e}", root.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned());
+    let stale = stale_artifacts(names);
+    if !stale.is_empty() {
+        return Err(format!(
+            "artifacts of another version are still committed beside {}: {} (one artifact is committed; `git rm` the others)",
+            apk_output_name(),
+            stale.join(", ")
+        ));
+    }
     println!(
-        "app version {APP_VERSION_CODE} ({APP_VERSION_NAME}): the bundled release manifest and the committed APK's name agree"
+        "app version {APP_VERSION_CODE} ({APP_VERSION_NAME}): the bundled release manifest and the committed APK's name agree, no artifact of another version remains"
     );
     Ok(())
+}
+
+/// The `HSE-BLE-Radar-arm64-v*.apk` names among `names` that are not the
+/// current version's artifact: a version bump renames the output, and a
+/// previous artifact left committed beside it would leave two packages
+/// claiming to be the app. Sorted.
+fn stale_artifacts(names: impl Iterator<Item = String>) -> Vec<String> {
+    let current = apk_output_name();
+    let mut stale: Vec<String> = names
+        .filter(|name| {
+            name.starts_with(APK_NAME_PREFIX) && name.ends_with(".apk") && *name != current
+        })
+        .collect();
+    stale.sort();
+    stale
 }
 
 /// `cargo xtask release-manifest [--url <artifact url>] [--out <path>]`: the
@@ -4427,6 +4457,24 @@ mod tests {
                 .starts_with("https://github.com/EmmmmDeee/HSE-BLE-API-/releases/download/v")
         );
         assert!(release_artifact_url().ends_with(&apk_output_name()));
+        // A version bump renames the artifact; whatever else carries the
+        // prefix is a previous version left committed — named, sorted — while
+        // the current artifact and unrelated files are not.
+        let names = [
+            "HSE-BLE-Radar-arm64-v0.9.0.apk",
+            &apk_output_name(),
+            "HSE-BLE-Radar-arm64-v0.8.1.apk",
+            "README.md",
+            "HSE-BLE-Radar-arm64-v0.9.0.apk.sha256",
+        ];
+        assert_eq!(
+            stale_artifacts(names.iter().map(ToString::to_string)),
+            vec![
+                "HSE-BLE-Radar-arm64-v0.8.1.apk".to_string(),
+                "HSE-BLE-Radar-arm64-v0.9.0.apk".to_string(),
+            ]
+        );
+        assert!(stale_artifacts(std::iter::once(apk_output_name())).is_empty());
 
         let manifest = "# comment\nversion_code = 7\nversion_name = 9.9.9\nurl = https://e/x.apk\n\nnotes = a = b\n";
         assert_eq!(

@@ -479,7 +479,7 @@ cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/expor
 cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator (needs KVM + SDK emulator)
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
 cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)
-cargo xtask check-app-version      # the bundled release manifest and the committed APK's name repeat APP_VERSION_CODE/NAME (a gates step)
+cargo xtask check-app-version      # the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME, no artifact of another version remains (a gates step)
 cargo xtask release-manifest [--url <artifact url>] [--out <path>]   # the manifest a release publishes: the committed APK's version, exact size and SHA-256
 cargo xtask audit                  # cargo audit, offline, vendored advisory db
 cargo xtask deny                   # cargo deny check, offline, vendored advisory db
@@ -507,10 +507,11 @@ authority, `APP_VERSION_CODE`/`APP_VERSION_NAME` in `xtask/src/main.rs`:
 ```sh
 # 1. bump APP_VERSION_CODE / APP_VERSION_NAME in xtask/src/main.rs and the
 #    version_code / version_name lines of android/app/src/main/assets/release_manifest.txt
-cargo xtask check-app-version              # refuses a mismatch (also a `gates` step)
 cargo xtask build-apk                      # HSE-BLE-Radar-arm64-v<version name>.apk, byte-reproducible on one key
-cargo xtask verify-android-live            # the built version read back; the committed APK's entries reproduced
-git add HSE-BLE-Radar-arm64-v<version name>.apk   # replaces the committed APK (its name carries the version)
+git rm HSE-BLE-Radar-arm64-v<previous>.apk # one artifact is committed: check-app-version refuses a stale one
+cargo xtask check-app-version              # the bundled manifest, the artifact's name, no stale artifact (also a `gates` step)
+cargo xtask verify-android-live            # the built version read back; the package's entries reproduced by a second build
+git add HSE-BLE-Radar-arm64-v<version name>.apk
 git tag v<version name>                    # the tag `release-manifest`'s default URL assumes
 cargo xtask release-manifest --out release_manifest.txt   # the APK's exact size and SHA-256
 # 2. create the GitHub release for the tag with both files attached, unmodified

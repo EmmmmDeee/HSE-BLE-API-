@@ -210,7 +210,8 @@ asset on the `v<version name>` release
 (`https://github.com/EmmmmDeee/HSE-BLE-API-/releases/download/v1.0.0/HSE-BLE-Radar-arm64-v1.0.0.apk`);
 a non-`https` URL is refused. `cargo xtask check-app-version` (a `gates`
 step) requires the bundled `assets/release_manifest.txt` to repeat the
-version and the committed APK's name to carry it, `verify-android-live` reads
+version, the committed APK's name to carry it and no artifact of another
+version to remain committed beside it, `verify-android-live` reads
 the built package's version back and requires the committed APK to reproduce
 from the sources entry by entry (`build-apk` stores every entry at the ZIP
 epoch, so a rebuild on one signing key is byte-identical), and
