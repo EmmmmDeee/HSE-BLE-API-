@@ -984,6 +984,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     println!("== the upgrade proof's stand-in release host, through its proxy over TLS (curl) ==");
     let stand_in = crate::updateproof::self_check(
         &crate::xtask_temp_dir("verify-api-live-stand-in"),
+        &crate::emulator::release_manifest_url_from(root)?,
         &release_manifest,
         &apk_path,
     )?;

@@ -259,7 +259,10 @@ pub fn tunnel_allowed(host: &str, port: u16) -> bool {
     host.eq_ignore_ascii_case(RELEASE_HOST) && port == 443
 }
 
-/// The stand-in release host and the proxy in front of it.
+/// The stand-in release host and the proxy in front of it. Its logs are
+/// read once, complete, by [`ReleaseHost::stop`]: the stand-in prints a
+/// request's line after answering it, so a snapshot taken while it runs
+/// could miss the last answer.
 pub struct ReleaseHost {
     server: Child,
     /// Where the `HttpsServer` listens (loopback).
@@ -269,6 +272,7 @@ pub struct ReleaseHost {
     pub proxy_port: u16,
     requests: Arc<Mutex<Vec<String>>>,
     tunnels: Arc<Mutex<Vec<String>>>,
+    reader: Option<thread::JoinHandle<()>>,
 }
 
 /// What the stand-in must serve.
@@ -326,7 +330,7 @@ impl ReleaseHost {
         let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let (port_tx, port_rx) = mpsc::channel();
         let sink = Arc::clone(&requests);
-        thread::spawn(move || {
+        let reader = thread::spawn(move || {
             let mut port_sent = false;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Some(port) = line.strip_prefix("port=") {
@@ -367,38 +371,50 @@ impl ReleaseHost {
             proxy_port,
             requests,
             tunnels,
+            reader: Some(reader),
         })
     }
 
-    /// The requests the stand-in answered so far, in order (`request GET /path -> status`).
-    pub fn requests(&self) -> Vec<String> {
-        self.requests
-            .lock()
-            .map(|log| log.clone())
-            .unwrap_or_default()
-    }
-
-    /// The tunnels the proxy was asked for, in order.
-    pub fn tunnels(&self) -> Vec<String> {
-        self.tunnels
-            .lock()
-            .map(|log| log.clone())
-            .unwrap_or_default()
-    }
-
-    /// Stops the stand-in (closing its stdin, then insisting).
-    pub fn stop(mut self) {
+    /// Stops the stand-in (closing its stdin, then insisting) and returns
+    /// its complete logs: the requests it answered, in order (`request GET
+    /// /path -> status`), and the tunnels the proxy was asked for. The
+    /// stand-in's output is read to its end first, so the last answer's line
+    /// is there.
+    pub fn stop(mut self) -> (Vec<String>, Vec<String>) {
         drop(self.server.stdin.take());
         let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if matches!(self.server.try_wait(), Ok(Some(_))) {
-                return;
-            }
+        while Instant::now() < deadline && !matches!(self.server.try_wait(), Ok(Some(_))) {
             thread::sleep(Duration::from_millis(100));
         }
-        let _ = self.server.kill();
-        let _ = self.server.wait();
+        if !matches!(self.server.try_wait(), Ok(Some(_))) {
+            let _ = self.server.kill();
+            let _ = self.server.wait();
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        (
+            self.requests
+                .lock()
+                .map(|log| log.clone())
+                .unwrap_or_default(),
+            self.tunnels
+                .lock()
+                .map(|log| log.clone())
+                .unwrap_or_default(),
+        )
     }
+}
+
+/// The `url` field of a release manifest text (the first `=` splits, both
+/// sides trimmed, as the core reads it).
+pub fn manifest_url_field(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .find(|(key, _)| key.trim() == "url")
+        .map(|(_, value)| value.trim().to_string())
 }
 
 /// Starts the `CONNECT` proxy on an ephemeral loopback port; every tunnel
@@ -604,26 +620,32 @@ pub fn resumed_activity(dumpsys_activity: &str) -> Option<String> {
 
 /// The host side proven on the host, before an emulator is involved: the
 /// stand-in started on a fresh trust anchor, then `curl` — trusting only
-/// that anchor, tunnelling through the proxy — fetching the release URL (its
-/// redirect followed to the manifest, byte-identical), the artifact
-/// (byte-identical), and being refused a tunnel to another host. Returns a
-/// one-line summary; run by `verify-api-live` so the `gates` job covers it.
-pub fn self_check(work: &Path, manifest_text: &str, artifact: &Path) -> Result<String, String> {
+/// that anchor, tunnelling through the proxy — fetching the app's release
+/// URL (`release_manifest_url`, as the Java source declares it; its redirect
+/// followed to the manifest, byte-identical), the artifact at the URL that
+/// manifest names (byte-identical), and being refused a tunnel to another
+/// host. Returns a one-line summary; run by `verify-api-live` so the `gates`
+/// job covers it.
+pub fn self_check(
+    work: &Path,
+    release_manifest_url: &str,
+    manifest_text: &str,
+    artifact: &Path,
+) -> Result<String, String> {
     crate::recreate_dirs(&[work])?;
     let anchor = generate_trust_anchor(work)?;
     let manifest_file = work.join("release_manifest.txt");
     std::fs::write(&manifest_file, manifest_text)
         .map_err(|e| format!("writing {}: {e}", manifest_file.display()))?;
-    let latest_url = format!(
-        "https://{RELEASE_HOST}/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt"
-    );
-    let version = "9.9.9";
-    let apk_url = crate::release_artifact_url_for(version);
-    let latest_path = release_url_path(&latest_url)
-        .ok_or("the self-check's release URL is malformed")?
+    let latest_path = release_url_path(release_manifest_url)
+        .ok_or_else(|| {
+            format!("the release URL `{release_manifest_url}` is not on https://{RELEASE_HOST}/")
+        })?
         .to_string();
+    let apk_url = manifest_url_field(manifest_text)
+        .ok_or_else(|| format!("the manifest names no url:\n{manifest_text}"))?;
     let apk_path = release_url_path(&apk_url)
-        .ok_or("the self-check's artifact URL is malformed")?
+        .ok_or_else(|| format!("the manifest's url `{apk_url}` is not on https://{RELEASE_HOST}/"))?
         .to_string();
     let manifest_path = format!(
         "{}/release_manifest.txt",
@@ -640,8 +662,9 @@ pub fn self_check(work: &Path, manifest_text: &str, artifact: &Path) -> Result<S
             apk_file: artifact,
         },
     )?;
-    let outcome = (|| -> Result<String, String> {
-        let proxy = format!("http://127.0.0.1:{}", host.proxy_port);
+    let (https_port, proxy_port) = (host.https_port, host.proxy_port);
+    let fetched = (|| -> Result<usize, String> {
+        let proxy = format!("http://127.0.0.1:{proxy_port}");
         let curl = |url: &str, out: &Path| -> Result<(String, String), String> {
             let output = Command::new("curl")
                 .args(["-sS", "-L", "--proxy", &proxy, "--cacert"])
@@ -661,7 +684,7 @@ pub fn self_check(work: &Path, manifest_text: &str, artifact: &Path) -> Result<S
         // The release URL: redirected to the manifest, whose text comes back
         // as served — over TLS the stand-in's anchor alone vouches for.
         let manifest_out = work.join("fetched_manifest.txt");
-        let (written, _) = curl(&latest_url, &manifest_out)?;
+        let (written, _) = curl(release_manifest_url, &manifest_out)?;
         let manifest_url = format!("https://{RELEASE_HOST}{manifest_path}");
         if written != format!("200 {manifest_url}") {
             return Err(format!(
@@ -704,39 +727,36 @@ pub fn self_check(work: &Path, manifest_text: &str, artifact: &Path) -> Result<S
         if refused.status.success() {
             return Err("the proxy tunnelled a request to example.com".to_string());
         }
-        let tunnels = host.tunnels();
-        if !tunnels
-            .iter()
-            .any(|line| line == "CONNECT example.com:443 -> refused")
-        {
-            return Err(format!(
-                "the proxy did not log the refused tunnel: {}",
-                tunnels.join(" | ")
-            ));
-        }
-        let requests = host.requests();
-        let expected_requests = [
-            format!("request GET {latest_path} -> 302"),
-            format!("request GET {manifest_path} -> 200"),
-            format!("request GET {apk_path} -> 200"),
-        ];
-        if requests != expected_requests {
-            return Err(format!(
-                "the stand-in's requests were not the three expected: {}",
-                requests.join(" | ")
-            ));
-        }
-        Ok(format!(
-            "stand-in {RELEASE_HOST} on 127.0.0.1:{} behind the CONNECT proxy on 127.0.0.1:{}: the release URL redirected to the manifest ({} bytes, byte-identical), the artifact fetched ({} bytes, byte-identical), a tunnel to example.com refused; trust anchor {}",
-            host.https_port,
-            host.proxy_port,
-            manifest_text.len(),
-            expected.len(),
-            anchor.android_name
-        ))
+        Ok(expected.len())
     })();
-    host.stop();
-    outcome
+    // The logs are complete only once the stand-in has been stopped.
+    let (requests, tunnels) = host.stop();
+    let artifact_len = fetched?;
+    if !tunnels
+        .iter()
+        .any(|line| line == "CONNECT example.com:443 -> refused")
+    {
+        return Err(format!(
+            "the proxy did not log the refused tunnel: {}",
+            tunnels.join(" | ")
+        ));
+    }
+    let expected_requests = [
+        format!("request GET {latest_path} -> 302"),
+        format!("request GET {manifest_path} -> 200"),
+        format!("request GET {apk_path} -> 200"),
+    ];
+    if requests != expected_requests {
+        return Err(format!(
+            "the stand-in's requests were not the three expected: {}",
+            requests.join(" | ")
+        ));
+    }
+    Ok(format!(
+        "stand-in {RELEASE_HOST} on 127.0.0.1:{https_port} behind the CONNECT proxy on 127.0.0.1:{proxy_port}: the release URL {release_manifest_url} redirected to the manifest ({} bytes, byte-identical), the artifact it names fetched from {apk_url} ({artifact_len} bytes, byte-identical), a tunnel to example.com refused; trust anchor {}",
+        manifest_text.len(),
+        anchor.android_name
+    ))
 }
 
 #[cfg(test)]
@@ -798,6 +818,14 @@ mod tests {
         assert_eq!(release_url_path("https://example.com/x"), None);
         assert_eq!(release_url_path("http://github.com/x"), None);
         assert_eq!(release_url_path("https://github.com"), None);
+        assert_eq!(
+            manifest_url_field(
+                "# a comment\nversion_code = 2\nurl = https://github.com/x/y.apk \nnotes = url = not this\n"
+            )
+            .as_deref(),
+            Some("https://github.com/x/y.apk")
+        );
+        assert_eq!(manifest_url_field("version_code = 2\n"), None);
     }
 
     #[test]

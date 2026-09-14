@@ -743,9 +743,14 @@ fn app_pid(adb: &Adb) -> Result<u32, String> {
 /// the production release URL, the authority every update-check step pins
 /// its observation to.
 fn release_manifest_url(config: &Config) -> Result<String, String> {
-    let service_source = config
-        .root
-        .join("android/app/src/main/java/com/hse/bleradar/UpdateCheckService.java");
+    release_manifest_url_from(config.root)
+}
+
+/// [`release_manifest_url`] from the repository root (for the host-side
+/// proofs, which have no emulator `Config`).
+pub fn release_manifest_url_from(root: &Path) -> Result<String, String> {
+    let service_source =
+        root.join("android/app/src/main/java/com/hse/bleradar/UpdateCheckService.java");
     fs::read_to_string(&service_source)
         .ok()
         .and_then(|source| java_static_final_string(&source, "RELEASE_MANIFEST_URL"))
@@ -1592,11 +1597,10 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
         proof,
         report,
     );
-    // The proxy setting must not outlive the stand-in, whatever happened.
+    // The proxy setting must not outlive the stand-in, whatever happened;
+    // the stand-in's logs are complete only once it has stopped.
     let _ = adb.shell_lenient("settings put global http_proxy :0");
-    let requests = host.requests();
-    let tunnels = host.tunnels();
-    host.stop();
+    let (requests, tunnels) = host.stop();
     outcome?;
 
     // The stand-in's own view: the release URL's redirect, the manifest, the

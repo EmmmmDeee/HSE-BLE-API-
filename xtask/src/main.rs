@@ -2241,6 +2241,7 @@ fn cmd_build_apk() -> Result<(), String> {
             code: APP_VERSION_CODE,
             name: APP_VERSION_NAME.to_string(),
         },
+        &root.join(ANDROID_APP_DIR).join("assets"),
         &output,
     )
 }
@@ -2300,13 +2301,40 @@ fn cmd_build_update_proof() -> Result<(), String> {
         "== update proof: {} ({}) and its successor {} ({}) ==",
         current.name, current.code, successor.name, successor.code
     );
+    let assets = root.join(ANDROID_APP_DIR).join("assets");
     build_apk_package(
         &root,
         &current,
+        &assets,
         &proof_dir.join(apk_output_name_for(&current.name)),
     )?;
+    // The successor ships a bundled manifest that describes itself, as a
+    // release of that version would (check-app-version's rule), so what the
+    // proof installs is a self-consistent package, not the current one
+    // relabelled.
+    let successor_assets = proof_dir.join("successor-assets");
+    recreate_dirs(&[&successor_assets])?;
+    for entry in fs::read_dir(&assets).map_err(|e| format!("listing {}: {e}", assets.display()))? {
+        let entry = entry.map_err(|e| format!("listing {}: {e}", assets.display()))?;
+        let from = entry.path();
+        if !from.is_file() {
+            return Err(format!(
+                "{} is not a file; the proof's asset staging copies files only",
+                from.display()
+            ));
+        }
+        fs::copy(&from, successor_assets.join(entry.file_name()))
+            .map_err(|e| format!("copying {}: {e}", from.display()))?;
+    }
+    let bundled = bundled_manifest_for(
+        &read_to_string(&root.join(BUNDLED_RELEASE_MANIFEST_PATH))?,
+        &successor,
+    )?;
+    let bundled_path = successor_assets.join(UPDATE_PROOF_MANIFEST_FILE);
+    fs::write(&bundled_path, &bundled)
+        .map_err(|e| format!("writing {}: {e}", bundled_path.display()))?;
     let successor_apk = proof_dir.join(apk_output_name_for(&successor.name));
-    build_apk_package(&root, &successor, &successor_apk)?;
+    build_apk_package(&root, &successor, &successor_assets, &successor_apk)?;
     let manifest_xml = read_to_string(&root.join(ANDROID_APP_DIR).join("AndroidManifest.xml"))?;
     let (min_sdk, _) = parse_uses_sdk(&manifest_xml)?;
     let artifact = read_bytes(&successor_apk)?;
@@ -2329,11 +2357,44 @@ fn cmd_build_update_proof() -> Result<(), String> {
     Ok(())
 }
 
+/// The bundled manifest text for `version`: the committed asset with its
+/// `version_code` and `version_name` lines rewritten and every other line
+/// kept, so a successor package ships a fallback that describes itself.
+/// Refuses a text the core would (a malformed line, a repeated field) or one
+/// without both version fields.
+fn bundled_manifest_for(text: &str, version: &ApkVersion) -> Result<String, String> {
+    let fields = manifest_fields(text)?;
+    for required in ["version_code", "version_name"] {
+        if !fields.iter().any(|(key, _)| key == required) {
+            return Err(format!("the bundled release manifest has no {required}"));
+        }
+    }
+    let rewritten: Vec<String> = text
+        .lines()
+        .map(|line| match line.trim().split_once('=') {
+            Some((key, _)) if key.trim() == "version_code" => {
+                format!("version_code = {}", version.code)
+            }
+            Some((key, _)) if key.trim() == "version_name" => {
+                format!("version_name = {}", version.name)
+            }
+            _ => line.to_string(),
+        })
+        .collect();
+    Ok(format!("{}\n", rewritten.join("\n")))
+}
+
 /// Cross-compiles `bleradar-jni`, compiles and packages the app as
-/// `version`, signs it with the build directory's debug key and writes the
-/// verified package to `output`. `cmd_build_apk` builds the committed
-/// version; `cmd_build_update_proof` builds it and its successor.
-fn build_apk_package(root: &Path, version: &ApkVersion, output: &Path) -> Result<(), String> {
+/// `version` with the assets under `assets_dir`, signs it with the build
+/// directory's debug key and writes the verified package to `output`.
+/// `cmd_build_apk` builds the committed version with the app's own assets;
+/// `cmd_build_update_proof` builds it and its successor.
+fn build_apk_package(
+    root: &Path,
+    version: &ApkVersion,
+    assets_dir: &Path,
+    output: &Path,
+) -> Result<(), String> {
     let app_dir = root.join(ANDROID_APP_DIR);
     let manifest_path = app_dir.join("AndroidManifest.xml");
     let manifest_text = read_to_string(&manifest_path)?;
@@ -2438,7 +2499,7 @@ fn build_apk_package(root: &Path, version: &ApkVersion, output: &Path) -> Result
             // `getAssets().open(..)` in the app fails on the device
             // (decision #89), which `REQUIRED_APK_ENTRIES` now catches.
             .arg("-A")
-            .arg(app_dir.join("assets"))
+            .arg(assets_dir)
             .arg("-o")
             .arg(&base_apk)
             .arg("--java")
@@ -4632,6 +4693,39 @@ mod tests {
             ]
         );
         assert!(stale_artifacts(std::iter::once(apk_output_name())).is_empty());
+
+        // The successor's bundled manifest: the committed asset describing
+        // the successor, every other line untouched; what the core refuses
+        // is refused.
+        let successor = ApkVersion {
+            code: 7,
+            name: "2.5.0".to_string(),
+        };
+        assert_eq!(next_patch_version("1.0.0"), "1.0.1");
+        assert_eq!(next_patch_version("2.9"), "2.10");
+        assert_eq!(next_patch_version("3"), "4");
+        assert_eq!(next_patch_version("1.0.0-rc"), "1.0.0-rc.1");
+        assert_eq!(
+            bundled_manifest_for(
+                "# offline default\nversion_code = 1\nversion_name = 1.0.0\nurl = https://e/x.apk\nnotes = version_name = kept\n",
+                &successor
+            )
+            .unwrap(),
+            "# offline default\nversion_code = 7\nversion_name = 2.5.0\nurl = https://e/x.apk\nnotes = version_name = kept\n"
+        );
+        assert!(
+            bundled_manifest_for("version_code = 1\nurl = https://e/x.apk\n", &successor)
+                .unwrap_err()
+                .contains("no version_name")
+        );
+        assert!(
+            bundled_manifest_for(
+                "version_code = 1\nversion_name = 1.0.0\nversion_code = 2\n",
+                &successor
+            )
+            .unwrap_err()
+            .contains("given twice")
+        );
 
         let manifest = "# comment\nversion_code = 7\nversion_name = 9.9.9\nurl = https://e/x.apk\n\nnotes = a = b\n";
         assert_eq!(
