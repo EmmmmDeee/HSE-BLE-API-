@@ -96,12 +96,12 @@ Bionic runtime, and the WiFi `channel_to_frequency`, `frequency_to_channel`,
 `band`, `security` and `is_enterprise` contracts are `DifferentiallyVerified` —
 the safe-Rust reconstruction reproduces every executed-oracle output bit-for-bit
 over its input domain (`docs/ORACLE_DIFFERENTIAL.md`, `cargo xtask
-oracle-differential`); `wifi_band`, `wifi_security` and `wifi_is_enterprise`
-were previously-unmapped, statically-reachable shipped contracts reconstructed from
+oracle-differential`); `wifi_band`, `wifi_security` and `wifi_is_enterprise` were
+previously-unmapped, statically-reachable shipped contracts reconstructed from
 the executed oracle (`wifi_security` classifies a capabilities string by a
-case-sensitive substring precedence; `wifi_is_enterprise` tests for `EAP`). The
-pure geodesy contracts (`haversine_m`, `bearing_deg`) also have a broad
-executed-oracle differential — the reconstruction matches the executed oracle to under a micrometre / nanodegree
+case-sensitive substring precedence; `wifi_is_enterprise` tests for `EAP`). The pure geodesy contracts (`haversine_m`,
+`bearing_deg`) also have a broad executed-oracle differential — the
+reconstruction matches the executed oracle to under a micrometre / nanodegree
 over 308 coordinate pairs — but stay `SourceAnalog` because Bionic and host
 `libm` are not bit-identical for transcendentals (coverage, not a bit-exact
 promotion). The core BLE signal contracts (`ble_distance`, `proximity_label`)
@@ -132,26 +132,101 @@ The core supports selected-device lock state, ordered observation histories, ran
 
 ## Canonical evidence and provenance
 
-The evidence core keeps raw observations separate from normalized values and records `source`, `source_type`, `retrieval_method`, `observed_at`, `first_seen`, `last_seen`, and `derivation_history` for every observation. `EvidenceStore` rejects missing references and exposes trace APIs for:
+The evidence core keeps raw observations separate from normalized values and
+records `source`, `source_type`, `retrieval_method`, `observed_at`, `first_seen`,
+`last_seen`, and `derivation_history` for every observation. `EvidenceStore`
+rejects missing references and exposes trace APIs for:
 
 - `claim → hypothesis → evidence → observation → source`;
 - `input representation → transformation → output representation → features → verification`.
 
-Raw observations are immutable through the public API: normalization returns a new record and cannot replace the captured value. Other engines should write to this store rather than maintaining parallel evidence histories. Multi-record writes go through `EvidenceStore::transaction`, the store's single all-or-nothing mechanism (an undo journal that is nested and panic-safe), which every engine uses instead of copying the store; a refused engine operation therefore leaves the store exactly as it was, at a cost that does not grow with the store. A caller composing engines over one investigation moves the canonical store from one engine into the next with `into_evidence()` (zero copy) rather than cloning it; `crates/bleradar-core/tests/composition.rs` threads one store through the OSINT, infrastructure, website and fusion engines and validates the composed result.
+Raw observations are immutable through the public API: normalization returns a
+new record and cannot replace the captured value. Other engines should write to
+this store rather than maintaining parallel evidence histories. Multi-record
+writes go through `EvidenceStore::transaction`, the store's single
+all-or-nothing mechanism (an undo journal that is nested and panic-safe), which
+every engine uses instead of copying the store; a refused engine operation
+therefore leaves the store exactly as it was, at a cost that does not grow
+with the store. A caller composing engines over one investigation moves the
+canonical store from one engine into the next with `into_evidence()` (zero
+copy) rather than cloning it; `crates/bleradar-core/tests/composition.rs`
+threads one store through the OSINT, infrastructure, website and fusion
+engines and validates the composed result.
 
-`VerificationEngine` keeps required semantics separate from implementation and supports metamorphic relations for invariance, idempotence, commutativity, monotonicity, reversibility, round trips, partition recombination, normalization, and permutation. It compares observable outputs, state, side effects, errors, exit codes, ordering, concurrency, restart, recovery, and contractual performance; failing inputs are minimized and classified, while family yield, repairs, and regression locks remain explicit. Reports can be persisted back into the canonical store as provenance-linked metamorphic test records, and missing contractual measurements remain inconclusive rather than being treated as proof.
+`VerificationEngine` keeps required semantics separate from implementation and
+supports metamorphic relations for invariance, idempotence, commutativity,
+monotonicity, reversibility, round trips, partition recombination,
+normalization, and permutation. It compares observable outputs, state, side
+effects, errors, exit codes, ordering, concurrency, restart, recovery, and
+contractual performance; failing inputs are minimized and classified, while
+family yield, repairs, and regression locks remain explicit. Reports can be
+persisted back into the canonical store as provenance-linked metamorphic test
+records, and missing contractual measurements remain inconclusive rather than
+being treated as proof.
 
-`MetamorphicSoftwareAdvancementEngine` ranks proposed changes by expected net benefit × correctness confidence × reachability × reversibility, divided by implementation cost × regression risk. It accepts a candidate only after baseline/candidate verification, differential equivalence, measurable improvement, explained-regression review, falsification resistance, and reproducibility all pass; integration and ranking recomputation remain explicit.
+`MetamorphicSoftwareAdvancementEngine` ranks proposed changes by expected net
+benefit × correctness confidence × reachability × reversibility, divided by
+implementation cost × regression risk. It accepts a candidate only after
+baseline/candidate verification, differential equivalence, measurable
+improvement, explained-regression review, falsification resistance, and
+reproducibility all pass; integration and ranking recomputation remain explicit.
 
-`CalibratedEvidenceFusion` scores reliability, specificity, rarity, discriminative power, source independence, temporal compatibility, transformation resistance, provenance quality, and reproducibility on an explicit bounded calibration scale. It collapses dependent evidence groups and can falsify a leading hypothesis by removing high-base-rate or strongest support, checking contradictions, missing expected evidence, and uncertain assumptions; it does not claim Bayesian precision without defensible probabilities.
+`CalibratedEvidenceFusion` scores reliability, specificity, rarity,
+discriminative power, source independence, temporal compatibility,
+transformation resistance, provenance quality, and reproducibility on an
+explicit bounded calibration scale. It collapses dependent evidence groups and
+can falsify a leading hypothesis by removing high-base-rate or strongest
+support, checking contradictions, missing expected evidence, and uncertain
+assumptions; it does not claim Bayesian precision without defensible
+probabilities.
 
-`ExecutionFeedbackAdaptiveOsintSearchEngine` treats search as an executable frontier rather than a fixed list of expansions. It supports exact, normalized, alias, historical, semantic, structural, temporal, relational, technical, provenance, and graph-neighbor representations. Each execution records its query, observed feedback, classification, adaptive family statistics, generated or suppressed pivots, and complete control-loop phases; useful families receive more ranking pressure while repeated or unproductive families are penalized. Raw queries and source values remain separate from normalized forms, and source-backed findings plus retrieval actions are persisted transactionally in `EvidenceStore`.
+`ExecutionFeedbackAdaptiveOsintSearchEngine` treats search as an executable
+frontier rather than a fixed list of expansions. It supports exact, normalized,
+alias, historical, semantic, structural, temporal, relational, technical,
+provenance, and graph-neighbor representations. Each execution records its
+query, observed feedback, classification, adaptive family statistics, generated
+or suppressed pivots, and complete control-loop phases; useful families receive
+more ranking pressure while repeated or unproductive families are penalized.
+Raw queries and source values remain separate from normalized forms, and
+source-backed findings plus retrieval actions are persisted transactionally in
+`EvidenceStore`.
 
-`TemporalMetamorphicInfrastructureCorrelationEngine` treats infrastructure relationships as competing explanations rather than proof of common control. It preserves raw and normalized values, source metadata, dependency groups, and first/last-seen intervals for eleven infrastructure observation families. Correlation rankings down-weight common CDN, hosting, ASN, and HTTP signals, collapse copied/provider-dependent support, reward rare features, independent sources, and temporal continuity, and run adversarial passes before persisting a provenance-linked relationship edge.
+`TemporalMetamorphicInfrastructureCorrelationEngine` treats infrastructure
+relationships as competing explanations rather than proof of common control.
+It preserves raw and normalized values, source metadata, dependency groups, and
+first/last-seen intervals for eleven infrastructure observation families.
+Correlation rankings down-weight common CDN, hosting, ASN, and HTTP signals,
+collapse copied/provider-dependent support, reward rare features, independent
+sources, and temporal continuity, and run adversarial passes before persisting
+a provenance-linked relationship edge.
 
-`WebsiteLineageEcosystemAnalysisEngine` extracts normalized text, distinctive phrases, HTML structure, public assets, scripts, styles, identifiers, contacts, certificates, links, application characteristics, and archived states while retaining each raw capture and its source and temporal interval. It compares websites through competing coincidence, platform, template, reuse, development, and operational explanations; collapses provider-dependent support; and applies bounded calibration, temporal alignment, and support-removal falsification before persisting a canonical lineage edge. Website similarity can yield a possible common-operator assessment, but this engine never treats similarity alone as proof of common operation.
+`WebsiteLineageEcosystemAnalysisEngine` extracts normalized text, distinctive
+phrases, HTML structure, public assets, scripts, styles, identifiers, contacts,
+certificates, links, application characteristics, and archived states while
+retaining each raw capture and its source and temporal interval. It compares
+websites through competing coincidence, platform, template, reuse,
+development, and operational explanations; collapses provider-dependent
+support; and applies bounded calibration, temporal alignment, and
+support-removal falsification before persisting a canonical lineage edge.
+Website similarity can yield a possible common-operator assessment, but this
+engine never treats similarity alone as proof of common operation.
 
-`InvestigationPipeline` names and tracks the loop that ties every other engine together: discover → normalise → entity-resolve → trace source lineage → geolocate → generate pivots → score frontier → expand best candidates → corroborate/contradict → build temporal+geo graph → detect bridges/clusters → generate competing hypotheses → seek discriminating evidence → promote/demote claims → recompute frontier → stop on diminishing information gain. Fourteen of the sixteen stages are domain work already performed by `entity`, `evidence`, `coords`, `osint`, `fusion`, `infrastructure`, and `website`; this module adds only the two capabilities the loop names but nothing else implements: a `TemporalGeoGraph` that unifies caller-supplied edges with per-node temporal and geographic annotations and reports connected components and bridge edges (via an iterative, multigraph-safe Tarjan bridge search), and a `DiminishingGainStopCriterion` that halts the loop once a full sliding window of consecutive rounds all yield low marginal information gain — distinct from `osint`'s static per-pivot ranking factor and hard search-limit counts, neither of which measures actual round-over-round yield.
+`InvestigationPipeline` names and tracks the loop that ties every other engine
+together: discover → normalise → entity-resolve → trace source lineage →
+geolocate → generate pivots → score frontier → expand best candidates →
+corroborate/contradict → build temporal+geo graph → detect bridges/clusters →
+generate competing hypotheses → seek discriminating evidence → promote/demote
+claims → recompute frontier → stop on diminishing information gain. Fourteen of
+the sixteen stages are domain work already performed by `entity`, `evidence`,
+`coords`, `osint`, `fusion`, `infrastructure`, and `website`; this module adds
+only the two capabilities the loop names but nothing else implements: a
+`TemporalGeoGraph` that unifies caller-supplied edges with per-node temporal
+and geographic annotations and reports connected components and bridge edges
+(via an iterative, multigraph-safe Tarjan bridge search), and a
+`DiminishingGainStopCriterion` that halts the loop once a full sliding window
+of consecutive rounds all yield low marginal information gain — distinct from
+`osint`'s static per-pivot ranking factor and hard search-limit counts, neither
+of which measures actual round-over-round yield.
 
 ## Requirements
 
@@ -237,8 +312,8 @@ function-table slots against the JDK's `jni.h`, compiles that façade, then
 executes a real JVM → JNI → Rust smoke harness. It proves both the failure
 path (wrong library path yields `UnsatisfiedLinkError`) and the success path
 (library loads, ABI version matches, every declared native is resolved and
-invoked by the JVM through reflection with the count cross-checked against the
-Java source, and JNI calls — Java strings included — return the expected
+invoked by the JVM through reflection with the count cross-checked against
+the Java source, and JNI calls — Java strings included — return the expected
 values). CI runs it on every pull request and every push to `main`.
 
 ```sh
@@ -270,8 +345,8 @@ post-build verification that the generated APK contains the required manifest,
 DEX, and JNI library entries, that the built DEX defines the critical Android
 classes, and that the cross-compiled native library exports exactly the JNI
 entrypoints `NativeRadar.java` declares (the same export-contract rule as
-`gates`, applied to the `aarch64-linux-android` build). It also runs Android lint's
-`NewApi` check over the app sources, so a `java.*`/`android.*` call
+`gates`, applied to the `aarch64-linux-android` build). It also runs Android
+lint's `NewApi` check over the app sources, so a `java.*`/`android.*` call
 newer than the manifest's `minSdkVersion` (which `javac` and `d8` accept and
 which crashes older devices at run time) fails the build. It reads the built
 package's version back (`aapt2 dump badging` ↔ `APP_VERSION_CODE`/
@@ -279,7 +354,6 @@ package's version back (`aapt2 dump badging` ↔ `APP_VERSION_CODE`/
 requires the fresh build's entries (name, size, CRC-32) to equal the
 committed `HSE-BLE-Radar-arm64-v1.0.0.apk`'s, so a committed package that no
 longer matches the sources fails on every pull request; `build-apk` stores
-
 every entry at the ZIP epoch, so two builds on one signing key are
 byte-identical. Design decisions for the app itself are recorded in
 `docs/ANDROID_APP.md`.
@@ -343,7 +417,12 @@ reflecting it, the four documented refusals as `409`, a throwing control
 answered `500` with the server still up, a 64 KiB request body consumed, a
 body declared beyond the 64 KiB cap refused with `413` at once), then
 renders the committed dashboard from that server in headless Chromium, and
-then runs the real `ReleaseManifestSource` — the class that fetches the app's release manifest from the repository's latest release — against a scripted local server (a valid manifest, no release, a server fault, a redirect it cannot follow, an oversized body, a body the Rust core rejects, a stalled answer, a refused connection, a malformed URL), requiring each fetch's classification and its Rust disposition through the real library.
+then runs the real `ReleaseManifestSource` — the class that fetches the
+app's release manifest from the repository's latest release — against a
+scripted local server (a valid manifest, no release, a server fault, a
+redirect it cannot follow, an oversized body, a body the Rust core rejects,
+a stalled answer, a refused connection, a malformed URL), requiring each fetch's classification and its
+Rust disposition through the real library.
 It needs a JDK and a Chromium/Chrome binary; CI's `gates` job runs it after
 the live JNI proof.
 
@@ -386,21 +465,38 @@ connects to netsimd's HCI socket (`xtask/src/hci.rs`; the emulator's radios
 are simulated there), advertising as `bleradar-beacon` — listed by
 `/api/devices` with its Rust-computed row (RSSI, a finite distance) within
 30 s and pruned by the core's freshness policy within 75 s of its removal,
-`POST /api/scan/stop` keeping the foreground with "BLE Radar is idle",
-a restarted service with the scan resumed after `kill -9` of the app
+`POST /api/scan/stop` keeping the foreground with "BLE Radar is
+idle", a restarted service with the scan resumed after `kill -9` of the app
 process, the first launch's update check finished (its fetch of the
 repository's release manifest logged with its outcome — a `404` until a
 release is published —, its decision logged, no service record or
-notification left), the API unreachable after `am force-stop`, and — after a
-relaunch and a new scan — no scan and no foreground service surviving `pm
-revoke … BLUETOOTH_SCAN` (the report names the branch the platform took; on
-the first run the sticky restart found the permissions revoked and stopped the service), with no Java or native crash of the package and no leaked `ServiceConnection` in logcat. Then the app upgrades itself through its own pathway (decision #99): the committed package is replaced by `build-update-proof`'s build of the same version (one signing key with its successor), a `keytool` certificate for `github.com` is injected into the guest's system trust store (a tmpfs copy of the Conscrypt APEX's store, bind-mounted over it in every zygote's namespace), a generated JDK `HttpsServer` on that certificate serves the release URL's redirect, the successor's manifest and its APK behind an xtask CONNECT proxy set as the guest's global proxy, and a relaunch must fetch the production URL (`HTTP 200 -> using the remote manifest`), decide 1, download, verify and hand the successor to the installer, whose `Update` the proof taps; the successor's versionCode must be installed and its API up with the native core, and the stand-in's log must show the redirect, the manifest and the artifact in order (on the first end-to-end run: handed to the installer 5.8 s after the launch, installed 2.5 s after the tap). The AVD is deleted on every exit. It needs
+notification left), the API unreachable after
+`am force-stop`, and — after a relaunch and a new scan — no scan and no
+foreground service surviving `pm revoke … BLUETOOTH_SCAN` (the report names
+the branch the platform took; on the first run the sticky restart found the
+permissions revoked and stopped the service), with no Java or native crash
+of the package and no leaked `ServiceConnection` in logcat. Then the app
+upgrades itself through its own pathway (decision #99): the committed
+package is replaced by `build-update-proof`'s build of the same version
+(one signing key with its successor), a `keytool` certificate for
+`github.com` is injected into the guest's system trust store (a tmpfs copy
+of the Conscrypt APEX's store, bind-mounted over it in every zygote's
+namespace), a generated JDK `HttpsServer` on that certificate serves the
+release URL's redirect, the successor's manifest and its APK behind an xtask
+CONNECT proxy set as the guest's global proxy, and a relaunch must fetch the
+production URL (`HTTP 200 -> using the remote manifest`), decide 1, download,
+verify and hand the successor to the installer, whose `Update` the proof
+taps; the successor's versionCode must be installed and its API up with the
+native core, and the stand-in's log must show the redirect, the manifest and
+the artifact in order (on the first end-to-end run: handed to the installer
+5.8 s after the launch, installed 2.5 s after the tap). The AVD is
+deleted on every exit. It needs
 `/dev/kvm`, the SDK's `emulator`, `platform-tools` and the pinned image
 (`cargo xtask android-sdk-install --emulator` installs them: licenses
 accepted, `sdkmanager` retried, every package and the tools checked)
-and a JDK; CI's `android-emulator` job runs it on every pull request and every
-push to `main` (2 min 33 s on the first green run; 4 min 00 s with the
-virtual advertiser, decision #95).
+and a JDK; CI's `android-emulator` job runs it on every pull request and
+every push to `main` (2 min 33 s on the first green run; 4 min 00 s with
+the virtual advertiser, decision #95).
 
 ## Parity report
 
@@ -467,13 +563,20 @@ cargo xtask build-apk                      # HSE-BLE-Radar-arm64-v<version name>
 git rm HSE-BLE-Radar-arm64-v<previous>.apk # one artifact is committed: check-app-version refuses a stale one
 cargo xtask check-app-version              # the bundled manifest, the artifact's name, no stale artifact (also a `gates` step)
 cargo xtask verify-android-live            # the built version read back; the package's entries reproduced by a second build
- git add HSE-BLE-Radar-arm64-v<version name>.apk
+git add HSE-BLE-Radar-arm64-v<version name>.apk
 git tag v<version name>                    # the tag `release-manifest`'s default URL assumes
 cargo xtask release-manifest --out release_manifest.txt   # the APK's exact size and SHA-256
 # 2. create the GitHub release for the tag with both files attached, unmodified
 ```
 
-`release-manifest` refuses a non-`https` URL, and `verify-api-live` serves the manifest it generates to the real core as the accepted-manifest scenario, so the text a release publishes is proven parseable before it is published; `verify-android-emulator` runs the whole pathway past it — the fetch of the production URL, the download, the core's verification, the installer, the install — against a stand-in `github.com` on every pull request (`build-update-proof`, decision #99), so a real release's only untested link is GitHub itself.
+`release-manifest` refuses a non-`https` URL, and `verify-api-live` serves
+the manifest it generates to the real core as the accepted-manifest scenario,
+so the text a release publishes is proven parseable before it is published;
+`verify-android-emulator` runs the whole pathway past it — the fetch of the
+production URL, the download, the core's verification, the installer, the
+install — against a stand-in `github.com` on every pull request
+(`build-update-proof`, decision #99), so a real release's only untested
+link is GitHub itself.
 
 ## Distribution packaging
 
