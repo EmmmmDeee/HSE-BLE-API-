@@ -60,12 +60,22 @@ Code that works in principle but was never executed is incomplete. Features that
 - `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, executed-oracle differential verification under `qemu-aarch64` (`oracle-differential`, see `docs/ORACLE_DIFFERENTIAL.md`), and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
 - `android/app/src/main` — the hand-built Android radar app that consumes `bleradar-core` through `crates/bleradar-jni`; its design record is `docs/ANDROID_APP.md`.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
-- `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, and verification records.
+- `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, and verification records. Host toolchain / PATH setup: `docs/DEVELOPMENT.md`.
 - `benchmarks/` — benchmark harness notes.
 - `RUST_CONVERSION.md` — Rust-first migration boundary and consolidation prerequisites.
 - `.github/workflows/gates.yml` — CI enforcement of every gate below.
 - `BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk` — original APK oracle.
 - `BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip` — original migration archive; also retains the extracted native oracles (`oracle/libbleradar_core.so`, `oracle/classes.dex`) and the migration `git-history.bundle` for differential testing.
+
+## Developer setup
+
+You need **rustup** and **Rust 1.98**. Put `~/.cargo/bin` ahead of `/usr/bin` on `PATH` so the pin in `rust-toolchain.toml` wins over a system `rustc` (1.85 and friends fail the MSRV check with exit 101). Full steps: [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+rustc --version          # must show 1.98.x
+cargo check --workspace
+```
 
 ## Verified runtime status
 
@@ -220,7 +230,7 @@ of which measures actual round-over-round yield.
 
 ## Requirements
 
-- Rust toolchain **1.98.0** with `clippy` and `rustfmt` — pinned by `rust-toolchain.toml`; `rustup` installs it automatically on first `cargo` invocation in the repo.
+- Rust toolchain **1.98.0** with `clippy` and `rustfmt` — pinned by `rust-toolchain.toml`; `rustup` installs it automatically on first `cargo` invocation in the repo. Put `~/.cargo/bin` first on `PATH` (a system `/usr/bin/rustc` below 1.98 fails MSRV with exit 101). See `docs/DEVELOPMENT.md`.
 - No third-party crates in the shipped workspace: it is intentionally dependency-free, and CI fails if that changes without a recorded decision. `xtask/` (developer tooling) and the vendored advisory database are outside that scope; see `xtask/Cargo.toml`.
 - `cargo-audit` and `cargo-deny` on `PATH` to run those two specific gates, at the versions CI pins (`cargo install --locked cargo-audit@0.22.2 cargo-deny@0.20.2`; bump them together with `.github/workflows/gates.yml`); every other gate, including `cargo xtask gates` itself, needs nothing beyond the pinned toolchain. The JNI export-contract gate inside `gates` reads the host-built `libbleradar_jni.so` with the in-tree ELF64 reader, so `gates` is proven on Linux hosts (what CI runs).
 - A JDK (`javac`/`java`) only for `cargo xtask verify-jni-live`, `verify-api-live` and `verify-android-emulator` (whose `avdmanager` runs on it), an Android SDK/NDK only for `cargo xtask build-apk`/`verify-android-live`, and the SDK's emulator, platform-tools and pinned system image plus KVM only for `verify-android-emulator` (see `docs/ANDROID_APP.md`).
@@ -230,8 +240,13 @@ of which measures actual round-over-round yield.
 ```sh
 # from a git clone or an extracted distribution archive
 cd HSE-BLE-API-
+export PATH="$HOME/.cargo/bin:$PATH"   # rustup before any system rustc
+rustc --version                       # must show 1.98.x
 cargo build --workspace --locked
 ```
+
+If `rustc --version` is below 1.98, fix PATH / install rustup before building.
+Details: [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 ## Usage example
 
