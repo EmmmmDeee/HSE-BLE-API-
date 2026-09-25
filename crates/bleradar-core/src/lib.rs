@@ -27,6 +27,8 @@ pub mod adv;
 pub mod coords;
 /// Huntsman Search Engine (HSE) entity model.
 pub mod entity;
+/// Machine-readable capability registry and the supersession matrix it renders.
+pub mod registry;
 /// Huntsman Search Engine (HSE) canonical entity tag vocabulary.
 pub mod tags;
 /// Robust, deterministic automatic-update engine (version/integrity/lifecycle).
