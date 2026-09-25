@@ -28,10 +28,21 @@ pub const ANDROID_UNAVAILABLE: i64 = i32::MAX as i64;
 /// Android reports when the caller lacks permission to see the real one.
 const PLACEHOLDER_MACS: [&str; 2] = ["00:00:00:00:00:00", "02:00:00:00:00:00"];
 
-/// Whether `mac` names a real device: non-empty and not a placeholder.
+/// Whether `mac` names a real device: a canonicalisable address that is not a
+/// placeholder sentinel. Canonicalising first means the two sentinels are
+/// rejected regardless of separator formatting (`00-00-…` as well as `00:00:…`),
+/// and a string that is not a MAC at all is not a device.
 #[must_use]
 pub fn is_real_device_address(mac: &str) -> bool {
-    !mac.is_empty() && !PLACEHOLDER_MACS.contains(&mac)
+    canonical_device_mac(mac).is_some()
+}
+
+/// The canonical (lowercase, colon-separated) form of a real device MAC, or
+/// `None` when `mac` is not a canonicalisable address or is a placeholder
+/// sentinel. The single gate both [`is_real_device_address`] and
+/// [`sighting_key`] apply, so a placeholder can never slip through one spelling.
+fn canonical_device_mac(mac: &str) -> Option<String> {
+    canonical_mac(mac).filter(|c| !PLACEHOLDER_MACS.contains(&c.as_str()))
 }
 
 /// How a MAC-addressed radio entity may be tracked.
@@ -62,7 +73,8 @@ pub fn address_trackability(mac: &str) -> AddressTrackability {
 /// so it is corrupt input and degrades to the worst tier — never the best.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RssiReliability {
-    /// dBm ≥ -50, or corrupt (positive) input at the low end — see variants.
+    /// dBm ≥ -50 — the strongest, most reliable tier. A corrupt (positive)
+    /// reading never reaches this tier; it falls to [`Self::LowMedium`].
     VeryHighPlus,
     /// -71 ≤ dBm < -50.
     VeryHigh,
@@ -172,19 +184,14 @@ pub fn is_numeric_segment(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The canonicalised device MAC for a sighting, or `None` when it is not a
-/// canonicalisable address — the form used as the sighting's stable key.
+/// The canonical (lowercase, colon-separated) device MAC for a sighting — the
+/// stable key it is tracked under — or `None` when `mac` is not a
+/// canonicalisable address or is a placeholder sentinel. A non-MAC string never
+/// becomes a key: an unstable, verbatim key would let the same device split
+/// across formatting differences.
 #[must_use]
 pub fn sighting_key(mac: &str) -> Option<String> {
-    if is_real_device_address(mac) {
-        canonical_or_verbatim(mac)
-    } else {
-        None
-    }
-}
-
-fn canonical_or_verbatim(mac: &str) -> Option<String> {
-    canonical_mac(mac).or_else(|| Some(mac.to_string()))
+    canonical_device_mac(mac)
 }
 
 #[cfg(test)]
@@ -196,6 +203,11 @@ mod tests {
         assert!(!is_real_device_address(""));
         assert!(!is_real_device_address("00:00:00:00:00:00"));
         assert!(!is_real_device_address("02:00:00:00:00:00"));
+        // Placeholders are rejected regardless of separator formatting.
+        assert!(!is_real_device_address("00-00-00-00-00-00"));
+        assert!(!is_real_device_address("02-00-00-00-00-00"));
+        // A string that is not a MAC at all is not a real device address.
+        assert!(!is_real_device_address("not-a-mac"));
         assert!(is_real_device_address("a4:c1:38:00:11:22"));
     }
 
@@ -287,5 +299,8 @@ mod tests {
             Some("a4:c1:38:00:11:22")
         );
         assert!(sighting_key("00:00:00:00:00:00").is_none());
+        assert!(sighting_key("00-00-00-00-00-00").is_none());
+        // A non-canonicalisable string never becomes an (unstable) key.
+        assert!(sighting_key("not-a-mac").is_none());
     }
 }
