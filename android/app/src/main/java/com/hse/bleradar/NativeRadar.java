@@ -116,7 +116,7 @@ public final class NativeRadar {
     public static final int TRACKABILITY_UNKNOWN = 2;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 13;
+    public static final int EXPECTED_ABI_VERSION = 14;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -522,4 +522,16 @@ public final class NativeRadar {
      * beacon shape is never force-fit. Decoded by {@code bleradar_core::adv}.
      */
     public static native String advertisementBeacon(String advertisementHex);
+
+    /**
+     * The stable key to group observations of one physical device under, across
+     * BLE address rotation, from its MAC and hex advertising payload
+     * ({@code ScanRecord.getBytes()}), or {@code null} when it cannot be grouped.
+     * A public (stable) address keys by itself; a randomized (rotating) address
+     * keys by the advertisement's distinctive shape, so a device's successive
+     * random addresses share one key. Two devices with the same non-null key are
+     * the same device (public) or at least possibly the same (randomized).
+     * Owned by {@code bleradar_core::group_key}.
+     */
+    public static native String deviceGroupKey(String mac, String advertisementHex);
 }

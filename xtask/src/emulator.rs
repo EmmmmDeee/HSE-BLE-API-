@@ -99,6 +99,10 @@ const BEACON_COMPANY_ID: u16 = 0xFFFF;
 const BEACON_MANUFACTURER_PAYLOAD: &[u8] = &[0xBE, 0xAC];
 /// `BEACON_COMPANY_ID` as the API renders it (four lowercase hex digits).
 const BEACON_COMPANY_ID_JSON: &str = "\"company_id\":\"ffff\"";
+/// The beacon's cross-rotation identity key as the API renders it. Its address
+/// `C0:...` has the U/L bit clear, so the Rust `group_key` keys it by its
+/// canonical (lowercase) address rather than by advertisement shape.
+const BEACON_IDENTITY_JSON: &str = "\"identity_key\":\"c0:de:be:ac:0d:01\"";
 /// How long the scan may take to list the beacon after it started.
 const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the row may outlive the beacon: the Standard tracking profile
@@ -1221,6 +1225,13 @@ fn exercise(
         if !row.contains(BEACON_COMPANY_ID_JSON) || !row.contains("\"beacon\":null") {
             return Err(format!(
                 "the beacon's row does not carry the decoded advertisement ({BEACON_COMPANY_ID_JSON}, \"beacon\":null) — the Rust advertisement decoder never reached it: {row}"
+            ));
+        }
+        // The Rust identity engine ran on the runtime: a public address is
+        // grouped by itself.
+        if !row.contains(BEACON_IDENTITY_JSON) {
+            return Err(format!(
+                "the beacon's row does not carry its identity key ({BEACON_IDENTITY_JSON}) — the Rust group_key never reached it: {row}"
             ));
         }
         report.push(format!(

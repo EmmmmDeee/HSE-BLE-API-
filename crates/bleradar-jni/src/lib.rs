@@ -150,6 +150,20 @@ pub fn advertisement_beacon(advertisement_hex: &str) -> Option<String> {
 }
 
 /// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_deviceGroupKey`]: the stable key to group
+/// observations of one physical device under across address rotation, from its
+/// MAC and hex-encoded advertising payload, or `None` when it cannot be grouped
+/// (a public address keys by itself; a randomized address keys by the
+/// advertisement's correlation id, or `None` when the evidence is too sparse).
+/// Owned by [`bleradar_core::group_key`], fed by [`bleradar_core::adv`].
+#[must_use]
+pub fn device_group_key(mac: &str, advertisement_hex: &str) -> Option<String> {
+    let report = bleradar_core::adv::decode_hex(advertisement_hex);
+    let evidence = bleradar_core::IdentityEvidence::from_advertisement(&report, None);
+    bleradar_core::group_key(mac, &evidence)
+}
+
+/// Pure, unit-testable core of
 /// [`Java_com_hse_bleradar_NativeRadar_signalTrend`].
 ///
 /// Encodes [`SignalTrend`] as a small ordinal (`0` = [`SignalTrend::Stronger`],
@@ -1382,6 +1396,26 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementBeacon(
     string_export(env, advertisement_hex, advertisement_beacon)
 }
 
+/// `NativeRadar.deviceGroupKey(String, String): String` — see
+/// [`device_group_key`]. Reads `env` only through [`env`](mod@env); a null or
+/// malformed MAC, or a device that cannot be grouped, answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    mac: JStringRef,
+    advertisement_hex: JStringRef,
+) -> JStringRef {
+    let Some(mac) = read_text(env, mac) else {
+        return core::ptr::null_mut();
+    };
+    let advertisement_hex = read_text(env, advertisement_hex).unwrap_or_default();
+    match device_group_key(&mac, &advertisement_hex) {
+        Some(key) => make_text(env, &key),
+        None => core::ptr::null_mut(),
+    }
+}
+
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side
 /// calls once at startup to confirm the loaded `.so` matches the ABI this
 /// file documents, independent of the app's own version number.
@@ -1397,11 +1431,12 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementBeacon(
 /// to `12` when the BLE address trackability classification
 /// (`deviceAddressTrackability`) was added, and to `13` when the BLE
 /// advertisement decoder surface (`advertisementCompanyId`,
-/// `advertisementBeacon`) was added.
+/// `advertisementBeacon`) was added, and to `14` when the rotating-address
+/// identity grouping (`deviceGroupKey`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    13
+    14
 }

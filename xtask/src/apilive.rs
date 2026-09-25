@@ -238,7 +238,8 @@ public final class ApiSmoke {
         if (advertisementHex != null) {
             blip.advertisement = new Blip.AdvSummary(
                     NativeRadar.advertisementCompanyId(advertisementHex),
-                    NativeRadar.advertisementBeacon(advertisementHex));
+                    NativeRadar.advertisementBeacon(advertisementHex),
+                    NativeRadar.deviceGroupKey(address, advertisementHex));
         }
         blip.trend = trend;
         blip.freshness = freshness;

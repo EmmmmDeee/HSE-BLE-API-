@@ -1065,3 +1065,45 @@ fn the_emulator_beacon_decodes_to_what_the_runtime_proof_requires() {
     let padded = format!("{EMULATOR_BEACON_HEX}{}", "00".repeat(62 - 26));
     assert_eq!(bleradar_core::adv::decode_hex(&padded), report);
 }
+
+#[test]
+fn device_group_key_correlates_rotating_addresses_and_keys_public_by_address() {
+    use bleradar_jni::device_group_key;
+    // A randomized (U/L-set) address keys by the advertisement's correlation id,
+    // so two rotating addresses of one device share a key (iBeacon payload +
+    // name here make the evidence distinctive).
+    let a = device_group_key("42:11:22:33:44:55", IBEACON_HEX);
+    let b = device_group_key("7e:aa:bb:cc:dd:ee", IBEACON_HEX);
+    assert!(a.is_some());
+    assert_eq!(a, b);
+    assert_ne!(a.as_deref(), Some("42:11:22:33:44:55"));
+    // A public (U/L-clear) address keys by itself.
+    assert_eq!(
+        device_group_key("a4:c1:38:00:00:01", IBEACON_HEX).as_deref(),
+        Some("a4:c1:38:00:00:01")
+    );
+    // A randomized address with no distinctive evidence has no key.
+    assert_eq!(device_group_key("42:11:22:33:44:55", "020106"), None);
+    // Malformed inputs answer None.
+    assert_eq!(device_group_key("not-a-mac", IBEACON_HEX), None);
+}
+
+#[test]
+fn device_group_key_export_answers_through_the_string_bridge() {
+    use bleradar_jni::Java_com_hse_bleradar_NativeRadar_deviceGroupKey;
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let mac = mock.string("a4:c1:38:00:00:01");
+    let hex = mock.string(IBEACON_HEX);
+    assert_eq!(
+        mock.read(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
+            env, null, mac, hex
+        ))
+        .as_deref(),
+        Some("a4:c1:38:00:00:01")
+    );
+    // Null MAC and null env both answer null.
+    assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(env, null, null, hex).is_null());
+    assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(null, null, mac, hex).is_null());
+}

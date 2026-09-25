@@ -249,7 +249,8 @@ final class BleScanEngine implements SnapshotSource {
             if (!advertisementHex.equals(blip.lastAdvertisementHex)) {
                 blip.advertisement = new Blip.AdvSummary(
                         NativeRadar.advertisementCompanyId(advertisementHex),
-                        NativeRadar.advertisementBeacon(advertisementHex));
+                        NativeRadar.advertisementBeacon(advertisementHex),
+                        NativeRadar.deviceGroupKey(address, advertisementHex));
                 blip.lastAdvertisementHex = advertisementHex;
             }
         }

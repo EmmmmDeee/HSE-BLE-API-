@@ -52,16 +52,23 @@ final class Blip {
      */
     volatile String lastAdvertisementHex;
 
-    /** The two advertisement summaries the Rust decoder produces, published together. */
+    /** The advertisement-derived summaries the Rust core produces, published together. */
     static final class AdvSummary {
         /** First manufacturer company identifier (four lowercase hex digits), or {@code null}. */
         final String companyId;
         /** Recognised beacon kind (e.g. {@code "iBeacon"}), or {@code null}. */
         final String beacon;
+        /**
+         * Stable cross-rotation grouping key, or {@code null} when the device
+         * cannot be grouped — the Rust {@code group_key}. Two blips with the same
+         * non-null key are the same physical device across address rotation.
+         */
+        final String identityKey;
 
-        AdvSummary(String companyId, String beacon) {
+        AdvSummary(String companyId, String beacon, String identityKey) {
             this.companyId = companyId;
             this.beacon = beacon;
+            this.identityKey = identityKey;
         }
     }
     volatile long lastSeenUptimeMillis;

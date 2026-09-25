@@ -53,7 +53,9 @@ import java.util.logging.Logger;
  *       advertisement's first manufacturer company identifier as four hex
  *       digits, {@code null} when absent), {@code beacon}
  *       ({@code iBeacon|Eddystone-UID|Eddystone-URL|Eddystone-TLM}, {@code null}
- *       when not a beacon), {@code trend}
+ *       when not a beacon), {@code identity_key} (the stable cross-rotation
+ *       grouping key, {@code null} when the device cannot be grouped),
+ *       {@code trend}
  *       ({@code STRONGER|WEAKER|STABLE|UNKNOWN}), {@code freshness}
  *       ({@code LIVE|RECENT|STALE|UNKNOWN}), {@code confidence_percent},
  *       {@code last_seen_ago_ms}; plus the top-level {@code scanning},
@@ -369,6 +371,7 @@ public final class ApiHttpServer {
             Blip.AdvSummary advertisement = device.advertisement;
             json.name("company_id").value(advertisement == null ? null : advertisement.companyId);
             json.name("beacon").value(advertisement == null ? null : advertisement.beacon);
+            json.name("identity_key").value(advertisement == null ? null : advertisement.identityKey);
             json.name("trend").value(trendLabel(device.trend));
             json.name("freshness").value(freshnessLabel(device.freshness));
             json.name("confidence_percent").value(device.confidencePercent);

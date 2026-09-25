@@ -1,4 +1,27 @@
-//! Device-address normalization and conservative identity evidence.
+//! Device-address normalization, conservative identity evidence, and
+//! rotating-address correlation.
+//!
+//! BLE devices rotate their advertising address (a Resolvable Private Address)
+//! on the order of every fifteen minutes, so a single physical device is seen
+//! under many addresses over time and a target keyed on its MAC is lost the
+//! moment it rotates. The stable identity lives not in the address but in the
+//! advertisement's *shape* — its manufacturer identifier and payload structure,
+//! its service UUIDs and service-data, its name and TX power — which
+//! [`crate::adv`] decodes. This module derives that evidence from a decoded
+//! advertisement ([`IdentityEvidence::from_advertisement`]) and resolves whether
+//! two observations are the same device ([`resolve`]).
+//!
+//! The resolution is deliberately conservative, per the project's
+//! identifier-is-not-a-device rule:
+//! - the same **public** (globally administered) address is a hardware match;
+//! - two **different public** addresses are different devices;
+//! - a **randomized** address is never evidence of sameness on its own — a match
+//!   there rests entirely on distinctive advertisement evidence and is reported
+//!   as `PossiblySame` (an inference), never `LikelySame`;
+//! - contradictory evidence (a different manufacturer, name, or service set)
+//!   downgrades to `LikelyDifferent`;
+//! - sparse or empty evidence yields `InsufficientEvidence` — the resolver never
+//!   forces a winner when the evidence cannot support one.
 
 /// Canonicalizes a MAC address to lower-case colon-separated form.
 ///
@@ -88,5 +111,519 @@ impl DeviceIdentity {
             address_kind,
             evidence,
         })
+    }
+}
+
+impl IdentityEvidence {
+    /// Derives re-identification evidence from a decoded advertisement and the
+    /// device name the platform reported (which is not always in the payload).
+    ///
+    /// The `payload_fingerprint` is a canonical, human-readable descriptor of
+    /// the advertisement's *stable shape* — the manufacturer identifier and the
+    /// length and leading bytes of its payload, and the service-data UUIDs —
+    /// chosen so it survives address rotation but changes when the advertised
+    /// content changes. It is `None` when the advertisement carries no such
+    /// structural evidence, so a shapeless advertisement is never given a
+    /// fingerprint it does not have.
+    #[must_use]
+    pub fn from_advertisement(report: &crate::adv::AdvReport, name: Option<&str>) -> Self {
+        let name = name
+            .or(report.complete_local_name.as_deref())
+            .or(report.shortened_local_name.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let manufacturer_id = report.manufacturer_data.first().map(|m| m.company_id);
+
+        let mut services: Vec<String> = report
+            .service_uuids
+            .iter()
+            .map(|u| u.to_canonical())
+            .collect();
+        services.sort_unstable();
+        services.dedup();
+
+        let payload_fingerprint = advertisement_shape(report);
+
+        Self {
+            name,
+            manufacturer_id,
+            services,
+            payload_fingerprint,
+        }
+    }
+
+    /// A stable grouping key for correlating this device across address rotation,
+    /// or `None` when the evidence is not distinctive enough to correlate (so a
+    /// featureless advertisement is never grouped with another). Two observations
+    /// with the same non-`None` correlation id carry the same distinctive
+    /// evidence and are, at least, [`MatchVerdict::PossiblySame`].
+    #[must_use]
+    pub fn correlation_id(&self) -> Option<String> {
+        if self.distinctiveness() != Distinctiveness::Strong {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if let Some(shape) = &self.payload_fingerprint {
+            parts.push(format!("p[{shape}]"));
+        }
+        if !self.services.is_empty() {
+            parts.push(format!("s[{}]", self.services.join(",")));
+        }
+        if let Some(name) = &self.name {
+            parts.push(format!("n[{name}]"));
+        }
+        Some(parts.join("|"))
+    }
+
+    /// How much distinctive identifying information this evidence carries. A
+    /// device cannot be re-identified across a rotating address from nothing, so
+    /// the resolver treats evidence below the [`Distinctiveness::None`] bar as
+    /// unusable rather than matching two featureless advertisements.
+    #[must_use]
+    pub fn distinctiveness(&self) -> Distinctiveness {
+        let mut score = 0u32;
+        if self.payload_fingerprint.is_some() {
+            score += 2;
+        }
+        if !self.services.is_empty() {
+            score += 2;
+        }
+        if self.manufacturer_id.is_some() {
+            score += 1;
+        }
+        // A name is weak evidence on its own (many devices share "", or a
+        // generic model name), so it adds only a little.
+        if self.name.is_some() {
+            score += 1;
+        }
+        match score {
+            0 => Distinctiveness::None,
+            1..=2 => Distinctiveness::Weak,
+            _ => Distinctiveness::Strong,
+        }
+    }
+}
+
+/// A canonical descriptor of an advertisement's stable, rotation-invariant
+/// shape, or `None` when it carries no structural evidence (no manufacturer
+/// data and no service data). Two advertisements from one physical device keep
+/// the same descriptor across an address rotation; a different device's differs.
+fn advertisement_shape(report: &crate::adv::AdvReport) -> Option<String> {
+    use core::fmt::Write as _;
+    let mut parts: Vec<String> = Vec::new();
+    for m in &report.manufacturer_data {
+        // The company id and the payload's length and leading bytes: stable per
+        // device, but not the whole payload (which may carry a rotating counter,
+        // e.g. an iBeacon's or Eddystone's changing fields).
+        let prefix_len = m.data.len().min(4);
+        let mut s = String::new();
+        let _ = write!(s, "m:{:04x}/{}/", m.company_id, m.data.len());
+        for b in &m.data[..prefix_len] {
+            let _ = write!(s, "{b:02x}");
+        }
+        parts.push(s);
+    }
+    for sd in &report.service_data {
+        parts.push(format!("s:{}/{}", sd.uuid.to_canonical(), sd.data.len()));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort_unstable();
+    Some(parts.join(";"))
+}
+
+/// A coarse measure of how much identifying evidence an advertisement carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Distinctiveness {
+    /// Nothing to identify the device by beyond its (rotating) address.
+    None,
+    /// Some evidence, but not enough to assert a cross-rotation match alone.
+    Weak,
+    /// Distinctive structural evidence usable for cross-rotation correlation.
+    Strong,
+}
+
+/// The resolver's verdict on whether two observations are the same device, with
+/// the four states a conservative correlation must distinguish. Ordered from
+/// most-different to most-same only for display; the reasons carry the meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchVerdict {
+    /// The evidence cannot support any conclusion (too sparse, or a randomized
+    /// address with only weak evidence).
+    InsufficientEvidence,
+    /// The evidence points to different devices (a hardware-address mismatch, or
+    /// contradictory advertisement content).
+    LikelyDifferent,
+    /// The addresses differ or one rotates, but distinctive advertisement
+    /// evidence matches: an *inference* that these may be one device, never a
+    /// certainty.
+    PossiblySame,
+    /// A hardware-identity match: the same globally administered address.
+    LikelySame,
+}
+
+impl MatchVerdict {
+    /// A stable lowercase label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::InsufficientEvidence => "insufficient-evidence",
+            Self::LikelyDifferent => "likely-different",
+            Self::PossiblySame => "possibly-same",
+            Self::LikelySame => "likely-same",
+        }
+    }
+}
+
+/// The resolver's full answer: the verdict plus the human-readable reasons that
+/// support and contradict it, so a conclusion is always traceable to evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityMatch {
+    /// The verdict.
+    pub verdict: MatchVerdict,
+    /// Reasons supporting a match.
+    pub supporting: Vec<String>,
+    /// Reasons contradicting a match.
+    pub contradictions: Vec<String>,
+}
+
+/// Decides whether two observations are the same physical device, from their
+/// addresses and advertisement evidence — the rotating-address correlation.
+///
+/// Never asserts sameness from a randomized address alone: a match across a
+/// randomized address rests entirely on distinctive evidence and is reported as
+/// [`MatchVerdict::PossiblySame`]. Contradictions always downgrade. Sparse
+/// evidence yields [`MatchVerdict::InsufficientEvidence`] rather than a guess.
+#[must_use]
+pub fn resolve(a: &DeviceIdentity, b: &DeviceIdentity) -> IdentityMatch {
+    let mut supporting = Vec::new();
+    let mut contradictions = Vec::new();
+
+    // Contradictions in distinctive fields are decisive regardless of address.
+    if let (Some(x), Some(y)) = (a.evidence.manufacturer_id, b.evidence.manufacturer_id) {
+        if x == y {
+            supporting.push(format!("same manufacturer 0x{x:04x}"));
+        } else {
+            contradictions.push(format!("manufacturer 0x{x:04x} vs 0x{y:04x}"));
+        }
+    }
+    if let (Some(x), Some(y)) = (&a.evidence.name, &b.evidence.name) {
+        if x == y {
+            supporting.push(format!("same name {x:?}"));
+        } else {
+            contradictions.push(format!("name {x:?} vs {y:?}"));
+        }
+    }
+    match (
+        a.evidence.payload_fingerprint.as_ref(),
+        b.evidence.payload_fingerprint.as_ref(),
+    ) {
+        (Some(x), Some(y)) if x == y => supporting.push("same advertisement shape".to_string()),
+        (Some(_), Some(_)) => contradictions.push("advertisement shape differs".to_string()),
+        _ => {}
+    }
+    if !a.evidence.services.is_empty() || !b.evidence.services.is_empty() {
+        if a.evidence.services == b.evidence.services {
+            supporting.push("same service set".to_string());
+        } else {
+            contradictions.push("service set differs".to_string());
+        }
+    }
+
+    // A contradiction in any distinctive field means different devices.
+    if !contradictions.is_empty() {
+        return IdentityMatch {
+            verdict: MatchVerdict::LikelyDifferent,
+            supporting,
+            contradictions,
+        };
+    }
+
+    // Same globally administered address: a hardware-identity match.
+    if a.address == b.address && a.address_kind == AddressKind::Public {
+        supporting.insert(0, format!("same public address {}", a.address));
+        return IdentityMatch {
+            verdict: MatchVerdict::LikelySame,
+            supporting,
+            contradictions,
+        };
+    }
+    // Two different public addresses are different hardware.
+    if a.address != b.address
+        && a.address_kind == AddressKind::Public
+        && b.address_kind == AddressKind::Public
+    {
+        return IdentityMatch {
+            verdict: MatchVerdict::LikelyDifferent,
+            supporting,
+            contradictions: vec![format!(
+                "different public addresses {} vs {}",
+                a.address, b.address
+            )],
+        };
+    }
+
+    // A randomized address is involved (or the same randomized address, which is
+    // still not proof — an RPA can be reused briefly, but two devices can also
+    // momentarily collide): the verdict rests on the evidence's distinctiveness.
+    let strength = a
+        .evidence
+        .distinctiveness()
+        .min(b.evidence.distinctiveness());
+    let verdict = if strength == Distinctiveness::Strong && !supporting.is_empty() {
+        MatchVerdict::PossiblySame
+    } else {
+        MatchVerdict::InsufficientEvidence
+    };
+    IdentityMatch {
+        verdict,
+        supporting,
+        contradictions,
+    }
+}
+
+/// The stable key to group observations of one physical device under, across
+/// address rotation — the live entry point the Android layer calls per scan
+/// result.
+///
+/// - A **public** (globally administered by the U/L bit) address is stable
+///   hardware identity, so the key is the address itself.
+/// - A **randomized** address rotates, so the key is the advertisement's
+///   [`IdentityEvidence::correlation_id`] — or `None` when the evidence is not
+///   distinctive enough to correlate, in which case the device stands alone
+///   rather than being grouped on nothing.
+///
+/// Two observations sharing a non-`None` group key are the same device (a public
+/// address) or at least [`MatchVerdict::PossiblySame`] (a correlated randomized
+/// address). The public/randomized split uses the 802 U/L bit, an approximation
+/// of BLE address types (a static-random or U/L-clear resolvable address can be
+/// misclassified); it is the same signal the trackability classification uses,
+/// so the two never disagree.
+#[must_use]
+pub fn group_key(address: &str, evidence: &IdentityEvidence) -> Option<String> {
+    let canonical = canonical_mac(address)?;
+    if locally_administered_bit(&canonical)? {
+        evidence.correlation_id()
+    } else {
+        Some(canonical)
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use crate::adv;
+
+    /// Build an advertisement payload: flags, optional manufacturer data, optional
+    /// complete local name, and optional 16-bit service UUIDs.
+    fn advert(mfr: Option<(u16, &[u8])>, name: Option<&str>, services16: &[u16]) -> Vec<u8> {
+        let mut v = vec![0x02, 0x01, 0x06];
+        if let Some((company, data)) = mfr {
+            let mut p = company.to_le_bytes().to_vec();
+            p.extend_from_slice(data);
+            v.push(u8::try_from(p.len() + 1).unwrap());
+            v.push(0xFF);
+            v.extend_from_slice(&p);
+        }
+        if let Some(name) = name {
+            v.push(u8::try_from(name.len() + 1).unwrap());
+            v.push(0x09);
+            v.extend_from_slice(name.as_bytes());
+        }
+        if !services16.is_empty() {
+            v.push(u8::try_from(services16.len() * 2 + 1).unwrap());
+            v.push(0x03);
+            for s in services16 {
+                v.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+        v
+    }
+
+    fn identity(
+        addr: &str,
+        mfr: Option<(u16, &[u8])>,
+        name: Option<&str>,
+        svc: &[u16],
+    ) -> DeviceIdentity {
+        let report = adv::decode(&advert(mfr, name, svc));
+        DeviceIdentity::new(addr, IdentityEvidence::from_advertisement(&report, None)).unwrap()
+    }
+
+    // A globally administered address (U/L bit clear) and two randomized ones.
+    const PUB_A: &str = "a4:c1:38:00:00:01";
+    const PUB_B: &str = "a4:c1:38:00:00:02";
+    const RPA_1: &str = "42:11:22:33:44:55";
+    const RPA_2: &str = "7e:aa:bb:cc:dd:ee";
+
+    #[test]
+    fn same_public_address_is_a_hardware_match() {
+        let a = identity(PUB_A, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[0x180D]);
+        let b = identity(PUB_A, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[0x180D]);
+        assert_eq!(resolve(&a, &b).verdict, MatchVerdict::LikelySame);
+    }
+
+    #[test]
+    fn different_public_addresses_are_different_devices() {
+        let a = identity(PUB_A, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[0x180D]);
+        let b = identity(PUB_B, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[0x180D]);
+        assert_eq!(resolve(&a, &b).verdict, MatchVerdict::LikelyDifferent);
+    }
+
+    #[test]
+    fn randomized_addresses_with_distinctive_matching_evidence_are_possibly_same() {
+        // Two different rotating addresses, same distinctive advertisement.
+        let a = identity(
+            RPA_1,
+            Some((0x0059, &[0xAA, 0xBB, 0xCC])),
+            Some("Widget"),
+            &[0x180F],
+        );
+        let b = identity(
+            RPA_2,
+            Some((0x0059, &[0xAA, 0xBB, 0xCC])),
+            Some("Widget"),
+            &[0x180F],
+        );
+        let m = resolve(&a, &b);
+        assert_eq!(m.verdict, MatchVerdict::PossiblySame, "{m:?}");
+        // Never claims certainty from a randomized address.
+        assert_ne!(m.verdict, MatchVerdict::LikelySame);
+        assert!(!m.supporting.is_empty());
+        // And they share a correlation id for grouping.
+        assert_eq!(a.evidence.correlation_id(), b.evidence.correlation_id());
+        assert!(a.evidence.correlation_id().is_some());
+    }
+
+    #[test]
+    fn randomized_addresses_with_contradictory_evidence_are_different() {
+        let a = identity(RPA_1, Some((0x0059, &[0xAA])), Some("Widget"), &[0x180F]);
+        let b = identity(RPA_2, Some((0x004C, &[0xAA])), Some("Widget"), &[0x180F]);
+        let m = resolve(&a, &b);
+        assert_eq!(m.verdict, MatchVerdict::LikelyDifferent);
+        assert!(!m.contradictions.is_empty());
+    }
+
+    #[test]
+    fn contradiction_overrides_even_a_shared_public_address() {
+        // Same public address but a different manufacturer: the address is not
+        // enough to override a hard contradiction (spoofing / stale reuse).
+        let a = identity(PUB_A, Some((0x0059, &[1])), None, &[]);
+        let b = identity(PUB_A, Some((0x004C, &[1])), None, &[]);
+        assert_eq!(resolve(&a, &b).verdict, MatchVerdict::LikelyDifferent);
+    }
+
+    #[test]
+    fn featureless_randomized_advertisements_are_insufficient_never_same() {
+        // Two rotating addresses with only flags — nothing to correlate on.
+        let a = identity(RPA_1, None, None, &[]);
+        let b = identity(RPA_2, None, None, &[]);
+        assert_eq!(resolve(&a, &b).verdict, MatchVerdict::InsufficientEvidence);
+        assert_eq!(a.evidence.correlation_id(), None);
+    }
+
+    #[test]
+    fn weak_evidence_alone_does_not_correlate_across_rotation() {
+        // Only a manufacturer id (no payload shape, services, or name): weak.
+        let a = identity(RPA_1, Some((0x004C, &[])), None, &[]);
+        let b = identity(RPA_2, Some((0x004C, &[])), None, &[]);
+        // A bare company id with an empty payload still has a shape descriptor
+        // (m:004c/0/), which is distinctive enough to be PossiblySame; a truly
+        // weak case is a name only.
+        let c = identity(RPA_1, None, Some("X"), &[]);
+        let d = identity(RPA_2, None, Some("X"), &[]);
+        assert_eq!(resolve(&c, &d).verdict, MatchVerdict::InsufficientEvidence);
+        assert_eq!(c.evidence.correlation_id(), None);
+        // (a,b) share the manufacturer shape, so they are at least PossiblySame.
+        assert_eq!(resolve(&a, &b).verdict, MatchVerdict::PossiblySame);
+    }
+
+    #[test]
+    fn resolve_is_symmetric_in_verdict() {
+        let a = identity(RPA_1, Some((0x0059, &[9, 8])), Some("Z"), &[0x1234]);
+        let b = identity(RPA_2, Some((0x0059, &[9, 8])), Some("Z"), &[0x1234]);
+        assert_eq!(resolve(&a, &b).verdict, resolve(&b, &a).verdict);
+        let c = identity(PUB_A, Some((0x0059, &[9, 8])), None, &[]);
+        let d = identity(PUB_B, Some((0x0059, &[9, 8])), None, &[]);
+        assert_eq!(resolve(&c, &d).verdict, resolve(&d, &c).verdict);
+    }
+
+    #[test]
+    fn correlation_id_survives_rotation_but_changes_with_content() {
+        // A fixed-length payload whose bytes past the 4-byte header rotate: the
+        // common beacon case (a stable manufacturer header, a rotating counter).
+        let a = identity(
+            RPA_1,
+            Some((0x0059, &[1, 2, 3, 4, 10, 11])),
+            Some("Tag"),
+            &[0x180D],
+        );
+        let b = identity(
+            RPA_2,
+            Some((0x0059, &[1, 2, 3, 4, 20, 21])),
+            Some("Tag"),
+            &[0x180D],
+        );
+        assert_eq!(a.evidence.correlation_id(), b.evidence.correlation_id());
+        assert!(a.evidence.correlation_id().is_some());
+        // A different header prefix changes it.
+        let c = identity(
+            RPA_2,
+            Some((0x0059, &[9, 9, 9, 9, 10, 11])),
+            Some("Tag"),
+            &[0x180D],
+        );
+        assert_ne!(a.evidence.correlation_id(), c.evidence.correlation_id());
+        // A different payload length changes it (a different advertisement).
+        let d = identity(
+            RPA_2,
+            Some((0x0059, &[1, 2, 3, 4, 10])),
+            Some("Tag"),
+            &[0x180D],
+        );
+        assert_ne!(a.evidence.correlation_id(), d.evidence.correlation_id());
+    }
+
+    #[test]
+    fn group_key_is_the_address_for_public_and_the_correlation_id_for_randomized() {
+        // Public: keyed by the stable hardware address.
+        let pub_dev = identity(PUB_A, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[0x180D]);
+        assert_eq!(group_key(PUB_A, &pub_dev.evidence).as_deref(), Some(PUB_A));
+
+        // Randomized with distinctive evidence: keyed by the correlation id, so
+        // two rotating addresses of one device share a key.
+        let a = identity(RPA_1, Some((0x0059, &[9, 8, 7])), Some("W"), &[0x180F]);
+        let b = identity(RPA_2, Some((0x0059, &[9, 8, 7])), Some("W"), &[0x180F]);
+        let ka = group_key(RPA_1, &a.evidence);
+        assert_eq!(ka, group_key(RPA_2, &b.evidence));
+        assert!(ka.is_some());
+        assert_ne!(ka.as_deref(), Some(RPA_1)); // not the (rotating) address
+
+        // Randomized with no distinctive evidence: no key (stands alone).
+        let bare = identity(RPA_1, None, None, &[]);
+        assert_eq!(group_key(RPA_1, &bare.evidence), None);
+
+        // A malformed address has no key.
+        assert_eq!(group_key("not-a-mac", &pub_dev.evidence), None);
+    }
+
+    #[test]
+    fn from_advertisement_prefers_the_platform_name_then_the_payload_name() {
+        let report = adv::decode(&advert(None, Some("Payload"), &[]));
+        assert_eq!(
+            IdentityEvidence::from_advertisement(&report, Some("Platform"))
+                .name
+                .as_deref(),
+            Some("Platform")
+        );
+        assert_eq!(
+            IdentityEvidence::from_advertisement(&report, None)
+                .name
+                .as_deref(),
+            Some("Payload")
+        );
     }
 }
