@@ -394,6 +394,21 @@ fn proximity_ordinals_match_documented_mapping() {
 }
 
 #[test]
+fn address_trackability_ordinals_match_documented_mapping() {
+    use bleradar_jni::address_trackability_ordinal;
+    // Globally-administered (real hardware) → Trackable (0).
+    assert_eq!(address_trackability_ordinal("a4:c1:38:00:11:22"), 0);
+    // Locally-administered (U/L bit set) → Randomized (1): a rotating/privacy
+    // address is never a followable device.
+    assert_eq!(address_trackability_ordinal("02:11:22:33:44:55"), 1);
+    // Not a canonicalisable MAC (or empty) → Unknown (2), never assumed followable.
+    assert_eq!(address_trackability_ordinal("not-a-mac"), 2);
+    assert_eq!(address_trackability_ordinal(""), 2);
+    // Separator-insensitive: a hyphenated hardware address still classifies.
+    assert_eq!(address_trackability_ordinal("A4-C1-38-00-11-22"), 0);
+}
+
+#[test]
 fn signal_trend_ordinals_match_documented_mapping() {
     assert_eq!(signal_trend_ordinal(-80.0, -60.0, 3.0), 0); // Stronger
     assert_eq!(signal_trend_ordinal(-60.0, -80.0, 3.0), 1); // Weaker

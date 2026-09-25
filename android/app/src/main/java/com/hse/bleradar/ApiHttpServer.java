@@ -48,7 +48,8 @@ import java.util.logging.Logger;
  *       {@code distance_m} / {@code distance_lower_m} /
  *       {@code distance_upper_m} (metres, {@code null} when unavailable),
  *       {@code rssi_dbm} ({@code null} when unavailable), {@code proximity}
- *       ({@code IMMEDIATE|NEAR|MID|FAR|UNKNOWN}), {@code trend}
+ *       ({@code IMMEDIATE|NEAR|MID|FAR|UNKNOWN}), {@code trackability}
+ *       ({@code TRACKABLE|RANDOMIZED|UNKNOWN}), {@code trend}
  *       ({@code STRONGER|WEAKER|STABLE|UNKNOWN}), {@code freshness}
  *       ({@code LIVE|RECENT|STALE|UNKNOWN}), {@code confidence_percent},
  *       {@code last_seen_ago_ms}; plus the top-level {@code scanning},
@@ -360,6 +361,7 @@ public final class ApiHttpServer {
             json.name("distance_upper_m").value(device.distanceUpperBoundMetres);
             json.name("rssi_dbm").value(device.lastRssiDbm);
             json.name("proximity").value(proximityLabel(device.proximity));
+            json.name("trackability").value(trackabilityLabel(device.trackability));
             json.name("trend").value(trendLabel(device.trend));
             json.name("freshness").value(freshnessLabel(device.freshness));
             json.name("confidence_percent").value(device.confidencePercent);
@@ -435,6 +437,17 @@ public final class ApiHttpServer {
                 return "MID";
             case NativeRadar.PROXIMITY_FAR:
                 return "FAR";
+            default:
+                return "UNKNOWN";
+        }
+    }
+
+    private static String trackabilityLabel(int trackability) {
+        switch (trackability) {
+            case NativeRadar.TRACKABILITY_TRACKABLE:
+                return "TRACKABLE";
+            case NativeRadar.TRACKABILITY_RANDOMIZED:
+                return "RANDOMIZED";
             default:
                 return "UNKNOWN";
         }

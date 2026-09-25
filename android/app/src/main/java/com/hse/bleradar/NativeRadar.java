@@ -108,8 +108,15 @@ public final class NativeRadar {
     /** {@link #remoteManifestDisposition(int, int)} result: assess the bundled manifest; nothing to retry before the next scheduled check. */
     public static final int MANIFEST_SOURCE_FALLBACK_NO_RETRY = 2;
 
+    /** {@link #deviceAddressTrackability(String)} result: a globally-administered (real hardware) address — a followable device. */
+    public static final int TRACKABILITY_TRACKABLE = 0;
+    /** {@link #deviceAddressTrackability(String)} result: a locally-administered (rotating/privacy) address — a throwaway, never a followable device. */
+    public static final int TRACKABILITY_RANDOMIZED = 1;
+    /** {@link #deviceAddressTrackability(String)} result: not a canonicalisable MAC (or null), so trackability is unknown — never assumed followable. */
+    public static final int TRACKABILITY_UNKNOWN = 2;
+
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 11;
+    public static final int EXPECTED_ABI_VERSION = 12;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -487,4 +494,15 @@ public final class NativeRadar {
      * artifact becomes installable.
      */
     public static native int artifactVerifyFile(String path, String manifestText);
+
+    /**
+     * Classifies a BLE/Wi-Fi device address as one of the {@code TRACKABILITY_*}
+     * constants above, from the U/L bit of its canonical MAC. A
+     * locally-administered address is a rotating/privacy address — a throwaway
+     * the radar must never plot or track as a followable physical device — while
+     * a globally-administered address is real hardware. A string that is not a
+     * canonicalisable MAC (or null) is {@link #TRACKABILITY_UNKNOWN}, never
+     * assumed followable. Owned by {@code bleradar_core::address_trackability}.
+     */
+    public static native int deviceAddressTrackability(String mac);
 }

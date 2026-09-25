@@ -109,6 +109,26 @@ pub fn proximity_label_ordinal(rssi_dbm: f64) -> i32 {
 }
 
 /// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_deviceAddressTrackability`].
+///
+/// Encodes [`bleradar_core::AddressTrackability`] as a small ordinal
+/// (`0` = `Trackable`, `1` = `Randomized`, `2` = `Unknown`) since JNI has no
+/// shared enum type; `NativeRadar.java` mirrors this mapping in matching `int`
+/// constants. A MAC that does not canonicalise is `Unknown` (`2`), never
+/// silently treated as a followable device — the BLE-radar failure mode this
+/// classification exists to prevent (a rotating/randomized address is a
+/// throwaway, not a physical device to track).
+#[must_use]
+pub fn address_trackability_ordinal(mac: &str) -> i32 {
+    use bleradar_core::AddressTrackability::{Randomized, Trackable, Unknown};
+    match bleradar_core::address_trackability(mac) {
+        Trackable => 0,
+        Randomized => 1,
+        Unknown => 2,
+    }
+}
+
+/// Pure, unit-testable core of
 /// [`Java_com_hse_bleradar_NativeRadar_signalTrend`].
 ///
 /// Encodes [`SignalTrend`] as a small ordinal (`0` = [`SignalTrend::Stronger`],
@@ -1301,6 +1321,22 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(
     artifact_verify_file(&path, &manifest_text)
 }
 
+/// `NativeRadar.deviceAddressTrackability(String): int` — see
+/// [`address_trackability_ordinal`]. Reads `env` only through [`env`](mod@env);
+/// a null MAC canonicalises to nothing and so is `Unknown` (`2`), never a
+/// followable device.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceAddressTrackability(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    mac: JStringRef,
+) -> i32 {
+    match read_text(env, mac) {
+        Some(mac) => address_trackability_ordinal(&mac),
+        None => 2,
+    }
+}
+
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side
 /// calls once at startup to confirm the loaded `.so` matches the ABI this
 /// file documents, independent of the app's own version number.
@@ -1312,11 +1348,13 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(
 /// and to `10` when the string bridge and the release-manifest / artifact
 /// surface (`releaseManifestCanonical`, `releaseManifestError`,
 /// `releaseManifestField`, `artifactVerifyFile`) were added, and to `11` when
-/// the remote-manifest disposition (`remoteManifestDisposition`) was added.
+/// the remote-manifest disposition (`remoteManifestDisposition`) was added, and
+/// to `12` when the BLE address trackability classification
+/// (`deviceAddressTrackability`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    11
+    12
 }

@@ -29,6 +29,16 @@ final class Blip {
     volatile int trend = NativeRadar.TREND_STABLE;
     volatile int freshness = NativeRadar.FRESHNESS_STALE;
     volatile int confidencePercent;
+    /**
+     * BLE address trackability — one of {@link NativeRadar}'s {@code TRACKABILITY_*}
+     * constants. Classified once from the device's canonical MAC (the address is
+     * fixed for the life of a blip). A locally-administered (rotating/privacy)
+     * address is {@link NativeRadar#TRACKABILITY_RANDOMIZED} and must never be
+     * treated as a followable physical device; real hardware is
+     * {@link NativeRadar#TRACKABILITY_TRACKABLE}. Defaults to
+     * {@link NativeRadar#TRACKABILITY_UNKNOWN} until the native core classifies it.
+     */
+    volatile int trackability = NativeRadar.TRACKABILITY_UNKNOWN;
     volatile long lastSeenUptimeMillis;
     /**
      * Most recently observed device-advertised TX power in dBm, or

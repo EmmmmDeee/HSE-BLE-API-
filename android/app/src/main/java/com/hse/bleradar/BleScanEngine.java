@@ -230,6 +230,14 @@ final class BleScanEngine implements SnapshotSource {
         double txPowerDbm = readTxPowerDbm(result);
         blip.txPowerDbm = txPowerDbm;
 
+        // Classify the address once (it is fixed for the blip's life): a
+        // locally-administered BLE address is a rotating/privacy throwaway, not
+        // a followable physical device. Owned by Rust
+        // (bleradar_core::address_trackability) through the JNI façade.
+        if (NativeRadar.isAvailable() && blip.trackability == NativeRadar.TRACKABILITY_UNKNOWN) {
+            blip.trackability = NativeRadar.deviceAddressTrackability(address);
+        }
+
         if (NativeRadar.isAvailable()) {
             double smoothed = NativeRadar.trackingFilteredRssi(
                     previous,

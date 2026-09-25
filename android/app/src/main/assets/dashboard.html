@@ -100,7 +100,7 @@ footer a { color: var(--info); }
       <thead>
         <tr>
           <th>#</th><th>Address</th><th>Name</th><th>Distance</th><th>RSSI</th>
-          <th>Proximity</th><th>Trend</th><th>Freshness</th><th>Confidence</th><th>Seen</th>
+          <th>Proximity</th><th>Address type</th><th>Trend</th><th>Freshness</th><th>Confidence</th><th>Seen</th>
         </tr>
       </thead>
       <tbody id="devices"></tbody>
@@ -242,18 +242,21 @@ footer a { color: var(--info); }
     for (var i = 0; i < devices.length; i++) {
       var device = devices[i];
       var proximity = text(device.proximity, 'UNKNOWN');
+      var trackability = text(device.trackability, 'UNKNOWN');
       var trend = text(device.trend, 'UNKNOWN');
       var freshness = text(device.freshness, 'UNKNOWN');
       var tr = document.createElement('tr');
       tr.setAttribute('data-address', text(device.address, ''));
       tr.setAttribute('data-freshness', freshness);
       tr.setAttribute('data-proximity', proximity);
+      tr.setAttribute('data-trackability', trackability);
       cell(tr, String(i + 1), 'num');
       cell(tr, text(device.address, '—'), 'addr');
       cell(tr, text(device.name, '') || 'Unnamed device');
       cell(tr, distanceCell(device));
       cell(tr, fmtRssi(device.rssi_dbm), 'num');
       cell(tr, proximity, 'prox-' + proximity);
+      cell(tr, trackability, 'track-' + trackability);
       cell(tr, (TREND_GLYPH[trend] || '—') + ' ' + trend);
       cell(tr, freshness);
       cell(tr, fmtPercent(device.confidence_percent), 'num');
