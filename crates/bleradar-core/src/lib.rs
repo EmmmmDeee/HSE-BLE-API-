@@ -20,6 +20,9 @@ mod validation;
 mod verification;
 mod website;
 
+/// Bounds-checked, panic-free BLE advertising-payload decoder (AD structures,
+/// service UUIDs, manufacturer/service data, iBeacon and Eddystone).
+pub mod adv;
 /// Huntsman Search Engine (HSE) universal coordinate parser.
 pub mod coords;
 /// Huntsman Search Engine (HSE) entity model.

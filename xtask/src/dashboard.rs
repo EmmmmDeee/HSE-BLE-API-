@@ -76,10 +76,10 @@ const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// the JSON and rendered as text, never as markup.
 pub const DEVICES_JSON: &str = concat!(
     r#"{"devices":["#,
-    r#"{"address":"3C:5A:B4:11:22:01","name":"Tag Alpha","distance_m":1.234,"distance_lower_m":0.8,"distance_upper_m":1.9,"rssi_dbm":-61.4,"proximity":"NEAR","trackability":"TRACKABLE","trend":"STRONGER","freshness":"LIVE","confidence_percent":87,"last_seen_ago_ms":420},"#,
-    r#"{"address":"AA:BB:CC:DD:EE:02","name":"<b>evil</b> \"Ünïcødé\" \\ 😀","distance_m":7.5,"distance_lower_m":5.2,"distance_upper_m":11.0,"rssi_dbm":-78.0,"proximity":"MID","trackability":"RANDOMIZED","trend":"WEAKER","freshness":"RECENT","confidence_percent":52,"last_seen_ago_ms":12345},"#,
-    r#"{"address":"AA:BB:CC:DD:EE","name":null,"distance_m":null,"distance_lower_m":null,"distance_upper_m":null,"rssi_dbm":-90.2,"proximity":"FAR","trackability":"UNKNOWN","trend":"UNKNOWN","freshness":"STALE","confidence_percent":0,"last_seen_ago_ms":75000},"#,
-    r#"{"address":"AA:BB:CC:DD:EE:04","name":"Beacon Delta","distance_m":0.4,"distance_lower_m":0.3,"distance_upper_m":0.6,"rssi_dbm":-45.0,"proximity":"IMMEDIATE","trackability":"RANDOMIZED","trend":"STABLE","freshness":"LIVE","confidence_percent":99,"last_seen_ago_ms":90}"#,
+    r#"{"address":"3C:5A:B4:11:22:01","name":"Tag Alpha","distance_m":1.234,"distance_lower_m":0.8,"distance_upper_m":1.9,"rssi_dbm":-61.4,"proximity":"NEAR","trackability":"TRACKABLE","company_id":"004c","beacon":"iBeacon","trend":"STRONGER","freshness":"LIVE","confidence_percent":87,"last_seen_ago_ms":420},"#,
+    r#"{"address":"AA:BB:CC:DD:EE:02","name":"<b>evil</b> \"Ünïcødé\" \\ 😀","distance_m":7.5,"distance_lower_m":5.2,"distance_upper_m":11.0,"rssi_dbm":-78.0,"proximity":"MID","trackability":"RANDOMIZED","company_id":null,"beacon":"Eddystone-URL","trend":"WEAKER","freshness":"RECENT","confidence_percent":52,"last_seen_ago_ms":12345},"#,
+    r#"{"address":"AA:BB:CC:DD:EE","name":null,"distance_m":null,"distance_lower_m":null,"distance_upper_m":null,"rssi_dbm":-90.2,"proximity":"FAR","trackability":"UNKNOWN","company_id":null,"beacon":null,"trend":"UNKNOWN","freshness":"STALE","confidence_percent":0,"last_seen_ago_ms":75000},"#,
+    r#"{"address":"AA:BB:CC:DD:EE:04","name":"Beacon Delta","distance_m":0.4,"distance_lower_m":0.3,"distance_upper_m":0.6,"rssi_dbm":-45.0,"proximity":"IMMEDIATE","trackability":"RANDOMIZED","company_id":"0006","beacon":null,"trend":"STABLE","freshness":"LIVE","confidence_percent":99,"last_seen_ago_ms":90}"#,
     r#"],"scanning":true,"native_available":true,"timestamp_ms":1757700000000}"#,
 );
 /// `/api/status` as `ApiHttpServer.statusJson` writes it (uptime 1:02:03).
@@ -630,6 +630,13 @@ pub const HEALTHY_MARKERS: &[&str] = &[
     r#"data-trackability="UNKNOWN""#,
     r#"class="track-TRACKABLE">TRACKABLE<"#,
     r#"class="track-RANDOMIZED">RANDOMIZED<"#,
+    // Advertisement decoded by the Rust core: a recognised beacon kind, else
+    // the manufacturer company identifier.
+    r#"data-beacon="iBeacon""#,
+    r#"data-beacon="Eddystone-URL""#,
+    r#"class="adv">iBeacon<"#,
+    r#"class="adv">Eddystone-URL<"#,
+    r#"class="adv">mfr 0006<"#,
     "Tag Alpha",
     "&lt;b&gt;evil&lt;/b&gt; \"Ünïcødé\" \\ 😀",
     "Unnamed device",
@@ -1407,7 +1414,7 @@ mod tests {
     #[test]
     fn json_contract_locks_the_java_writer_the_fixture_and_the_page_together() {
         let counts = check_json_contract(API_HTTP_SERVER_JAVA, DASHBOARD_HTML).unwrap();
-        assert_eq!(counts.get("/api/devices"), Some(&16));
+        assert_eq!(counts.get("/api/devices"), Some(&18));
         assert_eq!(counts.get("/api/status"), Some(&4));
         assert_eq!(counts.get("/api/updates"), Some(&3));
         assert_eq!(counts.get("/api/scan/*"), Some(&1));

@@ -119,14 +119,21 @@ public final class ApiSmoke {
         // the real native classifier: a globally-administered (real hardware)
         // address is TRACKABLE, a locally-administered (0xAA … U/L bit set)
         // address is RANDOMIZED, and a malformed address is UNKNOWN.
+        // Advertising payloads (hex, as BleScanEngine hands ScanRecord bytes to
+        // Rust) decoded through the real native core: an iBeacon, an
+        // Eddystone-URL frame, none at all, and plain Microsoft (0x0006)
+        // manufacturer data — the same vectors crates/bleradar-jni pins.
         devices.add(blip("3C:5A:B4:11:22:01", "Tag Alpha", 1.234, 0.8, 1.9, -61.4,
-                NativeRadar.PROXIMITY_NEAR, NativeRadar.TREND_STRONGER, NativeRadar.FRESHNESS_LIVE, 87, 420));
+                NativeRadar.PROXIMITY_NEAR, NativeRadar.TREND_STRONGER, NativeRadar.FRESHNESS_LIVE, 87, 420,
+                "1aff4c0002150102030405060708090a0b0c0d0e0f1000010002c5"));
         devices.add(blip("AA:BB:CC:DD:EE:02", "<b>evil</b> \"Ünïcødé\" \\ 😀", 7.5, 5.2, 11.0, -78.0,
-                NativeRadar.PROXIMITY_MID, NativeRadar.TREND_WEAKER, NativeRadar.FRESHNESS_RECENT, 52, 12345));
+                NativeRadar.PROXIMITY_MID, NativeRadar.TREND_WEAKER, NativeRadar.FRESHNESS_RECENT, 52, 12345,
+                "0303aafe0a16aafe10ee0368736500"));
         devices.add(blip("AA:BB:CC:DD:EE", null, Double.NaN, Double.NaN, Double.NaN, -90.2,
-                NativeRadar.PROXIMITY_FAR, -1, NativeRadar.FRESHNESS_STALE, 0, 75000));
+                NativeRadar.PROXIMITY_FAR, -1, NativeRadar.FRESHNESS_STALE, 0, 75000, null));
         devices.add(blip("AA:BB:CC:DD:EE:04", "Beacon Delta", 0.4, 0.3, 0.6, -45.0,
-                NativeRadar.PROXIMITY_IMMEDIATE, NativeRadar.TREND_STABLE, NativeRadar.FRESHNESS_LIVE, 99, 90));
+                NativeRadar.PROXIMITY_IMMEDIATE, NativeRadar.TREND_STABLE, NativeRadar.FRESHNESS_LIVE, 99, 90,
+                "02010605ff06000102"));
 
         SnapshotSource source = new SnapshotSource() {
             @Override
@@ -213,7 +220,8 @@ public final class ApiSmoke {
     }
 
     private static Blip blip(String address, String name, double distance, double lower, double upper,
-            double rssi, int proximity, int trend, int freshness, int confidence, long agoMs) {
+            double rssi, int proximity, int trend, int freshness, int confidence, long agoMs,
+            String advertisementHex) {
         Blip blip = new Blip(address);
         blip.name = name;
         blip.distanceMetres = distance;
@@ -225,6 +233,11 @@ public final class ApiSmoke {
         // Rust bleradar_core::address_trackability), the same call the live
         // BleScanEngine makes.
         blip.trackability = NativeRadar.deviceAddressTrackability(address);
+        // The same two natives BleScanEngine calls on a live ScanRecord.
+        if (advertisementHex != null) {
+            blip.companyId = NativeRadar.advertisementCompanyId(advertisementHex);
+            blip.beacon = NativeRadar.advertisementBeacon(advertisementHex);
+        }
         blip.trend = trend;
         blip.freshness = freshness;
         blip.confidencePercent = confidence;

@@ -91,6 +91,14 @@ const BEACON_ADDRESS: &str = "C0:DE:BE:AC:0D:01";
 /// Its advertising interval in 0.625 ms units: 100 ms, the low-latency
 /// scan window the app asks for.
 const BEACON_INTERVAL: u16 = 0x00A0;
+/// The manufacturer-specific data it advertises: company identifier 0xFFFF,
+/// which the Bluetooth SIG reserves for testing (never a shipping product's),
+/// and a two-byte payload. The Rust advertisement decoder must report it on
+/// the runtime as the row's `company_id`.
+const BEACON_COMPANY_ID: u16 = 0xFFFF;
+const BEACON_MANUFACTURER_PAYLOAD: &[u8] = &[0xBE, 0xAC];
+/// `BEACON_COMPANY_ID` as the API renders it (four lowercase hex digits).
+const BEACON_COMPANY_ID_JSON: &str = "\"company_id\":\"ffff\"";
 /// How long the scan may take to list the beacon after it started.
 const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the row may outlive the beacon: the Standard tracking profile
@@ -664,7 +672,13 @@ impl Beacon {
                 )
             })?;
         let bd_addr = controller.read_bd_addr()?;
-        controller.advertise(BEACON_ADDRESS, BEACON_NAME, BEACON_INTERVAL)?;
+        controller.advertise(
+            BEACON_ADDRESS,
+            BEACON_NAME,
+            BEACON_COMPANY_ID,
+            BEACON_MANUFACTURER_PAYLOAD,
+            BEACON_INTERVAL,
+        )?;
         Ok(Self {
             controller,
             port,
@@ -676,7 +690,7 @@ impl Beacon {
 
     fn describe(&self) -> String {
         format!(
-            "a second virtual controller on netsimd's HCI socket 127.0.0.1:{} ({}, {}), public address {}, advertising every {} ms as {BEACON_ADDRESS} {BEACON_NAME:?}",
+            "a second virtual controller on netsimd's HCI socket 127.0.0.1:{} ({}, {}), public address {}, advertising every {} ms as {BEACON_ADDRESS} {BEACON_NAME:?} with manufacturer data 0x{BEACON_COMPANY_ID:04x}",
             self.port,
             self.source,
             if self.listed {
@@ -1198,6 +1212,15 @@ fn exercise(
         if row.contains("\"distance_m\":null") || !row.contains("\"distance_m\":") {
             return Err(format!(
                 "the beacon's row carries no distance (the Rust estimate never reached it): {row}"
+            ));
+        }
+        // The advertising payload went through the platform's BLE stack,
+        // ScanRecord.getBytes(), the JNI string bridge and bleradar_core::adv:
+        // the manufacturer block must come back as its company identifier,
+        // and a plain manufacturer block is not a beacon.
+        if !row.contains(BEACON_COMPANY_ID_JSON) || !row.contains("\"beacon\":null") {
+            return Err(format!(
+                "the beacon's row does not carry the decoded advertisement ({BEACON_COMPANY_ID_JSON}, \"beacon\":null) — the Rust advertisement decoder never reached it: {row}"
             ));
         }
         report.push(format!(

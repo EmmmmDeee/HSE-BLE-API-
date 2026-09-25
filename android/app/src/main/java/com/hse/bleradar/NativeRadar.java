@@ -116,7 +116,7 @@ public final class NativeRadar {
     public static final int TRACKABILITY_UNKNOWN = 2;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 12;
+    public static final int EXPECTED_ABI_VERSION = 13;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -505,4 +505,21 @@ public final class NativeRadar {
      * assumed followable. Owned by {@code bleradar_core::address_trackability}.
      */
     public static native int deviceAddressTrackability(String mac);
+
+    /**
+     * The first manufacturer company identifier in a BLE advertising payload
+     * ({@code ScanRecord.getBytes()} as lowercase or uppercase hex), as four
+     * lowercase hex digits (for example {@code "004c"} for Apple), or
+     * {@code null} when the payload has no manufacturer data or the hand-off is
+     * malformed. Decoded by {@code bleradar_core::adv}, the single authority.
+     */
+    public static native String advertisementCompanyId(String advertisementHex);
+
+    /**
+     * The recognised beacon kind in a BLE advertising payload (hex as above) —
+     * {@code "iBeacon"}, {@code "Eddystone-UID"}, {@code "Eddystone-URL"} or
+     * {@code "Eddystone-TLM"} — or {@code null}: a frame that does not match a
+     * beacon shape is never force-fit. Decoded by {@code bleradar_core::adv}.
+     */
+    public static native String advertisementBeacon(String advertisementHex);
 }

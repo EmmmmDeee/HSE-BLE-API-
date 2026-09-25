@@ -100,7 +100,7 @@ footer a { color: var(--info); }
       <thead>
         <tr>
           <th>#</th><th>Address</th><th>Name</th><th>Distance</th><th>RSSI</th>
-          <th>Proximity</th><th>Address type</th><th>Trend</th><th>Freshness</th><th>Confidence</th><th>Seen</th>
+          <th>Proximity</th><th>Address type</th><th>Advertisement</th><th>Trend</th><th>Freshness</th><th>Confidence</th><th>Seen</th>
         </tr>
       </thead>
       <tbody id="devices"></tbody>
@@ -250,6 +250,11 @@ footer a { color: var(--info); }
       tr.setAttribute('data-freshness', freshness);
       tr.setAttribute('data-proximity', proximity);
       tr.setAttribute('data-trackability', trackability);
+      var beacon = text(device.beacon, '');
+      var companyId = text(device.company_id, '');
+      if (beacon) {
+        tr.setAttribute('data-beacon', beacon);
+      }
       cell(tr, String(i + 1), 'num');
       cell(tr, text(device.address, '—'), 'addr');
       cell(tr, text(device.name, '') || 'Unnamed device');
@@ -257,6 +262,7 @@ footer a { color: var(--info); }
       cell(tr, fmtRssi(device.rssi_dbm), 'num');
       cell(tr, proximity, 'prox-' + proximity);
       cell(tr, trackability, 'track-' + trackability);
+      cell(tr, beacon || (companyId ? 'mfr ' + companyId : '—'), 'adv');
       cell(tr, (TREND_GLYPH[trend] || '—') + ' ' + trend);
       cell(tr, freshness);
       cell(tr, fmtPercent(device.confidence_percent), 'num');

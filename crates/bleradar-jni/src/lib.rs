@@ -129,6 +129,27 @@ pub fn address_trackability_ordinal(mac: &str) -> i32 {
 }
 
 /// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_advertisementCompanyId`]: the first
+/// manufacturer company identifier in a hex-encoded BLE advertising payload, as
+/// four lowercase hex digits, or `None` (no manufacturer data, or a malformed
+/// hand-off). Decoded by [`bleradar_core::adv`], the single authority.
+#[must_use]
+pub fn advertisement_company_id(advertisement_hex: &str) -> Option<String> {
+    bleradar_core::adv::summary_company_id(&bleradar_core::adv::decode_hex(advertisement_hex))
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_advertisementBeacon`]: the recognised
+/// beacon kind (`iBeacon`, `Eddystone-UID`, `Eddystone-URL`, `Eddystone-TLM`)
+/// in a hex-encoded BLE advertising payload, or `None` — a frame that does not
+/// match a beacon shape is never force-fit.
+#[must_use]
+pub fn advertisement_beacon(advertisement_hex: &str) -> Option<String> {
+    bleradar_core::adv::summary_beacon(&bleradar_core::adv::decode_hex(advertisement_hex))
+        .map(str::to_string)
+}
+
+/// Pure, unit-testable core of
 /// [`Java_com_hse_bleradar_NativeRadar_signalTrend`].
 ///
 /// Encodes [`SignalTrend`] as a small ordinal (`0` = [`SignalTrend::Stronger`],
@@ -1337,6 +1358,30 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceAddressTrackabili
     }
 }
 
+/// `NativeRadar.advertisementCompanyId(String): String` — see
+/// [`advertisement_company_id`]. Reads `env` only through [`env`](mod@env); a
+/// null payload, a malformed hand-off, or no manufacturer data answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementCompanyId(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    advertisement_hex: JStringRef,
+) -> JStringRef {
+    string_export(env, advertisement_hex, advertisement_company_id)
+}
+
+/// `NativeRadar.advertisementBeacon(String): String` — see
+/// [`advertisement_beacon`]. Reads `env` only through [`env`](mod@env); a null
+/// payload, a malformed hand-off, or no recognised beacon answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementBeacon(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    advertisement_hex: JStringRef,
+) -> JStringRef {
+    string_export(env, advertisement_hex, advertisement_beacon)
+}
+
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side
 /// calls once at startup to confirm the loaded `.so` matches the ABI this
 /// file documents, independent of the app's own version number.
@@ -1350,11 +1395,13 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceAddressTrackabili
 /// `releaseManifestField`, `artifactVerifyFile`) were added, and to `11` when
 /// the remote-manifest disposition (`remoteManifestDisposition`) was added, and
 /// to `12` when the BLE address trackability classification
-/// (`deviceAddressTrackability`) was added.
+/// (`deviceAddressTrackability`) was added, and to `13` when the BLE
+/// advertisement decoder surface (`advertisementCompanyId`,
+/// `advertisementBeacon`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    12
+    13
 }

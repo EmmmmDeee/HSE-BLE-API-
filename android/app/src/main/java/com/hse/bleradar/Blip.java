@@ -39,6 +39,18 @@ final class Blip {
      * {@link NativeRadar#TRACKABILITY_UNKNOWN} until the native core classifies it.
      */
     volatile int trackability = NativeRadar.TRACKABILITY_UNKNOWN;
+    /**
+     * First manufacturer company identifier in the device's advertising payload
+     * (four lowercase hex digits), or {@code null} — decoded by the Rust core.
+     */
+    volatile String companyId;
+    /** Recognised beacon kind (e.g. {@code "iBeacon"}), or {@code null} — decoded by the Rust core. */
+    volatile String beacon;
+    /**
+     * The hex advertising payload the two fields above were decoded from, so an
+     * unchanged advertisement is not re-decoded on every scan result.
+     */
+    volatile String lastAdvertisementHex;
     volatile long lastSeenUptimeMillis;
     /**
      * Most recently observed device-advertised TX power in dBm, or

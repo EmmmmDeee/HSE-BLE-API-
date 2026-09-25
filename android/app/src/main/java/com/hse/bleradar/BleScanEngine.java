@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
 import android.content.Context;
@@ -238,6 +239,20 @@ final class BleScanEngine implements SnapshotSource {
             blip.trackability = NativeRadar.deviceAddressTrackability(address);
         }
 
+        // Decode the advertising payload in Rust (bleradar_core::adv): who made
+        // the device and whether it is a beacon. Re-decoded only when the
+        // advertisement changed (Eddystone, for one, rotates frames).
+        ScanRecord record = result.getScanRecord();
+        byte[] advertisement = record == null ? null : record.getBytes();
+        if (NativeRadar.isAvailable() && advertisement != null) {
+            String advertisementHex = hex(advertisement);
+            if (!advertisementHex.equals(blip.lastAdvertisementHex)) {
+                blip.companyId = NativeRadar.advertisementCompanyId(advertisementHex);
+                blip.beacon = NativeRadar.advertisementBeacon(advertisementHex);
+                blip.lastAdvertisementHex = advertisementHex;
+            }
+        }
+
         if (NativeRadar.isAvailable()) {
             double smoothed = NativeRadar.trackingFilteredRssi(
                     previous,
@@ -344,6 +359,19 @@ final class BleScanEngine implements SnapshotSource {
      * independently validates plausibility before using this as a per-device
      * calibration override, so no range filtering happens here.
      */
+    private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();
+
+    /** Lowercase hex of {@code bytes}: the form the Rust advertisement decoder takes across JNI. */
+    static String hex(byte[] bytes) {
+        char[] out = new char[bytes.length * 2];
+        for (int i = 0; i < bytes.length; i++) {
+            int b = bytes[i] & 0xff;
+            out[2 * i] = HEX_DIGITS[b >>> 4];
+            out[2 * i + 1] = HEX_DIGITS[b & 0x0f];
+        }
+        return new String(out);
+    }
+
     private static double readTxPowerDbm(ScanResult result) {
         int txPower = result.getTxPower();
         return txPower == ScanResult.TX_POWER_NOT_PRESENT ? Double.NaN : txPower;

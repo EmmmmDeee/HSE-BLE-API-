@@ -49,7 +49,11 @@ import java.util.logging.Logger;
  *       {@code distance_upper_m} (metres, {@code null} when unavailable),
  *       {@code rssi_dbm} ({@code null} when unavailable), {@code proximity}
  *       ({@code IMMEDIATE|NEAR|MID|FAR|UNKNOWN}), {@code trackability}
- *       ({@code TRACKABLE|RANDOMIZED|UNKNOWN}), {@code trend}
+ *       ({@code TRACKABLE|RANDOMIZED|UNKNOWN}), {@code company_id} (the
+ *       advertisement's first manufacturer company identifier as four hex
+ *       digits, {@code null} when absent), {@code beacon}
+ *       ({@code iBeacon|Eddystone-UID|Eddystone-URL|Eddystone-TLM}, {@code null}
+ *       when not a beacon), {@code trend}
  *       ({@code STRONGER|WEAKER|STABLE|UNKNOWN}), {@code freshness}
  *       ({@code LIVE|RECENT|STALE|UNKNOWN}), {@code confidence_percent},
  *       {@code last_seen_ago_ms}; plus the top-level {@code scanning},
@@ -362,6 +366,8 @@ public final class ApiHttpServer {
             json.name("rssi_dbm").value(device.lastRssiDbm);
             json.name("proximity").value(proximityLabel(device.proximity));
             json.name("trackability").value(trackabilityLabel(device.trackability));
+            json.name("company_id").value(device.companyId);
+            json.name("beacon").value(device.beacon);
             json.name("trend").value(trendLabel(device.trend));
             json.name("freshness").value(freshnessLabel(device.freshness));
             json.name("confidence_percent").value(device.confidencePercent);

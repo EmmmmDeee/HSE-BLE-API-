@@ -964,3 +964,104 @@ fn manifest_source_decision_ordinal_maps_every_disposition_and_never_retries_on_
         "the kind still reads"
     );
 }
+
+/// Hex-encoded advertising payloads shared with the host-JVM API proof
+/// (`xtask/src/apilive.rs`): an iBeacon, an Eddystone-URL frame, and plain
+/// Microsoft (0x0006) manufacturer data behind a flags structure.
+const IBEACON_HEX: &str = "1aff4c0002150102030405060708090a0b0c0d0e0f1000010002c5";
+const EDDYSTONE_URL_HEX: &str = "0303aafe0a16aafe10ee0368736500";
+const MICROSOFT_HEX: &str = "02010605ff06000102";
+
+#[test]
+fn advertisement_summaries_decode_through_the_core() {
+    use bleradar_jni::{advertisement_beacon, advertisement_company_id};
+    assert_eq!(
+        advertisement_company_id(IBEACON_HEX).as_deref(),
+        Some("004c")
+    );
+    assert_eq!(
+        advertisement_beacon(IBEACON_HEX).as_deref(),
+        Some("iBeacon")
+    );
+    assert_eq!(advertisement_company_id(EDDYSTONE_URL_HEX), None);
+    assert_eq!(
+        advertisement_beacon(EDDYSTONE_URL_HEX).as_deref(),
+        Some("Eddystone-URL")
+    );
+    assert_eq!(
+        advertisement_company_id(MICROSOFT_HEX).as_deref(),
+        Some("0006")
+    );
+    assert_eq!(advertisement_beacon(MICROSOFT_HEX), None);
+    // A malformed hand-off (odd length, non-hex) is no decode at all.
+    for bad in ["", "1af", "zz", "1aff4c00021"] {
+        assert_eq!(advertisement_company_id(bad), None, "{bad}");
+        assert_eq!(advertisement_beacon(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn advertisement_exports_answer_through_the_string_bridge() {
+    use bleradar_jni::{
+        Java_com_hse_bleradar_NativeRadar_advertisementBeacon,
+        Java_com_hse_bleradar_NativeRadar_advertisementCompanyId,
+    };
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let ibeacon = mock.string(IBEACON_HEX);
+    assert_eq!(
+        mock.read(Java_com_hse_bleradar_NativeRadar_advertisementCompanyId(
+            env, null, ibeacon
+        ))
+        .as_deref(),
+        Some("004c")
+    );
+    assert_eq!(
+        mock.read(Java_com_hse_bleradar_NativeRadar_advertisementBeacon(
+            env, null, ibeacon
+        ))
+        .as_deref(),
+        Some("iBeacon")
+    );
+    // No beacon, no manufacturer data, a null string and a null env all answer
+    // null — never an invented value.
+    let flags_only = mock.string("020106");
+    assert!(Java_com_hse_bleradar_NativeRadar_advertisementBeacon(env, null, flags_only).is_null());
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_advertisementCompanyId(env, null, flags_only).is_null()
+    );
+    assert!(Java_com_hse_bleradar_NativeRadar_advertisementBeacon(env, null, null).is_null());
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_advertisementCompanyId(null, null, ibeacon).is_null()
+    );
+}
+
+/// The advertising data the emulator proof's virtual beacon sends
+/// (`xtask/src/hci.rs::advertising_data("bleradar-beacon", 0xFFFF, &[0xBE,
+/// 0xAC])`, significant bytes): flags, the complete local name, and
+/// manufacturer data under 0xFFFF, the SIG's testing identifier. xtask stays
+/// outside this crate graph (decision 24), so the vector is pinned here and the
+/// two meet on the runtime, where `verify-android-emulator` requires the row's
+/// `company_id` to be `ffff` and its `beacon` null.
+const EMULATOR_BEACON_HEX: &str = "0201061009626c6572616461722d626561636f6e05ffffffbeac";
+
+#[test]
+fn the_emulator_beacon_decodes_to_what_the_runtime_proof_requires() {
+    use bleradar_jni::{advertisement_beacon, advertisement_company_id};
+    assert_eq!(
+        advertisement_company_id(EMULATOR_BEACON_HEX).as_deref(),
+        Some("ffff")
+    );
+    assert_eq!(advertisement_beacon(EMULATOR_BEACON_HEX), None);
+    let report = bleradar_core::adv::decode_hex(EMULATOR_BEACON_HEX);
+    assert_eq!(
+        report.complete_local_name.as_deref(),
+        Some("bleradar-beacon")
+    );
+    assert_eq!(report.flags, Some(0x06));
+    // Android hands over the whole zero-padded advertising + scan-response
+    // buffer; the padding must not change the decode.
+    let padded = format!("{EMULATOR_BEACON_HEX}{}", "00".repeat(62 - 26));
+    assert_eq!(bleradar_core::adv::decode_hex(&padded), report);
+}
