@@ -25,10 +25,13 @@
 //!   data `0x004C`, type `0x02` len `0x15`) and **Eddystone** (service data
 //!   under UUID `0xFEAA`: UID / URL / TLM frames)
 //!
-//! Everything the parser does not model is still surfaced: an unmodelled AD
-//! type is recorded in `unknown_types`, and a length that overran the buffer
-//! sets `truncated`. Nothing is silently dropped, and a decode never asserts
-//! more than the bytes support (`Unknown` stays unknown).
+//! Everything the parser does not fully decode is still surfaced: an unmodelled
+//! AD type is recorded in `unknown_types`; a modelled AD type whose payload is
+//! too short for its format (so it produced no field) is recorded in
+//! `malformed`; a length that overran the buffer sets `truncated`. Nothing is
+//! silently dropped, and a decode never asserts more than the bytes support
+//! (`Unknown` stays unknown; a beacon's "not supported" sentinels become
+//! `None`, never a fabricated reading).
 
 use core::fmt::Write as _;
 
@@ -123,12 +126,17 @@ pub enum Beacon {
         /// Calibrated TX power at 0 m, in dBm.
         tx_power: i8,
     },
-    /// Eddystone-TLM (unencrypted, version 0): telemetry.
+    /// Eddystone-TLM (unencrypted, version 0): telemetry. An encrypted TLM
+    /// (version 1) is a different, keyed layout, so it is never decoded here as
+    /// if it were plaintext — it stays unrecognised.
     EddystoneTlm {
-        /// Battery voltage, millivolts (0 when not supported).
-        battery_mv: u16,
-        /// Beacon temperature in °C (8.8 fixed-point on the wire).
-        temperature_c: f32,
+        /// Battery voltage, millivolts, or `None` when the beacon reports no
+        /// battery (the spec's `0` sentinel), e.g. a USB-powered beacon.
+        battery_mv: Option<u16>,
+        /// Beacon temperature in °C (8.8 fixed-point on the wire), or `None`
+        /// when the beacon has no temperature sensor (the spec's `0x8000`
+        /// sentinel) — never reported as a real −128 °C reading.
+        temperature_c: Option<f32>,
         /// Count of advertising frames since power-on.
         adv_count: u32,
         /// Time since power-on, in 0.1 s units.
@@ -175,6 +183,11 @@ pub struct AdvReport {
     /// AD types present in the payload that this decoder does not model, in
     /// order of appearance (provenance; never silently dropped).
     pub unknown_types: Vec<u8>,
+    /// Modelled AD types whose payload was too short (or had a trailing partial
+    /// element) to yield their format, so they produced no field — recorded
+    /// here rather than dropped in silence, in order of appearance. A name
+    /// (`0x08`/`0x09`) has no minimum length and never appears here.
+    pub malformed: Vec<u8>,
     /// True when an AD structure declared a length that ran past the buffer, so
     /// the tail could not be parsed. The structures before it are still valid.
     pub truncated: bool,
@@ -230,82 +243,98 @@ pub fn decode_hex(hex: &str) -> AdvReport {
 }
 
 fn decode_structure(report: &mut AdvReport, ad_type: u8, payload: &[u8]) {
+    // A modelled AD type whose payload is too short to carry its minimum format
+    // yields nothing; recording the type in `malformed` keeps the "nothing is
+    // silently dropped" invariant true (an empty local name is still a name, so
+    // 0x08/0x09 have no minimum and never land here).
+    let mut malformed = || report.malformed.push(ad_type);
     match ad_type {
-        0x01 => {
-            if let Some(&b) = payload.first() {
-                report.flags = Some(b);
+        0x01 => match payload.first() {
+            Some(&b) => report.flags = Some(b),
+            None => malformed(),
+        },
+        0x02 | 0x03 => {
+            if !push_uuids16(&mut report.service_uuids, payload) {
+                malformed();
             }
         }
-        0x02 | 0x03 => push_uuids16(&mut report.service_uuids, payload),
-        0x04 | 0x05 => push_uuids32(&mut report.service_uuids, payload),
-        0x06 | 0x07 => push_uuids128(&mut report.service_uuids, payload),
+        0x04 | 0x05 => {
+            if !push_uuids32(&mut report.service_uuids, payload) {
+                malformed();
+            }
+        }
+        0x06 | 0x07 => {
+            if !push_uuids128(&mut report.service_uuids, payload) {
+                malformed();
+            }
+        }
         0x08 => report.shortened_local_name = Some(String::from_utf8_lossy(payload).into_owned()),
         0x09 => report.complete_local_name = Some(String::from_utf8_lossy(payload).into_owned()),
-        0x0A => {
-            if let Some(&b) = payload.first() {
-                report.tx_power_level = Some(b as i8);
-            }
-        }
-        0x19 => {
-            if let Some(v) = le_u16(payload) {
-                report.appearance = Some(v);
-            }
-        }
-        0x16 => {
-            if let (Some(uuid), rest) = (payload.get(..2).and_then(le_u16_at), payload.get(2..)) {
-                report.service_data.push(ServiceData {
-                    uuid: Uuid::U16(uuid),
-                    data: rest.unwrap_or(&[]).to_vec(),
-                });
-            }
-        }
-        0x20 => {
-            if let (Some(uuid), rest) = (payload.get(..4).and_then(le_u32_at), payload.get(4..)) {
-                report.service_data.push(ServiceData {
-                    uuid: Uuid::U32(uuid),
-                    data: rest.unwrap_or(&[]).to_vec(),
-                });
-            }
-        }
-        0x21 => {
-            if let Some(uuid) = payload.get(..16).and_then(le_u128_at) {
-                report.service_data.push(ServiceData {
-                    uuid: Uuid::U128(uuid),
-                    data: payload.get(16..).unwrap_or(&[]).to_vec(),
-                });
-            }
-        }
-        0xFF => {
-            if let Some(company_id) = payload.get(..2).and_then(le_u16_at) {
-                report.manufacturer_data.push(ManufacturerData {
-                    company_id,
-                    data: payload.get(2..).unwrap_or(&[]).to_vec(),
-                });
-            }
-        }
+        0x0A => match payload.first() {
+            Some(&b) => report.tx_power_level = Some(b as i8),
+            None => malformed(),
+        },
+        0x19 => match le_u16(payload) {
+            Some(v) => report.appearance = Some(v),
+            None => malformed(),
+        },
+        0x16 => match payload.get(..2).and_then(le_u16_at) {
+            Some(uuid) => report.service_data.push(ServiceData {
+                uuid: Uuid::U16(uuid),
+                data: payload.get(2..).unwrap_or(&[]).to_vec(),
+            }),
+            None => malformed(),
+        },
+        0x20 => match payload.get(..4).and_then(le_u32_at) {
+            Some(uuid) => report.service_data.push(ServiceData {
+                uuid: Uuid::U32(uuid),
+                data: payload.get(4..).unwrap_or(&[]).to_vec(),
+            }),
+            None => malformed(),
+        },
+        0x21 => match payload.get(..16).and_then(le_u128_at) {
+            Some(uuid) => report.service_data.push(ServiceData {
+                uuid: Uuid::U128(uuid),
+                data: payload.get(16..).unwrap_or(&[]).to_vec(),
+            }),
+            None => malformed(),
+        },
+        0xFF => match payload.get(..2).and_then(le_u16_at) {
+            Some(company_id) => report.manufacturer_data.push(ManufacturerData {
+                company_id,
+                data: payload.get(2..).unwrap_or(&[]).to_vec(),
+            }),
+            None => malformed(),
+        },
         other => report.unknown_types.push(other),
     }
 }
 
-fn push_uuids16(out: &mut Vec<Uuid>, payload: &[u8]) {
+/// True when the whole payload was a positive multiple of the UUID width, so
+/// every byte was surfaced as a UUID; false for an empty payload or a trailing
+/// partial UUID (bytes that could not form a whole UUID), which the caller
+/// records as malformed rather than dropping in silence.
+fn push_uuids16(out: &mut Vec<Uuid>, payload: &[u8]) -> bool {
     for chunk in payload.as_chunks::<2>().0 {
         let u = Uuid::U16(u16::from_le_bytes(*chunk));
         if !out.contains(&u) {
             out.push(u);
         }
     }
+    !payload.is_empty() && payload.len().is_multiple_of(2)
 }
 
-fn push_uuids32(out: &mut Vec<Uuid>, payload: &[u8]) {
+fn push_uuids32(out: &mut Vec<Uuid>, payload: &[u8]) -> bool {
     for chunk in payload.as_chunks::<4>().0 {
         let u = Uuid::U32(u32::from_le_bytes(*chunk));
         if !out.contains(&u) {
             out.push(u);
         }
     }
+    !payload.is_empty() && payload.len().is_multiple_of(4)
 }
 
-fn push_uuids128(out: &mut Vec<Uuid>, payload: &[u8]) {
+fn push_uuids128(out: &mut Vec<Uuid>, payload: &[u8]) -> bool {
     for chunk in payload.as_chunks::<16>().0 {
         let mut be = [0u8; 16];
         // 128-bit UUIDs are little-endian on the wire; store big-endian.
@@ -317,6 +346,7 @@ fn push_uuids128(out: &mut Vec<Uuid>, payload: &[u8]) {
             out.push(u);
         }
     }
+    !payload.is_empty() && payload.len().is_multiple_of(16)
 }
 
 fn recognise_beacon(report: &mut AdvReport) {
@@ -366,8 +396,14 @@ fn eddystone_frame(d: &[u8]) -> Option<Beacon> {
             let tx_power = d[1] as i8;
             eddystone_url(d[2], &d[3..]).map(|url| Beacon::EddystoneUrl { url, tx_power })
         }
-        0x20 if d.len() >= 14 => Some(Beacon::EddystoneTlm {
-            battery_mv: u16::from_be_bytes([d[2], d[3]]),
+        // Only unencrypted TLM (version byte 0x00) has this plaintext layout;
+        // an encrypted TLM (0x01) or an unknown version is not decoded as if it
+        // were, so its telemetry is never a fabricated reading.
+        0x20 if d.len() >= 14 && d[1] == 0x00 => Some(Beacon::EddystoneTlm {
+            battery_mv: match u16::from_be_bytes([d[2], d[3]]) {
+                0 => None,
+                mv => Some(mv),
+            },
             temperature_c: eddystone_temp(d[4], d[5]),
             adv_count: u32::from_be_bytes([d[6], d[7], d[8], d[9]]),
             uptime_deciseconds: u32::from_be_bytes([d[10], d[11], d[12], d[13]]),
@@ -376,9 +412,13 @@ fn eddystone_frame(d: &[u8]) -> Option<Beacon> {
     }
 }
 
-/// Eddystone temperature: 8.8 fixed-point signed, big-endian.
-fn eddystone_temp(hi: u8, lo: u8) -> f32 {
-    f32::from(i16::from_be_bytes([hi, lo])) / 256.0
+/// Eddystone temperature: 8.8 fixed-point signed, big-endian, or `None` for the
+/// `0x8000` "no temperature sensor" sentinel the spec reserves.
+fn eddystone_temp(hi: u8, lo: u8) -> Option<f32> {
+    match i16::from_be_bytes([hi, lo]) {
+        -32768 => None,
+        raw => Some(f32::from(raw) / 256.0),
+    }
 }
 
 /// Expand an Eddystone-URL scheme prefix + encoded body to a URL string.
@@ -667,13 +707,55 @@ mod tests {
                 adv_count,
                 uptime_deciseconds,
             } => {
-                assert_eq!(battery_mv, 3300);
-                assert!((temperature_c - 25.5).abs() < f32::EPSILON);
+                assert_eq!(battery_mv, Some(3300));
+                assert!((temperature_c.expect("temp") - 25.5).abs() < f32::EPSILON);
                 assert_eq!(adv_count, 42);
                 assert_eq!(uptime_deciseconds, 1000);
             }
             other => panic!("expected TLM, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tlm_not_supported_sentinels_are_none_and_negative_temps_decode() {
+        // Battery 0 and temperature 0x8000 are "not supported", not readings.
+        let mut tlm = vec![0x20u8, 0x00];
+        tlm.extend_from_slice(&0u16.to_be_bytes()); // battery not supported
+        tlm.extend_from_slice(&(-32768i16).to_be_bytes()); // temp not supported
+        tlm.extend_from_slice(&1u32.to_be_bytes());
+        tlm.extend_from_slice(&2u32.to_be_bytes());
+        match decode(&eddystone(&tlm)).beacon.expect("TLM") {
+            Beacon::EddystoneTlm {
+                battery_mv,
+                temperature_c,
+                ..
+            } => {
+                assert_eq!(battery_mv, None);
+                assert_eq!(temperature_c, None);
+            }
+            other => panic!("expected TLM, got {other:?}"),
+        }
+        // A genuine sub-zero temperature (−20.25 °C = 0xEBC0) is a real reading.
+        let mut cold = vec![0x20u8, 0x00];
+        cold.extend_from_slice(&3000u16.to_be_bytes());
+        cold.extend_from_slice(&0xEBC0u16.to_be_bytes());
+        cold.extend_from_slice(&0u32.to_be_bytes());
+        cold.extend_from_slice(&0u32.to_be_bytes());
+        match decode(&eddystone(&cold)).beacon.expect("TLM") {
+            Beacon::EddystoneTlm { temperature_c, .. } => {
+                assert!((temperature_c.expect("temp") + 20.25).abs() < f32::EPSILON);
+            }
+            other => panic!("expected TLM, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encrypted_or_unknown_tlm_version_is_not_decoded_as_plaintext() {
+        // Version 0x01 is encrypted TLM (a different, keyed layout): it must not
+        // be reported as plaintext telemetry.
+        let mut etlm = vec![0x20u8, 0x01];
+        etlm.extend(std::iter::repeat_n(0xAB, 12));
+        assert_eq!(decode(&eddystone(&etlm)).beacon, None);
     }
 
     #[test]
@@ -697,11 +779,37 @@ mod tests {
     }
 
     #[test]
+    fn modelled_but_too_short_structures_are_recorded_not_dropped() {
+        // Manufacturer data with one byte (needs 2 for the company id), a
+        // 16-bit service-data structure with one byte, an appearance with one
+        // byte, and a 16-bit UUID list with a trailing partial UUID — each
+        // yields no field but is recorded, so nothing vanishes silently.
+        let r = decode(&[
+            0x02, 0xFF, 0x4C, // manufacturer, too short
+            0x02, 0x16, 0xAA, // service data 16-bit, too short
+            0x02, 0x19, 0x01, // appearance, too short
+            0x04, 0x03, 0x0D, 0x18, 0x0F, // 16-bit UUID list: one UUID + a stray byte
+        ]);
+        assert_eq!(r.malformed, vec![0xFF, 0x16, 0x19, 0x03]);
+        assert!(r.manufacturer_data.is_empty());
+        assert!(r.service_data.is_empty());
+        assert_eq!(r.appearance, None);
+        // The one whole UUID before the stray byte is still surfaced.
+        assert_eq!(r.service_uuids, vec![Uuid::U16(0x180D)]);
+    }
+
+    #[test]
     fn hex_handoff_is_validated() {
         // Odd length and non-hex both yield an empty report, not a wrong one.
         assert_eq!(decode_hex("020106f"), AdvReport::default());
         assert_eq!(decode_hex("0201zz"), AdvReport::default());
         assert_eq!(decode_hex("020106").flags, Some(0x06));
+        // Uppercase and mixed-case hex decode identically (the JNI doc promises
+        // ScanRecord.getBytes() hex "as lowercase or uppercase").
+        let mixed = decode_hex("05FF4c00AAbb");
+        assert_eq!(decode_hex("05ff4c00aabb"), mixed);
+        assert_eq!(mixed.manufacturer_data[0].company_id, 0x004C);
+        assert_eq!(mixed.manufacturer_data[0].data, vec![0xAA, 0xBB]);
     }
 
     #[test]

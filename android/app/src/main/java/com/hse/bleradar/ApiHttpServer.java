@@ -366,8 +366,9 @@ public final class ApiHttpServer {
             json.name("rssi_dbm").value(device.lastRssiDbm);
             json.name("proximity").value(proximityLabel(device.proximity));
             json.name("trackability").value(trackabilityLabel(device.trackability));
-            json.name("company_id").value(device.companyId);
-            json.name("beacon").value(device.beacon);
+            Blip.AdvSummary advertisement = device.advertisement;
+            json.name("company_id").value(advertisement == null ? null : advertisement.companyId);
+            json.name("beacon").value(advertisement == null ? null : advertisement.beacon);
             json.name("trend").value(trendLabel(device.trend));
             json.name("freshness").value(freshnessLabel(device.freshness));
             json.name("confidence_percent").value(device.confidencePercent);

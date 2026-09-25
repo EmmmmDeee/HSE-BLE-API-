@@ -40,17 +40,30 @@ final class Blip {
      */
     volatile int trackability = NativeRadar.TRACKABILITY_UNKNOWN;
     /**
-     * First manufacturer company identifier in the device's advertising payload
-     * (four lowercase hex digits), or {@code null} — decoded by the Rust core.
+     * The advertisement summary decoded by the Rust core, or {@code null} until
+     * a payload has been decoded. Published as one immutable object so a reader
+     * (the API/UI thread) never sees the company identifier from one
+     * advertisement paired with the beacon kind from another.
      */
-    volatile String companyId;
-    /** Recognised beacon kind (e.g. {@code "iBeacon"}), or {@code null} — decoded by the Rust core. */
-    volatile String beacon;
+    volatile AdvSummary advertisement;
     /**
-     * The hex advertising payload the two fields above were decoded from, so an
+     * The hex advertising payload {@link #advertisement} was decoded from, so an
      * unchanged advertisement is not re-decoded on every scan result.
      */
     volatile String lastAdvertisementHex;
+
+    /** The two advertisement summaries the Rust decoder produces, published together. */
+    static final class AdvSummary {
+        /** First manufacturer company identifier (four lowercase hex digits), or {@code null}. */
+        final String companyId;
+        /** Recognised beacon kind (e.g. {@code "iBeacon"}), or {@code null}. */
+        final String beacon;
+
+        AdvSummary(String companyId, String beacon) {
+            this.companyId = companyId;
+            this.beacon = beacon;
+        }
+    }
     volatile long lastSeenUptimeMillis;
     /**
      * Most recently observed device-advertised TX power in dBm, or

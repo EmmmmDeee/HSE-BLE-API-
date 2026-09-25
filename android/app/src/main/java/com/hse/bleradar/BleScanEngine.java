@@ -247,8 +247,9 @@ final class BleScanEngine implements SnapshotSource {
         if (NativeRadar.isAvailable() && advertisement != null) {
             String advertisementHex = hex(advertisement);
             if (!advertisementHex.equals(blip.lastAdvertisementHex)) {
-                blip.companyId = NativeRadar.advertisementCompanyId(advertisementHex);
-                blip.beacon = NativeRadar.advertisementBeacon(advertisementHex);
+                blip.advertisement = new Blip.AdvSummary(
+                        NativeRadar.advertisementCompanyId(advertisementHex),
+                        NativeRadar.advertisementBeacon(advertisementHex));
                 blip.lastAdvertisementHex = advertisementHex;
             }
         }
@@ -352,13 +353,6 @@ final class BleScanEngine implements SnapshotSource {
         pruneStale(now);
     }
 
-    /**
-     * The device's advertised/calibrated TX power in dBm, or {@link Double#NaN}
-     * when the platform did not report one (including the
-     * {@code ScanResult.TX_POWER_NOT_PRESENT} sentinel). {@link NativeRadar}
-     * independently validates plausibility before using this as a per-device
-     * calibration override, so no range filtering happens here.
-     */
     private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();
 
     /** Lowercase hex of {@code bytes}: the form the Rust advertisement decoder takes across JNI. */
@@ -372,6 +366,13 @@ final class BleScanEngine implements SnapshotSource {
         return new String(out);
     }
 
+    /**
+     * The device's advertised/calibrated TX power in dBm, or {@link Double#NaN}
+     * when the platform did not report one (including the
+     * {@code ScanResult.TX_POWER_NOT_PRESENT} sentinel). {@link NativeRadar}
+     * independently validates plausibility before using this as a per-device
+     * calibration override, so no range filtering happens here.
+     */
     private static double readTxPowerDbm(ScanResult result) {
         int txPower = result.getTxPower();
         return txPower == ScanResult.TX_POWER_NOT_PRESENT ? Double.NaN : txPower;

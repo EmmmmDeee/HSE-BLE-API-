@@ -66,6 +66,7 @@ struct Reference {
     service_data: Vec<(String, Vec<u8>)>,
     manufacturer_data: Vec<(u16, Vec<u8>)>,
     unknown_types: Vec<u8>,
+    malformed: Vec<u8>,
     truncated: bool,
 }
 
@@ -89,7 +90,9 @@ fn reference(data: &[u8], honour_terminator: bool) -> Reference {
         };
         let ad_type = structure[0];
         let p = &structure[1..];
-        let uuid_list = |width: usize, out: &mut Vec<String>| {
+        // Returns true when every byte formed a whole UUID (a positive
+        // multiple of the width), matching the decoder's `push_uuids*`.
+        let uuid_list = |width: usize, out: &mut Vec<String>| -> bool {
             let mut k = 0;
             while k + width <= p.len() {
                 let mut chunk: Vec<u8> = p[k..k + width].to_vec();
@@ -100,26 +103,39 @@ fn reference(data: &[u8], honour_terminator: bool) -> Reference {
                 }
                 k += width;
             }
+            !p.is_empty() && p.len() % width == 0
         };
         match ad_type {
-            0x01 => {
-                if let Some(&b) = p.first() {
-                    r.flags = Some(b);
+            0x01 => match p.first() {
+                Some(&b) => r.flags = Some(b),
+                None => r.malformed.push(ad_type),
+            },
+            0x02 | 0x03 => {
+                if !uuid_list(2, &mut r.service_uuids) {
+                    r.malformed.push(ad_type);
                 }
             }
-            0x02 | 0x03 => uuid_list(2, &mut r.service_uuids),
-            0x04 | 0x05 => uuid_list(4, &mut r.service_uuids),
-            0x06 | 0x07 => uuid_list(16, &mut r.service_uuids),
+            0x04 | 0x05 => {
+                if !uuid_list(4, &mut r.service_uuids) {
+                    r.malformed.push(ad_type);
+                }
+            }
+            0x06 | 0x07 => {
+                if !uuid_list(16, &mut r.service_uuids) {
+                    r.malformed.push(ad_type);
+                }
+            }
             0x08 => r.shortened_local_name = Some(String::from_utf8_lossy(p).into_owned()),
             0x09 => r.complete_local_name = Some(String::from_utf8_lossy(p).into_owned()),
-            0x0A => {
-                if let Some(&b) = p.first() {
-                    r.tx_power_level = Some(i8::from_ne_bytes([b]));
-                }
-            }
+            0x0A => match p.first() {
+                Some(&b) => r.tx_power_level = Some(i8::from_ne_bytes([b])),
+                None => r.malformed.push(ad_type),
+            },
             0x19 => {
                 if p.len() >= 2 {
                     r.appearance = Some(u16::from(p[0]) | (u16::from(p[1]) << 8));
+                } else {
+                    r.malformed.push(ad_type);
                 }
             }
             0x16 | 0x20 | 0x21 => {
@@ -132,12 +148,16 @@ fn reference(data: &[u8], honour_terminator: bool) -> Reference {
                     let mut id: Vec<u8> = p[..width].to_vec();
                     id.reverse();
                     r.service_data.push((canon(&id), p[width..].to_vec()));
+                } else {
+                    r.malformed.push(ad_type);
                 }
             }
             0xFF => {
                 if p.len() >= 2 {
                     let company = u16::from(p[0]) | (u16::from(p[1]) << 8);
                     r.manufacturer_data.push((company, p[2..].to_vec()));
+                } else {
+                    r.malformed.push(ad_type);
                 }
             }
             other => r.unknown_types.push(other),
@@ -188,27 +208,74 @@ fn project(report: &AdvReport) -> Reference {
             .map(|m| (m.company_id, m.data.clone()))
             .collect(),
         unknown_types: report.unknown_types.clone(),
+        malformed: report.malformed.clone(),
         truncated: report.truncated,
     }
 }
 
 /// The beacon a report carries must be backed by the structure its shape
-/// requires; returns a description of the violation, if any.
+/// requires AND re-derive to the same kind and field values from that structure
+/// by an independent computation. Returns a description of the violation.
 fn beacon_backed(report: &AdvReport) -> Result<(), String> {
-    match &report.beacon {
-        None => Ok(()),
-        Some(Beacon::IBeacon { .. }) => report
-            .manufacturer_data
-            .iter()
-            .any(|m| m.company_id == 0x004C && m.data.len() >= 23 && m.data[..2] == [0x02, 0x15])
-            .then_some(())
-            .ok_or_else(|| "iBeacon without a qualifying Apple manufacturer block".to_string()),
-        Some(_) => report
-            .service_data
-            .iter()
-            .any(|s| s.uuid == Uuid::U16(0xFEAA))
-            .then_some(())
-            .ok_or_else(|| "Eddystone beacon without 0xFEAA service data".to_string()),
+    let Some(beacon) = &report.beacon else {
+        return Ok(());
+    };
+    match beacon {
+        Beacon::IBeacon {
+            uuid,
+            major,
+            minor,
+            tx_power,
+        } => {
+            let m = report
+                .manufacturer_data
+                .iter()
+                .find(|m| {
+                    m.company_id == 0x004C && m.data.len() >= 23 && m.data[..2] == [0x02, 0x15]
+                })
+                .ok_or("iBeacon without a qualifying Apple manufacturer block")?;
+            // An iBeacon proximity UUID is big-endian in the payload (unlike the
+            // little-endian service-UUID lists), so it is rendered as-is.
+            let want_uuid = canon(&m.data[2..18]);
+            let want_major = u16::from(m.data[18]) << 8 | u16::from(m.data[19]);
+            let want_minor = u16::from(m.data[20]) << 8 | u16::from(m.data[21]);
+            let want_power = m.data[22] as i8;
+            if (uuid, *major, *minor, *tx_power) != (&want_uuid, want_major, want_minor, want_power)
+            {
+                return Err(format!(
+                    "iBeacon fields diverge: {uuid} {major} {minor} {tx_power} vs {want_uuid} {want_major} {want_minor} {want_power}"
+                ));
+            }
+            Ok(())
+        }
+        eddystone => {
+            let s = report
+                .service_data
+                .iter()
+                .find(|s| s.uuid == Uuid::U16(0xFEAA))
+                .ok_or("Eddystone beacon without 0xFEAA service data")?;
+            let frame = *s.data.first().unwrap_or(&0xFF);
+            let want_kind = match frame {
+                0x00 => "Eddystone-UID",
+                0x10 => "Eddystone-URL",
+                0x20 => "Eddystone-TLM",
+                _ => "?",
+            };
+            if eddystone.label() != want_kind {
+                return Err(format!(
+                    "Eddystone kind {} does not match frame byte {frame:#04x} ({want_kind})",
+                    eddystone.label()
+                ));
+            }
+            // A TLM must be unencrypted (version 0) to be decoded at all.
+            if frame == 0x20 && s.data.get(1) != Some(&0x00) {
+                return Err(format!(
+                    "a non-plaintext TLM (version {:?}) was decoded",
+                    s.data.get(1)
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -267,16 +334,34 @@ fn ibeacon() -> Vec<u8> {
     v
 }
 
-fn eddystone_url() -> Vec<u8> {
-    let frame = [0x10u8, 0xEE, 0x03, b'h', b's', b'e', 0x00];
+fn eddystone(frame: &[u8]) -> Vec<u8> {
     let mut v = vec![
         u8::try_from(frame.len() + 3).expect("small"),
         0x16,
         0xAA,
         0xFE,
     ];
-    v.extend_from_slice(&frame);
+    v.extend_from_slice(frame);
     v
+}
+
+fn eddystone_url() -> Vec<u8> {
+    eddystone(&[0x10, 0xEE, 0x03, b'h', b's', b'e', 0x00])
+}
+
+fn eddystone_uid() -> Vec<u8> {
+    let mut frame = vec![0x00u8, 0xEE];
+    frame.extend(0u8..16); // 10-byte namespace + 6-byte instance
+    eddystone(&frame)
+}
+
+fn eddystone_tlm() -> Vec<u8> {
+    let mut frame = vec![0x20u8, 0x00];
+    frame.extend_from_slice(&3300u16.to_be_bytes());
+    frame.extend_from_slice(&0x1980i16.to_be_bytes());
+    frame.extend_from_slice(&7u32.to_be_bytes());
+    frame.extend_from_slice(&9u32.to_be_bytes());
+    eddystone(&frame)
 }
 
 fn mutate(rng: &mut Rng, mut v: Vec<u8>) -> Vec<u8> {
@@ -318,10 +403,11 @@ fn decoder_matches_the_reference_and_never_panics() {
             }
             1 => structured(&mut rng),
             _ => {
-                let base = if rng.below(2) == 0 {
-                    ibeacon()
-                } else {
-                    eddystone_url()
+                let base = match rng.below(4) {
+                    0 => ibeacon(),
+                    1 => eddystone_url(),
+                    2 => eddystone_uid(),
+                    _ => eddystone_tlm(),
                 };
                 mutate(&mut rng, base)
             }

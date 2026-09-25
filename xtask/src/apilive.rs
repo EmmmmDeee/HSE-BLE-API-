@@ -233,10 +233,12 @@ public final class ApiSmoke {
         // Rust bleradar_core::address_trackability), the same call the live
         // BleScanEngine makes.
         blip.trackability = NativeRadar.deviceAddressTrackability(address);
-        // The same two natives BleScanEngine calls on a live ScanRecord.
+        // The same two natives BleScanEngine calls on a live ScanRecord,
+        // published as one object exactly as the engine does.
         if (advertisementHex != null) {
-            blip.companyId = NativeRadar.advertisementCompanyId(advertisementHex);
-            blip.beacon = NativeRadar.advertisementBeacon(advertisementHex);
+            blip.advertisement = new Blip.AdvSummary(
+                    NativeRadar.advertisementCompanyId(advertisementHex),
+                    NativeRadar.advertisementBeacon(advertisementHex));
         }
         blip.trend = trend;
         blip.freshness = freshness;
