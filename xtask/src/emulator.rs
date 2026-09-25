@@ -115,8 +115,15 @@ const HCI_PORT: u16 = 6402;
 /// Command Complete by then went to a wrong port or a dead daemon.
 const HCI_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the upgrade pathway may take from the launch to the installer
-/// hand-off (the fetch, the decision, the download, the verification).
-const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
+/// hand-off (the fetch, the decision, the download, the verification). Generous
+/// because the download runs through Android's `DownloadManager`, whose
+/// scheduling can stall for a minute or more on a contended CI runner even
+/// though the transfer itself is a few hundred KB over the loopback proxy (seen
+/// once: an enqueued download that had not progressed within 120 s on a runner
+/// that also booted slowly and logged graphics errors). The window only bounds
+/// how long to wait; it never weakens what the proof then requires — a completed
+/// download, a size + SHA-256 verification, and the installer hand-off.
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long the package installer may take once its button is tapped.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the installer may take to show its confirmation.
