@@ -89,6 +89,7 @@ fn main() -> ExitCode {
         "verify-android-live" => cmd_verify_android_live(),
         "check-app-version" => cmd_check_app_version(),
         "release-manifest" => cmd_release_manifest(&rest),
+        "release-plan" => cmd_release_plan(&rest),
         "oracle-differential" => cmd_oracle_differential(),
         "verify-jni-target" => cmd_verify_jni_target(),
         "prepare-bionic-sysroot" => cmd_prepare_bionic_sysroot(&rest),
@@ -140,6 +141,7 @@ fn print_usage() {
          \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
          \x20 check-app-version          fail unless the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME and no artifact of another version remains\n\
          \x20 release-manifest [--url <artifact url>] [--out <path>]  print (or write) the release manifest for the committed APK: its version, exact size and SHA-256\n\
+         \x20 release-plan               print the authoritative release identity (tag, apk, manifest, version) as key=value lines for the release workflow, after checking the committed APK exists and no stale artifact remains\n\
          \x20 oracle-differential        execute the immutable oracle under qemu-aarch64 and check the committed executed-oracle vectors (see docs/ORACLE_DIFFERENTIAL.md)\n\
          \x20 verify-jni-target          run the bleradar-jni test suite cross-compiled for aarch64-linux-android under qemu-aarch64 against a Bionic runtime\n\
          \x20 prepare-bionic-sysroot <dir>  extract the Bionic runtime (linker64 + libc/libm/libdl/libc++) from the installed android-24 arm64 system image into <dir>, for BIONIC_SYSROOT\n\
@@ -3141,6 +3143,59 @@ fn release_manifest_text_for(
     )
 }
 
+/// The filename the release manifest is published under, both as the bundled
+/// asset (`assets/release_manifest.txt`) and as the release asset the app
+/// fetches from `releases/latest/download/`. One name, one authority.
+const RELEASE_MANIFEST_FILENAME: &str = "release_manifest.txt";
+
+/// The authoritative release identity for a version name: the git tag, the
+/// committed APK filename, and the manifest asset filename. Pure, so the
+/// release workflow and its regression test read the same values the build
+/// and the self-update URL are derived from.
+fn release_plan_lines(version_name: &str, version_code: u32) -> String {
+    format!(
+        "tag=v{version_name}\napk={}\nmanifest={RELEASE_MANIFEST_FILENAME}\nversion_name={version_name}\nversion_code={version_code}\napk_url={}\n",
+        apk_output_name_for(version_name),
+        release_artifact_url_for(version_name),
+    )
+}
+
+/// `cargo xtask release-plan`: emit the release identity (tag, committed APK,
+/// manifest filename, version, artifact URL) as `key=value` lines the release
+/// workflow appends to `$GITHUB_OUTPUT`. Fails first if the committed APK the
+/// release would publish is missing or an artifact of another version is still
+/// committed beside it, so the workflow never publishes an incoherent release.
+fn cmd_release_plan(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err(format!(
+            "usage: cargo xtask release-plan (unexpected argument {})",
+            args[0]
+        ));
+    }
+    let root = repo_root()?;
+    let apk = root.join(apk_output_name());
+    if !apk.is_file() {
+        return Err(format!(
+            "the committed APK for version {APP_VERSION_NAME} is missing: {} (run build-apk after a version bump and commit its output)",
+            apk.display()
+        ));
+    }
+    let names = fs::read_dir(&root)
+        .map_err(|e| format!("listing {}: {e}", root.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned());
+    let stale = stale_artifacts(names);
+    if !stale.is_empty() {
+        return Err(format!(
+            "artifacts of another version are still committed beside {}: {} (one artifact is published; `git rm` the others)",
+            apk_output_name(),
+            stale.join(", ")
+        ));
+    }
+    print!("{}", release_plan_lines(APP_VERSION_NAME, APP_VERSION_CODE));
+    Ok(())
+}
+
 /// Reads the version `aapt2 dump badging` sees in the built package and
 /// requires the constants: the build is the one place a stamped version
 /// could drift from the authority.
@@ -4693,6 +4748,41 @@ mod tests {
             ]
         );
         assert!(stale_artifacts(std::iter::once(apk_output_name())).is_empty());
+
+        // The release plan the workflow consumes is the same identity the
+        // build and the self-update URL are derived from: the tag is the
+        // versioned tag the artifact URL is published under, the apk line is
+        // the committed artifact, the manifest asset is the one the app
+        // fetches from releases/latest/download, and the versions are the
+        // constants.
+        let plan = release_plan_lines(APP_VERSION_NAME, APP_VERSION_CODE);
+        assert!(
+            plan.contains(&format!("tag=v{APP_VERSION_NAME}\n")),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("apk={}\n", apk_output_name())),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("manifest={RELEASE_MANIFEST_FILENAME}\n")),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("version_name={APP_VERSION_NAME}\n")),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("version_code={APP_VERSION_CODE}\n")),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("apk_url={}\n", release_artifact_url())),
+            "{plan}"
+        );
+        // The bundled asset the app ships and the release asset the app fetches
+        // are the same filename, so the update loop's two ends never drift.
+        assert!(BUNDLED_RELEASE_MANIFEST_PATH.ends_with(RELEASE_MANIFEST_FILENAME));
 
         // The successor's bundled manifest: the committed asset describing
         // the successor, every other line untouched; what the core refuses

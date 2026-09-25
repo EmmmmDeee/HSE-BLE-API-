@@ -577,8 +577,18 @@ cargo xtask verify-android-live            # the built version read back; the pa
 git add HSE-BLE-Radar-arm64-v<version name>.apk
 git tag v<version name>                    # the tag `release-manifest`'s default URL assumes
 cargo xtask release-manifest --out release_manifest.txt   # the APK's exact size and SHA-256
-# 2. create the GitHub release for the tag with both files attached, unmodified
+# 2. merge to main — the `release` workflow publishes the GitHub release itself
 ```
+
+Publishing is automated: once the change is on `main` and `gates` passes, the
+`release` workflow (`.github/workflows/release.yml`) reads the identity with
+`cargo xtask release-plan`, regenerates the manifest, and creates or refreshes
+the `v<version name>` release — marked latest — with the committed APK and
+manifest attached, so a user only ever downloads and installs the APK. It
+re-publishes the exact committed bytes (no rebuild, no re-sign), so no signing
+key or other secret is needed; only the default `GITHUB_TOKEN`. A one-off or
+back-fill publish can be triggered manually from the Actions tab
+(`workflow_dispatch`).
 
 `release-manifest` refuses a non-`https` URL, and `verify-api-live` serves
 the manifest it generates to the real core as the accepted-manifest scenario,

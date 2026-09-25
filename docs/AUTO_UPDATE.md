@@ -222,6 +222,21 @@ decision — the download, the verification, the installer, the install —
 against a stand-in release host on every pull request ("Verifying it"
 below). The steps are listed under "Releasing" in the README.
 
+Publishing is automated so a user only ever installs the APK. The `release`
+workflow (`.github/workflows/release.yml`) runs after `gates` succeeds on
+`main`: it reads the authoritative identity with `cargo xtask release-plan`
+(tag `v<version>`, the committed APK's name, the manifest filename — the same
+values the build and the artifact URL derive from), generates
+`release_manifest.txt` with `cargo xtask release-manifest`, and creates or
+refreshes the `v<version>` GitHub release — marked latest — carrying the
+committed APK and that manifest. It re-publishes the exact committed bytes
+(no rebuild, no re-sign), so no signing key or other secret is required or
+embedded; only the default `GITHUB_TOKEN` creates the release. Because the
+release is marked latest, `releases/latest/download/release_manifest.txt`
+resolves to the manifest of the shipped build, so the in-app check concludes
+"up to date" against a real artifact instead of the `404` a repository
+without releases returns.
+
 ## Verifying it
 
 * `cargo test -p bleradar-core --test update` — 39 unit/invariant tests over every
