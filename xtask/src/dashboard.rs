@@ -76,10 +76,10 @@ const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// the JSON and rendered as text, never as markup.
 pub const DEVICES_JSON: &str = concat!(
     r#"{"devices":["#,
-    r#"{"address":"3C:5A:B4:11:22:01","name":"Tag Alpha","distance_m":1.234,"distance_lower_m":0.8,"distance_upper_m":1.9,"rssi_dbm":-61.4,"proximity":"NEAR","trackability":"TRACKABLE","company_id":"004c","manufacturer":"Apple","beacon":"iBeacon","identity_key":"3c:5a:b4:11:22:01","trend":"STRONGER","freshness":"LIVE","confidence_percent":87,"last_seen_ago_ms":420},"#,
-    r#"{"address":"AA:BB:CC:DD:EE:02","name":"<b>evil</b> \"Ünïcødé\" \\ 😀","distance_m":7.5,"distance_lower_m":5.2,"distance_upper_m":11.0,"rssi_dbm":-78.0,"proximity":"MID","trackability":"RANDOMIZED","company_id":null,"manufacturer":null,"beacon":"Eddystone-URL","identity_key":"p[s:feaa/7]|s[feaa]","trend":"WEAKER","freshness":"RECENT","confidence_percent":52,"last_seen_ago_ms":12345},"#,
-    r#"{"address":"AA:BB:CC:DD:EE","name":null,"distance_m":null,"distance_lower_m":null,"distance_upper_m":null,"rssi_dbm":-90.2,"proximity":"FAR","trackability":"UNKNOWN","company_id":null,"manufacturer":null,"beacon":null,"identity_key":null,"trend":"UNKNOWN","freshness":"STALE","confidence_percent":0,"last_seen_ago_ms":75000},"#,
-    r#"{"address":"AA:BB:CC:DD:EE:04","name":"Beacon Delta","distance_m":0.4,"distance_lower_m":0.3,"distance_upper_m":0.6,"rssi_dbm":-45.0,"proximity":"IMMEDIATE","trackability":"RANDOMIZED","company_id":"0006","manufacturer":"Microsoft","beacon":null,"identity_key":"p[m:0006/2/0102]","trend":"STABLE","freshness":"LIVE","confidence_percent":99,"last_seen_ago_ms":90}"#,
+    r#"{"address":"3C:5A:B4:11:22:01","name":"Tag Alpha","distance_m":1.234,"distance_lower_m":0.8,"distance_upper_m":1.9,"rssi_dbm":-61.4,"proximity":"NEAR","trackability":"TRACKABLE","company_id":"004c","manufacturer":"Apple","beacon":"iBeacon","services":null,"identity_key":"3c:5a:b4:11:22:01","trend":"STRONGER","freshness":"LIVE","confidence_percent":87,"last_seen_ago_ms":420},"#,
+    r#"{"address":"AA:BB:CC:DD:EE:02","name":"<b>evil</b> \"Ünïcødé\" \\ 😀","distance_m":7.5,"distance_lower_m":5.2,"distance_upper_m":11.0,"rssi_dbm":-78.0,"proximity":"MID","trackability":"RANDOMIZED","company_id":null,"manufacturer":null,"beacon":"Eddystone-URL","services":"Eddystone","identity_key":"p[s:feaa/7]|s[feaa]","trend":"WEAKER","freshness":"RECENT","confidence_percent":52,"last_seen_ago_ms":12345},"#,
+    r#"{"address":"AA:BB:CC:DD:EE","name":null,"distance_m":null,"distance_lower_m":null,"distance_upper_m":null,"rssi_dbm":-90.2,"proximity":"FAR","trackability":"UNKNOWN","company_id":null,"manufacturer":null,"beacon":null,"services":null,"identity_key":null,"trend":"UNKNOWN","freshness":"STALE","confidence_percent":0,"last_seen_ago_ms":75000},"#,
+    r#"{"address":"AA:BB:CC:DD:EE:04","name":"Beacon Delta","distance_m":0.4,"distance_lower_m":0.3,"distance_upper_m":0.6,"rssi_dbm":-45.0,"proximity":"IMMEDIATE","trackability":"RANDOMIZED","company_id":"0006","manufacturer":"Microsoft","beacon":null,"services":null,"identity_key":"p[m:0006/2/0102]","trend":"STABLE","freshness":"LIVE","confidence_percent":99,"last_seen_ago_ms":90}"#,
     r#"],"scanning":true,"native_available":true,"timestamp_ms":1757700000000}"#,
 );
 /// `/api/status` as `ApiHttpServer.statusJson` writes it (uptime 1:02:03).
@@ -635,7 +635,8 @@ pub const HEALTHY_MARKERS: &[&str] = &[
     r#"data-beacon="iBeacon""#,
     r#"data-beacon="Eddystone-URL""#,
     r#"class="adv">Apple · iBeacon<"#,
-    r#"class="adv">Eddystone-URL<"#,
+    r#"class="adv">Eddystone-URL · Eddystone<"#,
+    r#"data-services="Eddystone""#,
     r#"class="adv">Microsoft<"#,
     // Cross-rotation identity grouping keys (Rust group_key): a public device
     // keyed by its address, a randomized one by its advertisement's shape.
@@ -1419,7 +1420,7 @@ mod tests {
     #[test]
     fn json_contract_locks_the_java_writer_the_fixture_and_the_page_together() {
         let counts = check_json_contract(API_HTTP_SERVER_JAVA, DASHBOARD_HTML).unwrap();
-        assert_eq!(counts.get("/api/devices"), Some(&20));
+        assert_eq!(counts.get("/api/devices"), Some(&21));
         assert_eq!(counts.get("/api/status"), Some(&4));
         assert_eq!(counts.get("/api/updates"), Some(&3));
         assert_eq!(counts.get("/api/scan/*"), Some(&1));

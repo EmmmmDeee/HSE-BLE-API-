@@ -60,6 +60,8 @@ final class Blip {
         final String beacon;
         /** Manufacturer (Bluetooth SIG assignee) name, or {@code null} when unknown. */
         final String manufacturer;
+        /** Comma-separated well-known service names (e.g. {@code "Heart Rate, Battery"}), or {@code null}. */
+        final String services;
         /**
          * Stable cross-rotation grouping key, or {@code null} when the device
          * cannot be grouped — the Rust {@code group_key}. Two blips with the same
@@ -67,10 +69,11 @@ final class Blip {
          */
         final String identityKey;
 
-        AdvSummary(String companyId, String beacon, String manufacturer, String identityKey) {
+        AdvSummary(String companyId, String beacon, String manufacturer, String services, String identityKey) {
             this.companyId = companyId;
             this.beacon = beacon;
             this.manufacturer = manufacturer;
+            this.services = services;
             this.identityKey = identityKey;
         }
     }

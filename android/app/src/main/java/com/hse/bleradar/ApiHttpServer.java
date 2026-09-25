@@ -54,7 +54,8 @@ import java.util.logging.Logger;
  *       digits, {@code null} when absent), {@code manufacturer} (its Bluetooth
  *       SIG assignee name, {@code null} when the id is unknown), {@code beacon}
  *       ({@code iBeacon|Eddystone-UID|Eddystone-URL|Eddystone-TLM}, {@code null}
- *       when not a beacon), {@code identity_key} (the stable cross-rotation
+ *       when not a beacon), {@code services} (comma-separated well-known
+ *       service names, {@code null} when none), {@code identity_key} (the stable cross-rotation
  *       grouping key, {@code null} when the device cannot be grouped),
  *       {@code trend}
  *       ({@code STRONGER|WEAKER|STABLE|UNKNOWN}), {@code freshness}
@@ -373,6 +374,7 @@ public final class ApiHttpServer {
             json.name("company_id").value(advertisement == null ? null : advertisement.companyId);
             json.name("manufacturer").value(advertisement == null ? null : advertisement.manufacturer);
             json.name("beacon").value(advertisement == null ? null : advertisement.beacon);
+            json.name("services").value(advertisement == null ? null : advertisement.services);
             json.name("identity_key").value(advertisement == null ? null : advertisement.identityKey);
             json.name("trend").value(trendLabel(device.trend));
             json.name("freshness").value(freshnessLabel(device.freshness));

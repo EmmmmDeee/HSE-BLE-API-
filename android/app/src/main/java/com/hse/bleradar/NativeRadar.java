@@ -116,7 +116,7 @@ public final class NativeRadar {
     public static final int TRACKABILITY_UNKNOWN = 2;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 15;
+    public static final int EXPECTED_ABI_VERSION = 16;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -544,4 +544,12 @@ public final class NativeRadar {
      * subset of the public Bluetooth SIG Assigned Numbers.
      */
     public static native String advertisementManufacturerName(String advertisementHex);
+
+    /**
+     * The names of the advertisement's well-known Bluetooth SIG services
+     * (hex payload), comma-separated (for example {@code "Heart Rate, Battery"}),
+     * or {@code null} when none are named — the raw service UUIDs remain in the
+     * decoded advertisement. Owned by {@code bleradar_core::adv::service_uuid_name}.
+     */
+    public static native String advertisementServices(String advertisementHex);
 }

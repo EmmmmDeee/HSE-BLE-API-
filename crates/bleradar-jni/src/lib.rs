@@ -153,6 +153,22 @@ pub fn advertisement_manufacturer_name(advertisement_hex: &str) -> Option<String
 }
 
 /// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_advertisementServices`]: the names of the
+/// advertisement's well-known Bluetooth SIG services, comma-separated (for
+/// example `"Heart Rate, Battery"`), or `None` when none are named. Owned by
+/// [`bleradar_core::adv::summary_service_names`]; the raw UUIDs stay available.
+#[must_use]
+pub fn advertisement_services(advertisement_hex: &str) -> Option<String> {
+    let report = bleradar_core::adv::decode_hex(advertisement_hex);
+    let names = bleradar_core::adv::summary_service_names(&report);
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
+}
+
+/// Pure, unit-testable core of
 /// [`Java_com_hse_bleradar_NativeRadar_advertisementBeacon`]: the recognised
 /// beacon kind (`iBeacon`, `Eddystone-UID`, `Eddystone-URL`, `Eddystone-TLM`)
 /// in a hex-encoded BLE advertising payload, or `None` — a frame that does not
@@ -1423,6 +1439,18 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementManufactur
     string_export(env, advertisement_hex, advertisement_manufacturer_name)
 }
 
+/// `NativeRadar.advertisementServices(String): String` — see
+/// [`advertisement_services`]. Reads `env` only through [`env`](mod@env); a null
+/// payload, a malformed hand-off, or no named service answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementServices(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    advertisement_hex: JStringRef,
+) -> JStringRef {
+    string_export(env, advertisement_hex, advertisement_services)
+}
+
 /// `NativeRadar.deviceGroupKey(String, String): String` — see
 /// [`device_group_key`]. Reads `env` only through [`env`](mod@env); a null or
 /// malformed MAC, or a device that cannot be grouped, answers null.
@@ -1460,11 +1488,12 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
 /// advertisement decoder surface (`advertisementCompanyId`,
 /// `advertisementBeacon`) was added, and to `14` when the rotating-address
 /// identity grouping (`deviceGroupKey`) was added, and to `15` when the
-/// manufacturer-name lookup (`advertisementManufacturerName`) was added.
+/// manufacturer-name lookup (`advertisementManufacturerName`) was added, and to
+/// `16` when the service-name lookup (`advertisementServices`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    15
+    16
 }

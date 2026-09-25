@@ -254,15 +254,20 @@ footer a { color: var(--info); }
       var companyId = text(device.company_id, '');
       var manufacturer = text(device.manufacturer, '');
       var identityKey = text(device.identity_key, '');
+      var services = text(device.services, '');
       var advParts = [];
       if (manufacturer) { advParts.push(manufacturer); }
       if (beacon) { advParts.push(beacon); }
+      if (services) { advParts.push(services); }
       var advText = advParts.join(' · ') || (companyId ? 'mfr ' + companyId : '—');
       if (beacon) {
         tr.setAttribute('data-beacon', beacon);
       }
       if (identityKey) {
         tr.setAttribute('data-identity', identityKey);
+      }
+      if (services) {
+        tr.setAttribute('data-services', services);
       }
       cell(tr, String(i + 1), 'num');
       cell(tr, text(device.address, '—'), 'addr');

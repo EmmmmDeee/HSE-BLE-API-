@@ -240,6 +240,7 @@ public final class ApiSmoke {
                     NativeRadar.advertisementCompanyId(advertisementHex),
                     NativeRadar.advertisementBeacon(advertisementHex),
                     NativeRadar.advertisementManufacturerName(advertisementHex),
+                    NativeRadar.advertisementServices(advertisementHex),
                     NativeRadar.deviceGroupKey(address, advertisementHex));
         }
         blip.trend = trend;

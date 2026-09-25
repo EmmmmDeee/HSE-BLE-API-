@@ -1233,6 +1233,8 @@ fn exercise(
             || !row.contains("\"beacon\":null")
             // 0xFFFF is the SIG testing id: it has a raw company id but no name.
             || !row.contains("\"manufacturer\":null")
+            // The beacon advertises no service list.
+            || !row.contains("\"services\":null")
         {
             return Err(format!(
                 "the beacon's row does not carry the decoded advertisement ({BEACON_COMPANY_ID_JSON}, \"manufacturer\":null, \"beacon\":null) — the Rust advertisement decoder never reached it: {row}"

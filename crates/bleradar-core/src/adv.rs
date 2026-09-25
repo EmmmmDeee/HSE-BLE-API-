@@ -604,6 +604,78 @@ pub fn summary_manufacturer_name(report: &AdvReport) -> Option<&'static str> {
         .and_then(|m| company_name(m.company_id))
 }
 
+/// The name of a well-known 16-bit Bluetooth SIG service (GATT service or member
+/// service) UUID, or `None` — the caller then shows the raw hex. A curated,
+/// versioned ([`SERVICE_TABLE_VERSION`]) subset of the public SIG Assigned
+/// Numbers: the GATT services a scan actually meets, plus a few widely-seen
+/// member-service UUIDs. 32/128-bit UUIDs are vendor-specific and unnamed here.
+/// Sorted by id for a binary-search lookup that a test keeps strictly ascending.
+#[must_use]
+pub fn service_uuid_name(uuid: &Uuid) -> Option<&'static str> {
+    let Uuid::U16(id) = uuid else {
+        return None;
+    };
+    // (id, name), ascending by id — keep sorted; a test asserts the ordering.
+    const SERVICES: &[(u16, &str)] = &[
+        (0x1800, "Generic Access"),
+        (0x1801, "Generic Attribute"),
+        (0x1802, "Immediate Alert"),
+        (0x1803, "Link Loss"),
+        (0x1804, "Tx Power"),
+        (0x1805, "Current Time"),
+        (0x1808, "Glucose"),
+        (0x1809, "Health Thermometer"),
+        (0x180A, "Device Information"),
+        (0x180D, "Heart Rate"),
+        (0x180F, "Battery"),
+        (0x1810, "Blood Pressure"),
+        (0x1811, "Alert Notification"),
+        (0x1812, "Human Interface Device"),
+        (0x1813, "Scan Parameters"),
+        (0x1814, "Running Speed and Cadence"),
+        (0x1816, "Cycling Speed and Cadence"),
+        (0x1818, "Cycling Power"),
+        (0x1819, "Location and Navigation"),
+        (0x181A, "Environmental Sensing"),
+        (0x181B, "Body Composition"),
+        (0x181D, "Weight Scale"),
+        (0x181F, "Continuous Glucose Monitoring"),
+        (0x1826, "Fitness Machine"),
+        (0x1827, "Mesh Provisioning"),
+        (0x1828, "Mesh Proxy"),
+        (0x183A, "Insulin Delivery"),
+        (0xFE9F, "Google"),
+        (0xFEAA, "Eddystone"),
+        (0xFEED, "Tile"),
+        (0xFEF3, "Google"),
+        (0xFD5A, "Samsung Electronics"),
+        (0xFD6F, "Exposure Notification"),
+    ];
+    SERVICES
+        .binary_search_by_key(id, |&(id, _)| id)
+        .ok()
+        .map(|i| SERVICES[i].1)
+}
+
+/// The version of the bundled service-UUID table, bumped when an entry changes.
+pub const SERVICE_TABLE_VERSION: u32 = 1;
+
+/// The names of the advertisement's well-known services, in the order the UUIDs
+/// appear, without duplicates — the live "what does this device do" summary. An
+/// unnamed UUID is skipped (the raw ids remain in [`AdvReport::service_uuids`]).
+#[must_use]
+pub fn summary_service_names(report: &AdvReport) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for uuid in &report.service_uuids {
+        if let Some(name) = service_uuid_name(uuid)
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,6 +1025,44 @@ mod tests {
         // An unknown id stays unknown (the caller shows the hex).
         assert_eq!(company_name(0xFFFF), None);
         assert_eq!(company_name(0xABCD), None);
+    }
+
+    #[test]
+    fn service_table_is_sorted_and_names_known_services() {
+        let mut prev = None;
+        for id in 0u16..=u16::MAX {
+            if let Some(name) = service_uuid_name(&Uuid::U16(id)) {
+                assert!(!name.is_empty());
+                if let Some(p) = prev {
+                    assert!(id > p, "service table not strictly ascending at {id:#06x}");
+                }
+                prev = Some(id);
+            }
+        }
+        assert_eq!(service_uuid_name(&Uuid::U16(0x180D)), Some("Heart Rate"));
+        assert_eq!(service_uuid_name(&Uuid::U16(0x180F)), Some("Battery"));
+        assert_eq!(service_uuid_name(&Uuid::U16(0xFEAA)), Some("Eddystone"));
+        assert_eq!(service_uuid_name(&Uuid::U16(0xABCD)), None);
+        // 32/128-bit UUIDs are not named here.
+        assert_eq!(service_uuid_name(&Uuid::U32(0x180D)), None);
+        assert_eq!(service_uuid_name(&Uuid::U128([0; 16])), None);
+    }
+
+    #[test]
+    fn service_names_summarise_named_services_and_dedup() {
+        // Complete 16-bit list: Heart Rate (180D), Battery (180F), plus an
+        // unnamed 0x1234 which is skipped; a duplicate 180D is not repeated.
+        let r = decode(&[
+            0x0B, 0x03, 0x0D, 0x18, 0x0F, 0x18, 0x34, 0x12, 0x0D, 0x18, 0xAA, 0xFE,
+        ]);
+        assert_eq!(
+            summary_service_names(&r),
+            vec!["Heart Rate", "Battery", "Eddystone"]
+        );
+        // The raw ids are still all present (including the unnamed one).
+        assert!(r.service_uuids.contains(&Uuid::U16(0x1234)));
+        // No services → empty.
+        assert!(summary_service_names(&decode(&[0x02, 0x01, 0x06])).is_empty());
     }
 
     #[test]

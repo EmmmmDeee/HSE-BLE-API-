@@ -1142,3 +1142,41 @@ fn advertisement_manufacturer_name_export_answers_through_the_string_bridge() {
     assert!(name_of(env, null, null).is_null());
     assert!(name_of(null, null, ibeacon).is_null());
 }
+
+/// An advertisement with a Heart Rate (0x180D) + Battery (0x180F) service list.
+const SERVICES_HEX: &str = "05030d180f18";
+
+#[test]
+fn advertisement_services_names_known_services() {
+    use bleradar_jni::advertisement_services;
+    assert_eq!(
+        advertisement_services(SERVICES_HEX).as_deref(),
+        Some("Heart Rate, Battery")
+    );
+    // The Eddystone frame carries a 0xFEAA service list → "Eddystone".
+    assert_eq!(
+        advertisement_services(EDDYSTONE_URL_HEX).as_deref(),
+        Some("Eddystone")
+    );
+    // No service list → None.
+    assert_eq!(advertisement_services(IBEACON_HEX), None);
+    assert_eq!(advertisement_services("020106"), None);
+    assert_eq!(advertisement_services(""), None);
+}
+
+#[test]
+fn advertisement_services_export_answers_through_the_string_bridge() {
+    use bleradar_jni::Java_com_hse_bleradar_NativeRadar_advertisementServices as services_of;
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let hex = mock.string(SERVICES_HEX);
+    assert_eq!(
+        mock.read(services_of(env, null, hex)).as_deref(),
+        Some("Heart Rate, Battery")
+    );
+    let none = mock.string(IBEACON_HEX);
+    assert!(services_of(env, null, none).is_null());
+    assert!(services_of(env, null, null).is_null());
+    assert!(services_of(null, null, hex).is_null());
+}
