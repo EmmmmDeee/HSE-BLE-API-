@@ -51,7 +51,8 @@ import java.util.logging.Logger;
  *       ({@code IMMEDIATE|NEAR|MID|FAR|UNKNOWN}), {@code trackability}
  *       ({@code TRACKABLE|RANDOMIZED|UNKNOWN}), {@code company_id} (the
  *       advertisement's first manufacturer company identifier as four hex
- *       digits, {@code null} when absent), {@code beacon}
+ *       digits, {@code null} when absent), {@code manufacturer} (its Bluetooth
+ *       SIG assignee name, {@code null} when the id is unknown), {@code beacon}
  *       ({@code iBeacon|Eddystone-UID|Eddystone-URL|Eddystone-TLM}, {@code null}
  *       when not a beacon), {@code identity_key} (the stable cross-rotation
  *       grouping key, {@code null} when the device cannot be grouped),
@@ -370,6 +371,7 @@ public final class ApiHttpServer {
             json.name("trackability").value(trackabilityLabel(device.trackability));
             Blip.AdvSummary advertisement = device.advertisement;
             json.name("company_id").value(advertisement == null ? null : advertisement.companyId);
+            json.name("manufacturer").value(advertisement == null ? null : advertisement.manufacturer);
             json.name("beacon").value(advertisement == null ? null : advertisement.beacon);
             json.name("identity_key").value(advertisement == null ? null : advertisement.identityKey);
             json.name("trend").value(trendLabel(device.trend));

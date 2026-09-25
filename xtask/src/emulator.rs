@@ -1222,9 +1222,13 @@ fn exercise(
         // ScanRecord.getBytes(), the JNI string bridge and bleradar_core::adv:
         // the manufacturer block must come back as its company identifier,
         // and a plain manufacturer block is not a beacon.
-        if !row.contains(BEACON_COMPANY_ID_JSON) || !row.contains("\"beacon\":null") {
+        if !row.contains(BEACON_COMPANY_ID_JSON)
+            || !row.contains("\"beacon\":null")
+            // 0xFFFF is the SIG testing id: it has a raw company id but no name.
+            || !row.contains("\"manufacturer\":null")
+        {
             return Err(format!(
-                "the beacon's row does not carry the decoded advertisement ({BEACON_COMPANY_ID_JSON}, \"beacon\":null) — the Rust advertisement decoder never reached it: {row}"
+                "the beacon's row does not carry the decoded advertisement ({BEACON_COMPANY_ID_JSON}, \"manufacturer\":null, \"beacon\":null) — the Rust advertisement decoder never reached it: {row}"
             ));
         }
         // The Rust identity engine ran on the runtime: a public address is

@@ -252,7 +252,12 @@ footer a { color: var(--info); }
       tr.setAttribute('data-trackability', trackability);
       var beacon = text(device.beacon, '');
       var companyId = text(device.company_id, '');
+      var manufacturer = text(device.manufacturer, '');
       var identityKey = text(device.identity_key, '');
+      var advParts = [];
+      if (manufacturer) { advParts.push(manufacturer); }
+      if (beacon) { advParts.push(beacon); }
+      var advText = advParts.join(' · ') || (companyId ? 'mfr ' + companyId : '—');
       if (beacon) {
         tr.setAttribute('data-beacon', beacon);
       }
@@ -266,7 +271,7 @@ footer a { color: var(--info); }
       cell(tr, fmtRssi(device.rssi_dbm), 'num');
       cell(tr, proximity, 'prox-' + proximity);
       cell(tr, trackability, 'track-' + trackability);
-      cell(tr, beacon || (companyId ? 'mfr ' + companyId : '—'), 'adv');
+      cell(tr, advText, 'adv');
       cell(tr, identityKey || '—', 'ident');
       cell(tr, (TREND_GLYPH[trend] || '—') + ' ' + trend);
       cell(tr, freshness);

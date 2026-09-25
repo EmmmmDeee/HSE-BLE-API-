@@ -116,7 +116,7 @@ public final class NativeRadar {
     public static final int TRACKABILITY_UNKNOWN = 2;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 14;
+    public static final int EXPECTED_ABI_VERSION = 15;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -534,4 +534,14 @@ public final class NativeRadar {
      * Owned by {@code bleradar_core::group_key}.
      */
     public static native String deviceGroupKey(String mac, String advertisementHex);
+
+    /**
+     * The Bluetooth SIG assignee name for the first manufacturer block's company
+     * identifier in a BLE advertising payload (hex), or {@code null} when there
+     * is no manufacturer data or the identifier is not in the bundled table — in
+     * which case the caller shows the raw {@link #advertisementCompanyId} hex.
+     * Owned by {@code bleradar_core::adv::company_name}, a curated, versioned
+     * subset of the public Bluetooth SIG Assigned Numbers.
+     */
+    public static native String advertisementManufacturerName(String advertisementHex);
 }

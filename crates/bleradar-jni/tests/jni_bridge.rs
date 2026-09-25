@@ -1107,3 +1107,38 @@ fn device_group_key_export_answers_through_the_string_bridge() {
     assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(env, null, null, hex).is_null());
     assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(null, null, mac, hex).is_null());
 }
+
+#[test]
+fn advertisement_manufacturer_name_resolves_known_ids_only() {
+    use bleradar_jni::advertisement_manufacturer_name;
+    assert_eq!(
+        advertisement_manufacturer_name(IBEACON_HEX).as_deref(),
+        Some("Apple")
+    );
+    assert_eq!(
+        advertisement_manufacturer_name(MICROSOFT_HEX).as_deref(),
+        Some("Microsoft")
+    );
+    // A testing id (0xFFFF) and no-manufacturer payloads have no name.
+    assert_eq!(advertisement_manufacturer_name(EMULATOR_BEACON_HEX), None);
+    assert_eq!(advertisement_manufacturer_name("020106"), None);
+    assert_eq!(advertisement_manufacturer_name(""), None);
+}
+
+#[test]
+fn advertisement_manufacturer_name_export_answers_through_the_string_bridge() {
+    use bleradar_jni::Java_com_hse_bleradar_NativeRadar_advertisementManufacturerName as name_of;
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let ibeacon = mock.string(IBEACON_HEX);
+    assert_eq!(
+        mock.read(name_of(env, null, ibeacon)).as_deref(),
+        Some("Apple")
+    );
+    // Unknown id, null string and null env all answer null.
+    let ffff = mock.string(EMULATOR_BEACON_HEX);
+    assert!(name_of(env, null, ffff).is_null());
+    assert!(name_of(env, null, null).is_null());
+    assert!(name_of(null, null, ibeacon).is_null());
+}

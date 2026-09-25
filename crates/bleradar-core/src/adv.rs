@@ -529,6 +529,81 @@ pub fn summary_beacon(report: &AdvReport) -> Option<&'static str> {
     report.beacon.as_ref().map(Beacon::label)
 }
 
+/// The version of the bundled company-identifier table below, bumped whenever an
+/// entry changes so a stored name records which ruleset produced it.
+pub const COMPANY_TABLE_VERSION: u32 = 1;
+
+/// The Bluetooth SIG assignee name for a 16-bit company identifier, for the
+/// well-known assignees, or `None` — unknown stays unknown (the caller then
+/// shows the raw hex id). This is a curated, versioned subset of the public
+/// Bluetooth SIG Assigned Numbers, bundled so identification works offline; it
+/// is deliberately not the full ~3000-entry registry (which HSE does not claim
+/// to carry), only the identifiers a scan actually meets often. Sorted by id so
+/// the lookup is a binary search and the table is auditable.
+#[must_use]
+pub fn company_name(company_id: u16) -> Option<&'static str> {
+    // (id, name), ascending by id — keep sorted; a test asserts the ordering.
+    const COMPANIES: &[(u16, &str)] = &[
+        (0x0001, "Nokia Mobile Phones"),
+        (0x0002, "Intel"),
+        (0x0006, "Microsoft"),
+        (0x000A, "Qualcomm"),
+        (0x000D, "Texas Instruments"),
+        (0x000F, "Broadcom"),
+        (0x001D, "Qualcomm"),
+        (0x0025, "NXP"),
+        (0x002D, "Synopsys"),
+        (0x0030, "ST Microelectronics"),
+        (0x004C, "Apple"),
+        (0x0056, "Sony Ericsson"),
+        (0x0057, "Harman International"),
+        (0x0059, "Nordic Semiconductor"),
+        (0x0065, "Hewlett-Packard"),
+        (0x0075, "Samsung Electronics"),
+        (0x0078, "Nike"),
+        (0x0087, "Garmin International"),
+        (0x008A, "Jawbone"),
+        (0x009E, "Bose"),
+        (0x00C4, "LG Electronics"),
+        (0x00D2, "Ericsson Technology Licensing"),
+        (0x00E0, "Google"),
+        (0x0110, "TomTom"),
+        (0x0118, "Xiaomi"),
+        (0x012D, "Sony"),
+        (0x0131, "Cypress Semiconductor"),
+        (0x0157, "Anhui Huami (Amazfit)"),
+        (0x0171, "Amazon"),
+        (0x0180, "Dexcom"),
+        (0x01A9, "Espressif"),
+        (0x01D7, "X(Twitter)"),
+        (0x0201, "Bang & Olufsen"),
+        (0x0244, "Meta Platforms (Facebook)"),
+        (0x02E5, "Espressif"),
+        (0x0349, "Fitbit"),
+        (0x03DA, "Ruuvi Innovations"),
+        (0x0499, "Ruuvi Innovations"),
+        (0x05A7, "Sonos"),
+        (0x0644, "DJI"),
+        (0x0822, "Adidas"),
+    ];
+    COMPANIES
+        .binary_search_by_key(&company_id, |&(id, _)| id)
+        .ok()
+        .map(|i| COMPANIES[i].1)
+}
+
+/// The Bluetooth SIG assignee name for the first manufacturer block's company
+/// identifier, or `None` when there is no manufacturer data or the identifier is
+/// not in the bundled table. The live "who made this device" name behind the raw
+/// [`summary_company_id`].
+#[must_use]
+pub fn summary_manufacturer_name(report: &AdvReport) -> Option<&'static str> {
+    report
+        .manufacturer_data
+        .first()
+        .and_then(|m| company_name(m.company_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,6 +932,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn company_table_is_sorted_and_resolves_known_ids() {
+        // The table must stay sorted for the binary search to be correct.
+        let mut prev = None;
+        for id in 0u16..=u16::MAX {
+            if let Some(name) = company_name(id) {
+                assert!(!name.is_empty());
+                if let Some(p) = prev {
+                    assert!(id > p, "company table not strictly ascending at {id:#06x}");
+                }
+                prev = Some(id);
+            }
+        }
+        assert_eq!(company_name(0x004C), Some("Apple"));
+        assert_eq!(company_name(0x0006), Some("Microsoft"));
+        assert_eq!(company_name(0x0059), Some("Nordic Semiconductor"));
+        // An unknown id stays unknown (the caller shows the hex).
+        assert_eq!(company_name(0xFFFF), None);
+        assert_eq!(company_name(0xABCD), None);
+    }
+
+    #[test]
+    fn manufacturer_name_resolves_from_the_advertisement() {
+        // Apple iBeacon manufacturer block → "Apple"; its raw id is still 004c.
+        let ib = decode_hex("1aff4c0002150102030405060708090a0b0c0d0e0f1000010002c5");
+        assert_eq!(summary_manufacturer_name(&ib), Some("Apple"));
+        assert_eq!(summary_company_id(&ib).as_deref(), Some("004c"));
+        // A testing id (0xFFFF) has a raw id but no name.
+        let test = decode_hex("05ffffff0102");
+        assert_eq!(summary_company_id(&test).as_deref(), Some("ffff"));
+        assert_eq!(summary_manufacturer_name(&test), None);
+        // No manufacturer data → neither.
+        let none = decode_hex("020106");
+        assert_eq!(summary_manufacturer_name(&none), None);
     }
 
     #[test]
