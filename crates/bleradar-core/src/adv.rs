@@ -813,6 +813,53 @@ mod tests {
     }
 
     #[test]
+    fn eddystone_url_table_matches_the_spec_code_for_code() {
+        // Every scheme prefix (0x00–0x03) and expansion code (0x00–0x0d), each
+        // asserted against the literal the Eddystone-URL spec defines — an
+        // independent check on the decoder's table, not a copy of it.
+        let schemes = [
+            (0x00u8, "http://www."),
+            (0x01, "https://www."),
+            (0x02, "http://"),
+            (0x03, "https://"),
+        ];
+        let codes = [
+            (0x00u8, ".com/"),
+            (0x01, ".org/"),
+            (0x02, ".edu/"),
+            (0x03, ".net/"),
+            (0x04, ".info/"),
+            (0x05, ".biz/"),
+            (0x06, ".gov/"),
+            (0x07, ".com"),
+            (0x08, ".org"),
+            (0x09, ".edu"),
+            (0x0a, ".net"),
+            (0x0b, ".info"),
+            (0x0c, ".biz"),
+            (0x0d, ".gov"),
+        ];
+        for (scheme, prefix) in schemes {
+            for (code, suffix) in codes {
+                // len 0x08 = service-data type + [AA FE] uuid + [10 tx scheme x code].
+                let r = decode(&[0x08, 0x16, 0xAA, 0xFE, 0x10, 0x00, scheme, b'x', code]);
+                match r.beacon {
+                    Some(Beacon::EddystoneUrl { url, .. }) => {
+                        assert_eq!(
+                            url,
+                            format!("{prefix}x{suffix}"),
+                            "scheme {scheme:#x} code {code:#x}"
+                        );
+                    }
+                    other => {
+                        panic!("scheme {scheme:#x} code {code:#x}: expected URL, got {other:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn summaries_absent_when_nothing_matches() {
         let r = decode(&[0x02, 0x01, 0x06]);
         assert_eq!(summary_company_id(&r), None);

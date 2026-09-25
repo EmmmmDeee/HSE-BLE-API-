@@ -19,7 +19,9 @@
 //! * the hex hand-off path agrees with the byte path (`decode_hex(hex(b)) ==
 //!   decode(b)`);
 //! * the service-UUID list has no duplicates;
-//! * a recognised beacon always has the source structure its shape requires;
+//! * the recognised beacon equals the one an independent recogniser derives
+//!   from the same structures (kind, every field, and presence in both
+//!   directions);
 //! * no input panics.
 //!
 //! The falsification test at the bottom proves the comparison is sensitive: a
@@ -213,70 +215,89 @@ fn project(report: &AdvReport) -> Reference {
     }
 }
 
-/// The beacon a report carries must be backed by the structure its shape
-/// requires AND re-derive to the same kind and field values from that structure
-/// by an independent computation. Returns a description of the violation.
-fn beacon_backed(report: &AdvReport) -> Result<(), String> {
-    let Some(beacon) = &report.beacon else {
-        return Ok(());
-    };
-    match beacon {
-        Beacon::IBeacon {
-            uuid,
-            major,
-            minor,
-            tx_power,
-        } => {
-            let m = report
-                .manufacturer_data
-                .iter()
-                .find(|m| {
-                    m.company_id == 0x004C && m.data.len() >= 23 && m.data[..2] == [0x02, 0x15]
-                })
-                .ok_or("iBeacon without a qualifying Apple manufacturer block")?;
-            // An iBeacon proximity UUID is big-endian in the payload (unlike the
-            // little-endian service-UUID lists), so it is rendered as-is.
-            let want_uuid = canon(&m.data[2..18]);
-            let want_major = u16::from(m.data[18]) << 8 | u16::from(m.data[19]);
-            let want_minor = u16::from(m.data[20]) << 8 | u16::from(m.data[21]);
-            let want_power = m.data[22] as i8;
-            if (uuid, *major, *minor, *tx_power) != (&want_uuid, want_major, want_minor, want_power)
-            {
-                return Err(format!(
-                    "iBeacon fields diverge: {uuid} {major} {minor} {tx_power} vs {want_uuid} {want_major} {want_minor} {want_power}"
-                ));
-            }
-            Ok(())
-        }
-        eddystone => {
-            let s = report
-                .service_data
-                .iter()
-                .find(|s| s.uuid == Uuid::U16(0xFEAA))
-                .ok_or("Eddystone beacon without 0xFEAA service data")?;
-            let frame = *s.data.first().unwrap_or(&0xFF);
-            let want_kind = match frame {
-                0x00 => "Eddystone-UID",
-                0x10 => "Eddystone-URL",
-                0x20 => "Eddystone-TLM",
-                _ => "?",
-            };
-            if eddystone.label() != want_kind {
-                return Err(format!(
-                    "Eddystone kind {} does not match frame byte {frame:#04x} ({want_kind})",
-                    eddystone.label()
-                ));
-            }
-            // A TLM must be unencrypted (version 0) to be decoded at all.
-            if frame == 0x20 && s.data.get(1) != Some(&0x00) {
-                return Err(format!(
-                    "a non-plaintext TLM (version {:?}) was decoded",
-                    s.data.get(1)
-                ));
-            }
-            Ok(())
+/// The exact beacon the decoder should produce, re-derived independently from
+/// the (already field-by-field validated) manufacturer- and service-data of the
+/// report — a different code path from `adv::recognise_beacon`, so `check()` can
+/// assert `report.beacon` for equality in BOTH directions: a wrong field value,
+/// a wrong kind, a dropped recognition and a false recognition all diverge.
+///
+/// Precedence mirrors the decoder: a qualifying iBeacon (first such Apple block)
+/// wins over Eddystone (first `0xFEAA` frame that parses).
+fn reference_beacon(report: &AdvReport) -> Option<Beacon> {
+    for m in &report.manufacturer_data {
+        if m.company_id == 0x004C && m.data.len() >= 23 && m.data[..2] == [0x02, 0x15] {
+            return Some(Beacon::IBeacon {
+                // Big-endian in the payload, unlike the little-endian UUID lists.
+                uuid: canon(&m.data[2..18]),
+                major: u16::from(m.data[18]) << 8 | u16::from(m.data[19]),
+                minor: u16::from(m.data[20]) << 8 | u16::from(m.data[21]),
+                tx_power: m.data[22] as i8,
+            });
         }
     }
+    for s in &report.service_data {
+        if s.uuid != Uuid::U16(0xFEAA) {
+            continue;
+        }
+        let d = &s.data;
+        let beacon = match d.first() {
+            Some(0x00) if d.len() >= 18 => Some(Beacon::EddystoneUid {
+                tx_power: d[1] as i8,
+                namespace: bytes_hex(&d[2..12]),
+                instance: bytes_hex(&d[12..18]),
+            }),
+            Some(0x10) if d.len() >= 3 => ref_url(d[2], &d[3..]).map(|url| Beacon::EddystoneUrl {
+                url,
+                tx_power: d[1] as i8,
+            }),
+            Some(0x20) if d.len() >= 14 && d[1] == 0x00 => Some(Beacon::EddystoneTlm {
+                battery_mv: match u16::from(d[2]) << 8 | u16::from(d[3]) {
+                    0 => None,
+                    mv => Some(mv),
+                },
+                temperature_c: match i16::from_be_bytes([d[4], d[5]]) {
+                    -32768 => None,
+                    raw => Some(f32::from(raw) / 256.0),
+                },
+                adv_count: u32::from_be_bytes([d[6], d[7], d[8], d[9]]),
+                uptime_deciseconds: u32::from_be_bytes([d[10], d[11], d[12], d[13]]),
+            }),
+            _ => None,
+        };
+        if let Some(beacon) = beacon {
+            return Some(beacon);
+        }
+    }
+    None
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Independent Eddystone-URL expansion, from the spec (a second copy so a table
+/// error in the decoder diverges here, and the explicit per-code unit fixtures
+/// in `adv.rs` pin both to the spec literals).
+fn ref_url(scheme: u8, body: &[u8]) -> Option<String> {
+    let mut url = String::from(match scheme {
+        0x00 => "http://www.",
+        0x01 => "https://www.",
+        0x02 => "http://",
+        0x03 => "https://",
+        _ => return None,
+    });
+    const SUFFIX: [&str; 14] = [
+        ".com/", ".org/", ".edu/", ".net/", ".info/", ".biz/", ".gov/", ".com", ".org", ".edu",
+        ".net", ".info", ".biz", ".gov",
+    ];
+    for &b in body {
+        match b {
+            0x00..=0x0d => url.push_str(SUFFIX[b as usize]),
+            0x21..=0x7e => url.push(b as char),
+            _ => url.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    Some(url)
 }
 
 fn check(data: &[u8]) -> Result<(), String> {
@@ -298,7 +319,18 @@ fn check(data: &[u8]) -> Result<(), String> {
             return Err(format!("duplicate service UUID on {}", hex_encode(data)));
         }
     }
-    beacon_backed(&report).map_err(|e| format!("{e} on {}", hex_encode(data)))
+    // The recognised beacon must equal the one an independent recogniser derives
+    // from the same structures — catching a wrong field value, a wrong kind, a
+    // dropped recognition and a false recognition alike.
+    if report.beacon != reference_beacon(&report) {
+        return Err(format!(
+            "beacon diverges on {}:\n  got      {:?}\n  expected {:?}",
+            hex_encode(data),
+            report.beacon,
+            reference_beacon(&report)
+        ));
+    }
+    Ok(())
 }
 
 /// A structured payload: a run of AD structures, sometimes padded, sometimes
