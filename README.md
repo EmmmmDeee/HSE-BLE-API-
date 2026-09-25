@@ -31,6 +31,17 @@ Code that works in principle but was never executed is incomplete. Features that
   … → stop on diminishing information gain): a temporal+geo graph with
   bridge/cluster detection, a round-over-round diminishing-information-gain
   stop criterion, and explicit stage tracking across the whole loop.
+- `crates/bleradar-core::sweep` — the Huntsman Search Engine's multi-sensor
+  radar sweep domain, consolidated here as the single authority for the sensor
+  rules HSE's `signal_radar` had reimplemented: real-vs-placeholder device
+  addresses, locally-administered (randomized) vs trackable MAC classification,
+  the Wi-Fi RSSI reliability tiers (a positive dBm reading is corrupt input and
+  scores the worst tier, never the best), 802.11 channel and coarse RSSI
+  proximity derivation, per-radio cell identity (`cid`/`ci`/`nci` with the
+  `Integer.MAX_VALUE` and zero unavailable filters), the canonical
+  `mcc-mnc-lac-cid` tower id, and the sighting key. Dependency-free and
+  regression-locked so the radar's sensor math has one home rather than a
+  reimplementation that can silently drift.
 - `crates/bleradar-core::{entity,coords,tags}` — the Huntsman Search Engine
   (HSE) dependency-free entity model imported for the radar domain: SHA-256
   deterministic UIDs, per-kind normalisation, a cross-source corroboration

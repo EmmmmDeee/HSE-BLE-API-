@@ -14,6 +14,7 @@ mod osint;
 mod pipeline;
 mod runtime;
 mod signal;
+mod sweep;
 mod tracking;
 mod validation;
 mod verification;
@@ -89,6 +90,11 @@ pub use signal::{
     ble_distance_m, ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
     effective_rssi_at_1m_dbm, filtered_rssi, proximity_label, proximity_label_from_distance_m,
     signal_confidence_percent, signal_trend,
+};
+pub use sweep::{
+    ANDROID_UNAVAILABLE, AddressTrackability, CellRadio, RssiReliability, address_trackability,
+    is_numeric_segment, is_real_device_address, sighting_key, tower_id, usable_cell_identity,
+    usable_dbm, wifi_channel, wifi_proximity, wifi_rssi_reliability,
 };
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass, MapPoint,
