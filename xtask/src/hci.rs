@@ -206,24 +206,31 @@ pub fn advertising_parameters(interval: u16) -> Vec<u8> {
 }
 
 /// `LE_Set_Advertising_Data`: the flags (LE General Discoverable, BR/EDR
-/// not supported) and the complete local `name`, in the whole 31-byte field
-/// behind its significant length.
-pub fn advertising_data(name: &str) -> Result<Vec<u8>, String> {
+/// not supported), the complete local `name`, and manufacturer-specific data
+/// (`company_id` little-endian, then `payload`), in the whole 31-byte field
+/// behind its significant length. The manufacturer block is what lets the
+/// emulator proof observe the Rust advertisement decoder on a real runtime.
+pub fn advertising_data(name: &str, company_id: u16, payload: &[u8]) -> Result<Vec<u8>, String> {
     let name = name.as_bytes();
-    let significant = 3 + 2 + name.len();
+    // flags (3) + name header (2) + name + manufacturer header (2) + company (2) + payload
+    let significant = 3 + 2 + name.len() + 4 + payload.len();
     if significant > ADVERTISING_DATA_LEN {
         return Err(format!(
-            "the name is {} bytes; the advertising data has room for {}",
+            "the name ({} bytes) and manufacturer payload ({} bytes) need {significant} bytes; the advertising data has {ADVERTISING_DATA_LEN}",
             name.len(),
-            ADVERTISING_DATA_LEN - 5
+            payload.len(),
         ));
     }
     let mut parameters = Vec::with_capacity(1 + ADVERTISING_DATA_LEN);
     parameters.push(significant as u8); // fits: at most 31
     parameters.extend_from_slice(&[0x02, 0x01, 0x06]); // Flags
-    parameters.push(name.len() as u8 + 1); // fits: at most 27
+    parameters.push(name.len() as u8 + 1); // fits: at most 22
     parameters.push(0x09); // Complete Local Name
     parameters.extend_from_slice(name);
+    parameters.push(payload.len() as u8 + 3); // type + company id + payload; fits
+    parameters.push(0xFF); // Manufacturer Specific Data
+    parameters.extend_from_slice(&company_id.to_le_bytes());
+    parameters.extend_from_slice(payload);
     parameters.resize(1 + ADVERTISING_DATA_LEN, 0);
     Ok(parameters)
 }
@@ -324,9 +331,17 @@ impl Controller {
     }
 
     /// Starts legacy advertising from the static random `address` (what a
-    /// scanner reports as the device's address) with `name` in the data,
-    /// one PDU every `interval` × 0.625 ms.
-    pub fn advertise(&mut self, address: &str, name: &str, interval: u16) -> Result<(), String> {
+    /// scanner reports as the device's address) with `name` and manufacturer
+    /// data (`company_id`, `payload`) in the data, one PDU every `interval` ×
+    /// 0.625 ms.
+    pub fn advertise(
+        &mut self,
+        address: &str,
+        name: &str,
+        company_id: u16,
+        payload: &[u8],
+        interval: u16,
+    ) -> Result<(), String> {
         if !is_static_random(&parse_address(address)?) {
             return Err(format!(
                 "{address} is not a static random address (its two top bits must be set)"
@@ -345,7 +360,7 @@ impl Controller {
         self.command(
             "LE_Set_Advertising_Data",
             LE_SET_ADVERTISING_DATA,
-            &advertising_data(name)?,
+            &advertising_data(name, company_id, payload)?,
         )?;
         self.command(
             "LE_Set_Advertising_Enable",
@@ -488,17 +503,28 @@ mod tests {
         assert_eq!(parameters[5], 0x01, "own address random");
         assert_eq!(parameters[13], 0x07, "all channels");
 
-        let data = advertising_data("bleradar-beacon").unwrap();
+        let data = advertising_data("bleradar-beacon", 0xFFFF, &[0xBE, 0xAC]).unwrap();
         assert_eq!(data.len(), 32);
-        assert_eq!(data[0], 20, "3 flag bytes + 2 + 15 name bytes");
+        assert_eq!(
+            data[0], 26,
+            "3 flag bytes + 2 + 15 name bytes + 4 + 2 payload bytes"
+        );
         assert_eq!(&data[1..4], &[0x02, 0x01, 0x06]);
         assert_eq!(data[4], 16);
         assert_eq!(data[5], 0x09);
         assert_eq!(&data[6..21], b"bleradar-beacon");
-        assert!(data[21..].iter().all(|byte| *byte == 0));
-        assert_eq!(advertising_data("").unwrap()[0], 5);
-        assert!(advertising_data(&"x".repeat(26)).is_ok());
-        assert!(advertising_data(&"x".repeat(27)).is_err());
+        assert_eq!(&data[21..27], &[0x05, 0xFF, 0xFF, 0xFF, 0xBE, 0xAC]);
+        assert!(data[27..].iter().all(|byte| *byte == 0));
+        assert_eq!(advertising_data("", 0x0006, &[]).unwrap()[0], 9);
+        assert!(advertising_data(&"x".repeat(22), 0xFFFF, &[]).is_ok());
+        assert!(advertising_data(&"x".repeat(23), 0xFFFF, &[]).is_err());
+        assert!(advertising_data("x", 0xFFFF, &[0; 21]).is_ok());
+        assert!(advertising_data("x", 0xFFFF, &[0; 22]).is_err());
+        // These exact bytes are pinned on the decoder side too
+        // (crates/bleradar-jni/tests/jni_bridge.rs, EMULATOR_BEACON_HEX): xtask
+        // stays outside the bleradar-* graph (decision 24), so the two meet
+        // on the runtime, where verify-android-emulator requires the row's
+        // company_id to be "ffff".
     }
 
     #[test]
@@ -514,11 +540,17 @@ mod tests {
         controller.reset().unwrap();
         assert_eq!(controller.read_bd_addr().unwrap(), "01:02:03:04:05:06");
         controller
-            .advertise("C0:DE:BE:AC:0D:01", "bleradar-beacon", 0x00A0)
+            .advertise(
+                "C0:DE:BE:AC:0D:01",
+                "bleradar-beacon",
+                0xFFFF,
+                &[0xBE, 0xAC],
+                0x00A0,
+            )
             .unwrap();
         assert!(
             controller
-                .advertise("11:22:33:44:55:66", "bleradar-beacon", 0x00A0)
+                .advertise("11:22:33:44:55:66", "bleradar-beacon", 0xFFFF, &[], 0x00A0)
                 .unwrap_err()
                 .contains("static random")
         );
@@ -540,7 +572,10 @@ mod tests {
         );
         assert_eq!(seen[2].1, vec![0x01, 0x0D, 0xAC, 0xBE, 0xDE, 0xC0]);
         assert_eq!(seen[3].1, advertising_parameters(0x00A0));
-        assert_eq!(seen[4].1, advertising_data("bleradar-beacon").unwrap());
+        assert_eq!(
+            seen[4].1,
+            advertising_data("bleradar-beacon", 0xFFFF, &[0xBE, 0xAC]).unwrap()
+        );
         assert_eq!(seen[5].1, vec![0x01]);
         assert_eq!(seen[6].1, vec![0x00]);
     }

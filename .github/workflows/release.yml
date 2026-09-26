@@ -1,0 +1,78 @@
+name: release
+
+# Publish the committed, CI-verified APK as a downloadable GitHub Release so an
+# end user only installs it on Android — no Termux, checkout, shell, build, or
+# configuration. The release also carries release_manifest.txt at the stable
+# `releases/latest/download/` URL the app's UpdateCheckService polls, closing
+# the self-update loop against a real artifact.
+#
+# It runs only after the `gates` workflow succeeds on main, so nothing is ever
+# published that CI has not already built from a fresh checkout, exercised on a
+# real Android runtime, and proven the committed APK reproduces from source.
+# It re-publishes the exact committed bytes (no rebuild, no re-sign), so no
+# signing key or any other secret is needed or embedded (only the default
+# GITHUB_TOKEN, to create the release).
+
+on:
+  workflow_run:
+    workflows: [gates]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # workflow_dispatch always runs; a workflow_run only when gates passed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact commit gates verified
+        uses: actions/checkout@v4
+        with:
+          # For workflow_run, publish the precise commit CI passed on; for a
+          # manual dispatch, the ref it was dispatched from.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
+      - name: Install pinned toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Resolve the authoritative release identity
+        id: plan
+        run: cargo xtask release-plan >> "$GITHUB_OUTPUT"
+      - name: Generate the release manifest from the committed APK
+        run: cargo xtask release-manifest --out "${{ steps.plan.outputs.manifest }}"
+      - name: Publish or refresh the release with the committed APK and manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          APK: ${{ steps.plan.outputs.apk }}
+          MANIFEST: ${{ steps.plan.outputs.manifest }}
+          VERSION_NAME: ${{ steps.plan.outputs.version_name }}
+          COMMIT: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          notes="HSE BLE Radar ${VERSION_NAME} — Android ARM64.
+
+          Install: download **${APK}** and open it on Android (allow installing from this source if prompted). No Termux, checkout, shell, or configuration; the only first-run step is granting the Android permissions the app requests.
+
+          Published automatically from commit ${COMMIT} after the \`gates\` workflow passed. The APK is the exact artifact CI built from a fresh checkout and exercised on a real Android runtime; \`${MANIFEST}\` carries its pinned size and SHA-256 for the in-app updater."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; refreshing its assets."
+            gh release upload "$TAG" "$APK" "$MANIFEST" --clobber
+            gh release edit "$TAG" --latest --notes "$notes"
+          else
+            echo "Creating release $TAG on $COMMIT."
+            gh release create "$TAG" "$APK" "$MANIFEST" \
+              --target "$COMMIT" \
+              --title "HSE BLE Radar ${VERSION_NAME}" \
+              --latest \
+              --notes "$notes"
+          fi
+          echo "Published: $(gh release view "$TAG" --json url --jq .url)"

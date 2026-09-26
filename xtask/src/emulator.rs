@@ -91,6 +91,26 @@ const BEACON_ADDRESS: &str = "C0:DE:BE:AC:0D:01";
 /// Its advertising interval in 0.625 ms units: 100 ms, the low-latency
 /// scan window the app asks for.
 const BEACON_INTERVAL: u16 = 0x00A0;
+/// The manufacturer-specific data it advertises: company identifier 0xFFFF,
+/// which the Bluetooth SIG reserves for testing (never a shipping product's),
+/// and a two-byte payload. The Rust advertisement decoder must report it on
+/// the runtime as the row's `company_id`.
+const BEACON_COMPANY_ID: u16 = 0xFFFF;
+const BEACON_MANUFACTURER_PAYLOAD: &[u8] = &[0xBE, 0xAC];
+/// `BEACON_COMPANY_ID` as the API renders it (four lowercase hex digits).
+const BEACON_COMPANY_ID_JSON: &str = "\"company_id\":\"ffff\"";
+/// The beacon's cross-rotation identity key as the API renders it. Its address
+/// `C0:...` has the U/L bit clear, so the Rust `group_key` keys it by its
+/// canonical (lowercase) address rather than by advertisement shape.
+const BEACON_IDENTITY_JSON: &str = "\"identity_key\":\"c0:de:be:ac:0d:01\"";
+/// The app's persistent device history on the device (readable under `adb root`).
+const HISTORY_FILE: &str = "/data/data/com.hse.bleradar/files/device_history.txt";
+/// Its first line (`bleradar_core::HISTORY_HEADER`).
+const HISTORY_HEADER_LINE: &str = "bleradar-history v1";
+/// How long the beacon's row may take to carry its history (merges are batched).
+const HISTORY_TIMEOUT: Duration = Duration::from_secs(15);
+/// The beacon's key in that history: its canonical public address.
+const BEACON_HISTORY_KEY: &str = "c0:de:be:ac:0d:01";
 /// How long the scan may take to list the beacon after it started.
 const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the row may outlive the beacon: the Standard tracking profile
@@ -103,8 +123,15 @@ const HCI_PORT: u16 = 6402;
 /// Command Complete by then went to a wrong port or a dead daemon.
 const HCI_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the upgrade pathway may take from the launch to the installer
-/// hand-off (the fetch, the decision, the download, the verification).
-const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
+/// hand-off (the fetch, the decision, the download, the verification). Generous
+/// because the download runs through Android's `DownloadManager`, whose
+/// scheduling can stall for a minute or more on a contended CI runner even
+/// though the transfer itself is a few hundred KB over the loopback proxy (seen
+/// once: an enqueued download that had not progressed within 120 s on a runner
+/// that also booted slowly and logged graphics errors). The window only bounds
+/// how long to wait; it never weakens what the proof then requires — a completed
+/// download, a size + SHA-256 verification, and the installer hand-off.
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long the package installer may take once its button is tapped.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the installer may take to show its confirmation.
@@ -664,7 +691,13 @@ impl Beacon {
                 )
             })?;
         let bd_addr = controller.read_bd_addr()?;
-        controller.advertise(BEACON_ADDRESS, BEACON_NAME, BEACON_INTERVAL)?;
+        controller.advertise(
+            BEACON_ADDRESS,
+            BEACON_NAME,
+            BEACON_COMPANY_ID,
+            BEACON_MANUFACTURER_PAYLOAD,
+            BEACON_INTERVAL,
+        )?;
         Ok(Self {
             controller,
             port,
@@ -676,7 +709,7 @@ impl Beacon {
 
     fn describe(&self) -> String {
         format!(
-            "a second virtual controller on netsimd's HCI socket 127.0.0.1:{} ({}, {}), public address {}, advertising every {} ms as {BEACON_ADDRESS} {BEACON_NAME:?}",
+            "a second virtual controller on netsimd's HCI socket 127.0.0.1:{} ({}, {}), public address {}, advertising every {} ms as {BEACON_ADDRESS} {BEACON_NAME:?} with manufacturer data 0x{BEACON_COMPANY_ID:04x}",
             self.port,
             self.source,
             if self.listed {
@@ -1200,6 +1233,59 @@ fn exercise(
                 "the beacon's row carries no distance (the Rust estimate never reached it): {row}"
             ));
         }
+        // The advertising payload went through the platform's BLE stack,
+        // ScanRecord.getBytes(), the JNI string bridge and bleradar_core::adv:
+        // the manufacturer block must come back as its company identifier,
+        // and a plain manufacturer block is not a beacon.
+        if !row.contains(BEACON_COMPANY_ID_JSON)
+            || !row.contains("\"beacon\":null")
+            // 0xFFFF is the SIG testing id: it has a raw company id but no name.
+            || !row.contains("\"manufacturer\":null")
+            // The beacon advertises no service list.
+            || !row.contains("\"services\":null")
+        {
+            return Err(format!(
+                "the beacon's row does not carry the decoded advertisement ({BEACON_COMPANY_ID_JSON}, \"manufacturer\":null, \"beacon\":null) — the Rust advertisement decoder never reached it: {row}"
+            ));
+        }
+        // The Rust identity engine ran on the runtime: a public address is
+        // grouped by itself.
+        if !row.contains(BEACON_IDENTITY_JSON) {
+            return Err(format!(
+                "the beacon's row does not carry its identity key ({BEACON_IDENTITY_JSON}) — the Rust group_key never reached it: {row}"
+            ));
+        }
+        // The persistent device history (bleradar_core::history) ran on the
+        // runtime: a public address is remembered from its first sighting, on
+        // its first visit. Sightings are batched (a new device merges within
+        // about a second), so the row is re-read until the history reaches it.
+        let history_awaited = Instant::now();
+        let mut history_row = row.clone();
+        let beacon_first_seen = loop {
+            if let Some(first_seen) =
+                json_integer(&history_row, "first_seen_ms").filter(|first_seen| *first_seen > 0)
+            {
+                break first_seen;
+            }
+            if history_awaited.elapsed() >= HISTORY_TIMEOUT {
+                return Err(format!(
+                    "within {}s the beacon's row carried no first_seen_ms — the persistent history never recorded it: {history_row}",
+                    HISTORY_TIMEOUT.as_secs()
+                ));
+            }
+            thread::sleep(Duration::from_secs(1));
+            let text = body_text(&get(port, "/api/devices")?);
+            if let Some(fresh) = device_row(&text, "address", BEACON_ADDRESS)
+                .or_else(|| device_row(&text, "name", BEACON_NAME))
+            {
+                history_row = fresh.to_string();
+            }
+        };
+        if !history_row.contains("\"visits\":1") {
+            return Err(format!(
+                "the beacon's row is not on its first visit (\"visits\":1): {history_row}"
+            ));
+        }
         report.push(format!(
             "beacon: listed {:.1}s after its start: {row}",
             after.as_secs_f64()
@@ -1296,6 +1382,20 @@ fn exercise(
         report.push(format!(
             "kill -9 {pid}: the system restarted the service (pid {new_pid}) and the scan resumed {:.1}s later",
             after.as_secs_f64()
+        ));
+        // The history outlived the process: the file the killed process wrote
+        // still holds the beacon with the first sighting its row reported.
+        let history = adb.shell(&format!("cat {HISTORY_FILE}"))?;
+        let expected = format!("{BEACON_HISTORY_KEY}\t{beacon_first_seen}\t");
+        if history.lines().next() != Some(HISTORY_HEADER_LINE)
+            || !history.lines().any(|line| line.starts_with(&expected))
+        {
+            return Err(format!(
+                "after kill -9 {HISTORY_FILE} does not remember the beacon first seen at {beacon_first_seen}:\n{history}"
+            ));
+        }
+        report.push(format!(
+            "history: {HISTORY_FILE} survived kill -9 and remembers {BEACON_HISTORY_KEY} first seen at {beacon_first_seen}"
         ));
     }
 

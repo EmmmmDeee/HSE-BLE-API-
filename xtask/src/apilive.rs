@@ -39,6 +39,7 @@ pub(crate) const HOST_JAVA_SOURCES: &[&str] = &[
     "ApiHttpServer.java",
     "AssetSource.java",
     "Blip.java",
+    "DeviceHistory.java",
     "Json.java",
     "NativeRadar.java",
     "ReleaseManifest.java",
@@ -101,6 +102,7 @@ public final class ApiSmoke {
 
     private static final long NOW_UPTIME_MS = 100_000L;
     private static final long NOW_EPOCH_MS = 1_757_700_000_000L;
+    private static final long HISTORY_FIRST_SEEN_MS = 1_757_000_000_000L;
     private static final long SCAN_UPTIME_MS = 3_723_000L;
 
     /** The scripted scan state; starts scanning, as the browser fixtures say. */
@@ -115,14 +117,25 @@ public final class ApiSmoke {
             throw new IllegalStateException("native library not available: " + NativeRadar.loadError());
         }
         final List<Blip> devices = new ArrayList<>();
-        devices.add(blip("AA:BB:CC:DD:EE:01", "Tag Alpha", 1.234, 0.8, 1.9, -61.4,
-                NativeRadar.PROXIMITY_NEAR, NativeRadar.TREND_STRONGER, NativeRadar.FRESHNESS_LIVE, 87, 420));
+        // Addresses chosen to exercise all three trackability classes through
+        // the real native classifier: a globally-administered (real hardware)
+        // address is TRACKABLE, a locally-administered (0xAA … U/L bit set)
+        // address is RANDOMIZED, and a malformed address is UNKNOWN.
+        // Advertising payloads (hex, as BleScanEngine hands ScanRecord bytes to
+        // Rust) decoded through the real native core: an iBeacon, an
+        // Eddystone-URL frame, none at all, and plain Microsoft (0x0006)
+        // manufacturer data — the same vectors crates/bleradar-jni pins.
+        devices.add(blip("3C:5A:B4:11:22:01", "Tag Alpha", 1.234, 0.8, 1.9, -61.4,
+                NativeRadar.PROXIMITY_NEAR, NativeRadar.TREND_STRONGER, NativeRadar.FRESHNESS_LIVE, 87, 420,
+                "1aff4c0002150102030405060708090a0b0c0d0e0f1000010002c5"));
         devices.add(blip("AA:BB:CC:DD:EE:02", "<b>evil</b> \"Ünïcødé\" \\ 😀", 7.5, 5.2, 11.0, -78.0,
-                NativeRadar.PROXIMITY_MID, NativeRadar.TREND_WEAKER, NativeRadar.FRESHNESS_RECENT, 52, 12345));
-        devices.add(blip("AA:BB:CC:DD:EE:03", null, Double.NaN, Double.NaN, Double.NaN, -90.2,
-                NativeRadar.PROXIMITY_FAR, -1, NativeRadar.FRESHNESS_STALE, 0, 75000));
+                NativeRadar.PROXIMITY_MID, NativeRadar.TREND_WEAKER, NativeRadar.FRESHNESS_RECENT, 52, 12345,
+                "0303aafe0a16aafe10ee0368736500"));
+        devices.add(blip("AA:BB:CC:DD:EE", null, Double.NaN, Double.NaN, Double.NaN, -90.2,
+                NativeRadar.PROXIMITY_FAR, -1, NativeRadar.FRESHNESS_STALE, 0, 75000, null));
         devices.add(blip("AA:BB:CC:DD:EE:04", "Beacon Delta", 0.4, 0.3, 0.6, -45.0,
-                NativeRadar.PROXIMITY_IMMEDIATE, NativeRadar.TREND_STABLE, NativeRadar.FRESHNESS_LIVE, 99, 90));
+                NativeRadar.PROXIMITY_IMMEDIATE, NativeRadar.TREND_STABLE, NativeRadar.FRESHNESS_LIVE, 99, 90,
+                "02010605ff06000102"));
 
         SnapshotSource source = new SnapshotSource() {
             @Override
@@ -209,7 +222,8 @@ public final class ApiSmoke {
     }
 
     private static Blip blip(String address, String name, double distance, double lower, double upper,
-            double rssi, int proximity, int trend, int freshness, int confidence, long agoMs) {
+            double rssi, int proximity, int trend, int freshness, int confidence, long agoMs,
+            String advertisementHex) {
         Blip blip = new Blip(address);
         blip.name = name;
         blip.distanceMetres = distance;
@@ -217,6 +231,33 @@ public final class ApiSmoke {
         blip.distanceUpperBoundMetres = upper;
         blip.lastRssiDbm = rssi;
         blip.proximity = proximity;
+        // Real native classification of the device's own address (Java → JNI →
+        // Rust bleradar_core::address_trackability), the same call the live
+        // BleScanEngine makes.
+        blip.trackability = NativeRadar.deviceAddressTrackability(address);
+        // The same two natives BleScanEngine calls on a live ScanRecord,
+        // published as one object exactly as the engine does.
+        if (advertisementHex != null) {
+            blip.advertisement = new Blip.AdvSummary(
+                    NativeRadar.advertisementCompanyId(advertisementHex),
+                    NativeRadar.advertisementBeacon(advertisementHex),
+                    NativeRadar.advertisementManufacturerName(advertisementHex),
+                    NativeRadar.advertisementServices(advertisementHex),
+                    NativeRadar.deviceGroupKey(address, advertisementHex));
+        }
+        // The persistent history through the real natives and the app's own
+        // row parser: two sessions an hour apart (past the visit gap), so a
+        // public device reads 2 visits since the first; randomized and unknown
+        // addresses are not remembered.
+        if (blip.trackability == NativeRadar.TRACKABILITY_TRACKABLE) {
+            String key = address.toLowerCase(java.util.Locale.ROOT);
+            String state = NativeRadar.historyMerge(null, key, HISTORY_FIRST_SEEN_MS);
+            state = NativeRadar.historyMerge(state, key, HISTORY_FIRST_SEEN_MS + 3_600_000L);
+            DeviceHistory.Record record = DeviceHistory.parseRow(
+                    NativeRadar.historyLookup(state, key).split("\n", -1)[0]);
+            blip.firstSeenEpochMillis = record.firstSeenEpochMillis;
+            blip.visits = record.visits;
+        }
         blip.trend = trend;
         blip.freshness = freshness;
         blip.confidencePercent = confidence;
@@ -1119,7 +1160,7 @@ mod tests {
         // in check_http_contract is meaningful.
         let harness = api_smoke_java_source();
         for value in [
-            "AA:BB:CC:DD:EE:01",
+            "3C:5A:B4:11:22:01",
             "Tag Alpha",
             "1.234",
             "-61.4",

@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
 import android.content.Context;
@@ -18,6 +19,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -39,6 +41,7 @@ final class BleScanEngine implements SnapshotSource {
     private final Map<String, Blip> blipsByAddress = new ConcurrentHashMap<>();
     private final int calibrationProfile;
     private final int trackingProfile;
+    private final DeviceHistory history;
     private BluetoothLeScanner scanner;
     private volatile boolean scanning;
     /** Set by {@link #close()}: the owning service is gone, every later start is refused. */
@@ -73,6 +76,7 @@ final class BleScanEngine implements SnapshotSource {
         this.trackingProfile = NativeRadar.isAvailable()
                 ? NativeRadar.defaultTrackingProfile()
                 : NativeRadar.TRACKING_STANDARD;
+        this.history = new DeviceHistory(appContext.getFilesDir());
     }
 
     static boolean hasRequiredPermissions(Context context) {
@@ -155,6 +159,7 @@ final class BleScanEngine implements SnapshotSource {
     synchronized void close() {
         stop();
         closed = true;
+        history.flush(SystemClock.uptimeMillis());
     }
 
     synchronized void stop() {
@@ -167,6 +172,7 @@ final class BleScanEngine implements SnapshotSource {
             // Permission may already have been revoked; nothing further to release.
         } finally {
             scanning = false;
+            history.flush(SystemClock.uptimeMillis());
         }
     }
 
@@ -196,6 +202,9 @@ final class BleScanEngine implements SnapshotSource {
     public List<Blip> snapshot() {
         pruneStale(SystemClock.uptimeMillis());
         List<Blip> snapshot = new ArrayList<>(blipsByAddress.values());
+        for (Blip blip : snapshot) {
+            applyHistory(blip);
+        }
         // Keys are sampled once so the sort sees an immutable ordering while the
         // scan callback keeps mutating the volatile Blip fields concurrently
         // (a comparator reading them live can violate TimSort's contract and
@@ -229,6 +238,32 @@ final class BleScanEngine implements SnapshotSource {
         double previous = blip.lastRssiDbm;
         double txPowerDbm = readTxPowerDbm(result);
         blip.txPowerDbm = txPowerDbm;
+
+        // Classify the address once (it is fixed for the blip's life): a
+        // locally-administered BLE address is a rotating/privacy throwaway, not
+        // a followable physical device. Owned by Rust
+        // (bleradar_core::address_trackability) through the JNI façade.
+        if (NativeRadar.isAvailable() && blip.trackability == NativeRadar.TRACKABILITY_UNKNOWN) {
+            blip.trackability = NativeRadar.deviceAddressTrackability(address);
+        }
+
+        // Decode the advertising payload in Rust (bleradar_core::adv): who made
+        // the device and whether it is a beacon. Re-decoded only when the
+        // advertisement changed (Eddystone, for one, rotates frames).
+        ScanRecord record = result.getScanRecord();
+        byte[] advertisement = record == null ? null : record.getBytes();
+        if (NativeRadar.isAvailable() && advertisement != null) {
+            String advertisementHex = hex(advertisement);
+            if (!advertisementHex.equals(blip.lastAdvertisementHex)) {
+                blip.advertisement = new Blip.AdvSummary(
+                        NativeRadar.advertisementCompanyId(advertisementHex),
+                        NativeRadar.advertisementBeacon(advertisementHex),
+                        NativeRadar.advertisementManufacturerName(advertisementHex),
+                        NativeRadar.advertisementServices(advertisementHex),
+                        NativeRadar.deviceGroupKey(address, advertisementHex));
+                blip.lastAdvertisementHex = advertisementHex;
+            }
+        }
 
         if (NativeRadar.isAvailable()) {
             double smoothed = NativeRadar.trackingFilteredRssi(
@@ -322,11 +357,39 @@ final class BleScanEngine implements SnapshotSource {
         }
         blip.lastSeenUptimeMillis = now;
 
+        // Cross-session memory (bleradar_core::history): only a public address
+        // is a stable key worth remembering; the Rust side enforces that too.
+        if (blip.trackability == NativeRadar.TRACKABILITY_TRACKABLE) {
+            history.observe(address.toLowerCase(Locale.ROOT), now);
+        }
+
         String name = safeDeviceName(result);
         if (name != null) {
             blip.name = name;
         }
         pruneStale(now);
+    }
+
+    /** Copies what the persistent history remembers onto {@code blip}. */
+    private void applyHistory(Blip blip) {
+        DeviceHistory.Record record = blip.trackability == NativeRadar.TRACKABILITY_TRACKABLE
+                ? history.lookup(blip.address.toLowerCase(Locale.ROOT))
+                : null;
+        blip.firstSeenEpochMillis = record == null ? -1L : record.firstSeenEpochMillis;
+        blip.visits = record == null ? 0 : record.visits;
+    }
+
+    private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();
+
+    /** Lowercase hex of {@code bytes}: the form the Rust advertisement decoder takes across JNI. */
+    static String hex(byte[] bytes) {
+        char[] out = new char[bytes.length * 2];
+        for (int i = 0; i < bytes.length; i++) {
+            int b = bytes[i] & 0xff;
+            out[2 * i] = HEX_DIGITS[b >>> 4];
+            out[2 * i + 1] = HEX_DIGITS[b & 0x0f];
+        }
+        return new String(out);
     }
 
     /**

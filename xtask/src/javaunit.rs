@@ -28,8 +28,11 @@ pub const TEST_PACKAGE_DIR: &str = "android/app/src/test/java/com/hse/bleradar";
 /// that would never run — the state every file in that directory was in
 /// before decision #98 — so [`run`] refuses it. The count is pinned so a
 /// test method that vanishes is noticed too.
-pub const HOST_TEST_CLASSES: &[(&str, usize)] =
-    &[("BlipTest.java", 14), ("ReleaseManifestTest.java", 50)];
+pub const HOST_TEST_CLASSES: &[(&str, usize)] = &[
+    ("BlipTest.java", 14),
+    ("DeviceHistoryTest.java", 6),
+    ("ReleaseManifestTest.java", 50),
+];
 
 /// The generated runner's class.
 pub const RUNNER_CLASS: &str = "bleradar.xtask.JUnitLiteRunner";
@@ -478,13 +481,21 @@ mod tests {
             "class com.hse.bleradar.BlipTest tests={} failed={}\n",
             blip.0, blip.1
         ));
+        // The other pinned classes report their pinned count, all passing.
+        let history = HOST_TEST_CLASSES
+            .iter()
+            .find(|(name, _)| *name == "DeviceHistoryTest.java")
+            .map_or(0, |(_, count)| *count);
+        text.push_str(&format!(
+            "class com.hse.bleradar.DeviceHistoryTest tests={history} failed=0\n"
+        ));
         text.push_str(&format!(
             "class com.hse.bleradar.ReleaseManifestTest tests={} failed={}\n",
             manifest.0, manifest.1
         ));
         text.push_str(&format!(
             "summary tests={} failed={}\n",
-            blip.0 + manifest.0,
+            blip.0 + history + manifest.0,
             blip.1 + manifest.1
         ));
         text
@@ -527,11 +538,12 @@ mod tests {
                 .unwrap()
         };
         let (blip, manifest) = (pinned("BlipTest.java"), pinned("ReleaseManifestTest.java"));
+        let total = blip + pinned("DeviceHistoryTest.java") + manifest;
         let good = report((blip, 0), (manifest, 0), true);
-        assert_eq!(check_runner_report(&good), Ok(blip + manifest));
+        assert_eq!(check_runner_report(&good), Ok(total));
         let parsed = parse_runner_report(&good);
         assert!(parsed.native_available);
-        assert_eq!(parsed.summary, Some((blip + manifest, 0)));
+        assert_eq!(parsed.summary, Some((total, 0)));
 
         let vacuous = check_runner_report(&report((blip, 0), (manifest, 0), false)).unwrap_err();
         assert!(

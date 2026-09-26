@@ -8,21 +8,28 @@ mod advancement;
 mod evidence;
 mod fusion;
 mod geo;
+mod history;
 mod identity;
 mod infrastructure;
 mod osint;
 mod pipeline;
 mod runtime;
 mod signal;
+mod sweep;
 mod tracking;
 mod validation;
 mod verification;
 mod website;
 
+/// Bounds-checked, panic-free BLE advertising-payload decoder (AD structures,
+/// service UUIDs, manufacturer/service data, iBeacon and Eddystone).
+pub mod adv;
 /// Huntsman Search Engine (HSE) universal coordinate parser.
 pub mod coords;
 /// Huntsman Search Engine (HSE) entity model.
 pub mod entity;
+/// Machine-readable capability registry and the supersession matrix it renders.
+pub mod registry;
 /// Huntsman Search Engine (HSE) canonical entity tag vocabulary.
 pub mod tags;
 /// Robust, deterministic automatic-update engine (version/integrity/lifecycle).
@@ -60,8 +67,13 @@ pub use fusion::{
     ExpectedEvidence, FalsificationReport, FusionError, FusionResult, HypothesisScore,
 };
 pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
+pub use history::{
+    HISTORY_HEADER, History, HistoryRecord, MAX_ENTRIES as HISTORY_MAX_ENTRIES,
+    VISIT_GAP_MS as HISTORY_VISIT_GAP_MS, history_lookup, history_merge, is_history_key,
+};
 pub use identity::{
-    AddressKind, DeviceIdentity, IdentityEvidence, canonical_mac, is_locally_administered,
+    AddressKind, DeviceIdentity, Distinctiveness, IdentityEvidence, IdentityMatch, MatchVerdict,
+    canonical_mac, group_key, is_locally_administered, resolve,
 };
 pub use infrastructure::{
     CompetingExplanation, ControlAssessment, CorrelationEdge, CorrelationFactors,
@@ -89,6 +101,11 @@ pub use signal::{
     ble_distance_m, ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
     effective_rssi_at_1m_dbm, filtered_rssi, proximity_label, proximity_label_from_distance_m,
     signal_confidence_percent, signal_trend,
+};
+pub use sweep::{
+    ANDROID_UNAVAILABLE, AddressTrackability, CellRadio, RssiReliability, address_trackability,
+    is_numeric_segment, is_real_device_address, sighting_key, tower_id, usable_cell_identity,
+    usable_dbm, wifi_channel, wifi_proximity, wifi_rssi_reliability,
 };
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass, MapPoint,

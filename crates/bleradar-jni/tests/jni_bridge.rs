@@ -394,6 +394,21 @@ fn proximity_ordinals_match_documented_mapping() {
 }
 
 #[test]
+fn address_trackability_ordinals_match_documented_mapping() {
+    use bleradar_jni::address_trackability_ordinal;
+    // Globally-administered (real hardware) → Trackable (0).
+    assert_eq!(address_trackability_ordinal("a4:c1:38:00:11:22"), 0);
+    // Locally-administered (U/L bit set) → Randomized (1): a rotating/privacy
+    // address is never a followable device.
+    assert_eq!(address_trackability_ordinal("02:11:22:33:44:55"), 1);
+    // Not a canonicalisable MAC (or empty) → Unknown (2), never assumed followable.
+    assert_eq!(address_trackability_ordinal("not-a-mac"), 2);
+    assert_eq!(address_trackability_ordinal(""), 2);
+    // Separator-insensitive: a hyphenated hardware address still classifies.
+    assert_eq!(address_trackability_ordinal("A4-C1-38-00-11-22"), 0);
+}
+
+#[test]
 fn signal_trend_ordinals_match_documented_mapping() {
     assert_eq!(signal_trend_ordinal(-80.0, -60.0, 3.0), 0); // Stronger
     assert_eq!(signal_trend_ordinal(-60.0, -80.0, 3.0), 1); // Weaker
@@ -948,4 +963,269 @@ fn manifest_source_decision_ordinal_maps_every_disposition_and_never_retries_on_
         1,
         "the kind still reads"
     );
+}
+
+/// Hex-encoded advertising payloads shared with the host-JVM API proof
+/// (`xtask/src/apilive.rs`): an iBeacon, an Eddystone-URL frame, and plain
+/// Microsoft (0x0006) manufacturer data behind a flags structure.
+const IBEACON_HEX: &str = "1aff4c0002150102030405060708090a0b0c0d0e0f1000010002c5";
+const EDDYSTONE_URL_HEX: &str = "0303aafe0a16aafe10ee0368736500";
+const MICROSOFT_HEX: &str = "02010605ff06000102";
+
+#[test]
+fn advertisement_summaries_decode_through_the_core() {
+    use bleradar_jni::{advertisement_beacon, advertisement_company_id};
+    assert_eq!(
+        advertisement_company_id(IBEACON_HEX).as_deref(),
+        Some("004c")
+    );
+    assert_eq!(
+        advertisement_beacon(IBEACON_HEX).as_deref(),
+        Some("iBeacon")
+    );
+    assert_eq!(advertisement_company_id(EDDYSTONE_URL_HEX), None);
+    assert_eq!(
+        advertisement_beacon(EDDYSTONE_URL_HEX).as_deref(),
+        Some("Eddystone-URL")
+    );
+    assert_eq!(
+        advertisement_company_id(MICROSOFT_HEX).as_deref(),
+        Some("0006")
+    );
+    assert_eq!(advertisement_beacon(MICROSOFT_HEX), None);
+    // A malformed hand-off (odd length, non-hex) is no decode at all.
+    for bad in ["", "1af", "zz", "1aff4c00021"] {
+        assert_eq!(advertisement_company_id(bad), None, "{bad}");
+        assert_eq!(advertisement_beacon(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn advertisement_exports_answer_through_the_string_bridge() {
+    use bleradar_jni::{
+        Java_com_hse_bleradar_NativeRadar_advertisementBeacon,
+        Java_com_hse_bleradar_NativeRadar_advertisementCompanyId,
+    };
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let ibeacon = mock.string(IBEACON_HEX);
+    assert_eq!(
+        mock.read(Java_com_hse_bleradar_NativeRadar_advertisementCompanyId(
+            env, null, ibeacon
+        ))
+        .as_deref(),
+        Some("004c")
+    );
+    assert_eq!(
+        mock.read(Java_com_hse_bleradar_NativeRadar_advertisementBeacon(
+            env, null, ibeacon
+        ))
+        .as_deref(),
+        Some("iBeacon")
+    );
+    // No beacon, no manufacturer data, a null string and a null env all answer
+    // null — never an invented value.
+    let flags_only = mock.string("020106");
+    assert!(Java_com_hse_bleradar_NativeRadar_advertisementBeacon(env, null, flags_only).is_null());
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_advertisementCompanyId(env, null, flags_only).is_null()
+    );
+    assert!(Java_com_hse_bleradar_NativeRadar_advertisementBeacon(env, null, null).is_null());
+    assert!(
+        Java_com_hse_bleradar_NativeRadar_advertisementCompanyId(null, null, ibeacon).is_null()
+    );
+}
+
+/// The advertising data the emulator proof's virtual beacon sends
+/// (`xtask/src/hci.rs::advertising_data("bleradar-beacon", 0xFFFF, &[0xBE,
+/// 0xAC])`, significant bytes): flags, the complete local name, and
+/// manufacturer data under 0xFFFF, the SIG's testing identifier. xtask stays
+/// outside this crate graph (decision 24), so the vector is pinned here and the
+/// two meet on the runtime, where `verify-android-emulator` requires the row's
+/// `company_id` to be `ffff` and its `beacon` null.
+const EMULATOR_BEACON_HEX: &str = "0201061009626c6572616461722d626561636f6e05ffffffbeac";
+
+#[test]
+fn the_emulator_beacon_decodes_to_what_the_runtime_proof_requires() {
+    use bleradar_jni::{advertisement_beacon, advertisement_company_id};
+    assert_eq!(
+        advertisement_company_id(EMULATOR_BEACON_HEX).as_deref(),
+        Some("ffff")
+    );
+    assert_eq!(advertisement_beacon(EMULATOR_BEACON_HEX), None);
+    let report = bleradar_core::adv::decode_hex(EMULATOR_BEACON_HEX);
+    assert_eq!(
+        report.complete_local_name.as_deref(),
+        Some("bleradar-beacon")
+    );
+    assert_eq!(report.flags, Some(0x06));
+    // Android hands over the whole zero-padded advertising + scan-response
+    // buffer; the padding must not change the decode.
+    let padded = format!("{EMULATOR_BEACON_HEX}{}", "00".repeat(62 - 26));
+    assert_eq!(bleradar_core::adv::decode_hex(&padded), report);
+}
+
+#[test]
+fn device_group_key_correlates_rotating_addresses_and_keys_public_by_address() {
+    use bleradar_jni::device_group_key;
+    // A randomized (U/L-set) address keys by the advertisement's correlation id,
+    // so two rotating addresses of one device share a key (iBeacon payload +
+    // name here make the evidence distinctive).
+    let a = device_group_key("42:11:22:33:44:55", IBEACON_HEX);
+    let b = device_group_key("7e:aa:bb:cc:dd:ee", IBEACON_HEX);
+    assert!(a.is_some());
+    assert_eq!(a, b);
+    assert_ne!(a.as_deref(), Some("42:11:22:33:44:55"));
+    // A public (U/L-clear) address keys by itself.
+    assert_eq!(
+        device_group_key("a4:c1:38:00:00:01", IBEACON_HEX).as_deref(),
+        Some("a4:c1:38:00:00:01")
+    );
+    // A randomized address with no distinctive evidence has no key.
+    assert_eq!(device_group_key("42:11:22:33:44:55", "020106"), None);
+    // Malformed inputs answer None.
+    assert_eq!(device_group_key("not-a-mac", IBEACON_HEX), None);
+}
+
+#[test]
+fn device_group_key_export_answers_through_the_string_bridge() {
+    use bleradar_jni::Java_com_hse_bleradar_NativeRadar_deviceGroupKey;
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let mac = mock.string("a4:c1:38:00:00:01");
+    let hex = mock.string(IBEACON_HEX);
+    assert_eq!(
+        mock.read(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
+            env, null, mac, hex
+        ))
+        .as_deref(),
+        Some("a4:c1:38:00:00:01")
+    );
+    // Null MAC and null env both answer null.
+    assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(env, null, null, hex).is_null());
+    assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(null, null, mac, hex).is_null());
+}
+
+#[test]
+fn advertisement_manufacturer_name_resolves_known_ids_only() {
+    use bleradar_jni::advertisement_manufacturer_name;
+    assert_eq!(
+        advertisement_manufacturer_name(IBEACON_HEX).as_deref(),
+        Some("Apple")
+    );
+    assert_eq!(
+        advertisement_manufacturer_name(MICROSOFT_HEX).as_deref(),
+        Some("Microsoft")
+    );
+    // A testing id (0xFFFF) and no-manufacturer payloads have no name.
+    assert_eq!(advertisement_manufacturer_name(EMULATOR_BEACON_HEX), None);
+    assert_eq!(advertisement_manufacturer_name("020106"), None);
+    assert_eq!(advertisement_manufacturer_name(""), None);
+}
+
+#[test]
+fn advertisement_manufacturer_name_export_answers_through_the_string_bridge() {
+    use bleradar_jni::Java_com_hse_bleradar_NativeRadar_advertisementManufacturerName as name_of;
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let ibeacon = mock.string(IBEACON_HEX);
+    assert_eq!(
+        mock.read(name_of(env, null, ibeacon)).as_deref(),
+        Some("Apple")
+    );
+    // Unknown id, null string and null env all answer null.
+    let ffff = mock.string(EMULATOR_BEACON_HEX);
+    assert!(name_of(env, null, ffff).is_null());
+    assert!(name_of(env, null, null).is_null());
+    assert!(name_of(null, null, ibeacon).is_null());
+}
+
+/// An advertisement with a Heart Rate (0x180D) + Battery (0x180F) service list.
+const SERVICES_HEX: &str = "05030d180f18";
+
+#[test]
+fn advertisement_services_names_known_services() {
+    use bleradar_jni::advertisement_services;
+    assert_eq!(
+        advertisement_services(SERVICES_HEX).as_deref(),
+        Some("Heart Rate, Battery")
+    );
+    // The Eddystone frame carries a 0xFEAA service list → "Eddystone".
+    assert_eq!(
+        advertisement_services(EDDYSTONE_URL_HEX).as_deref(),
+        Some("Eddystone")
+    );
+    // No service list → None.
+    assert_eq!(advertisement_services(IBEACON_HEX), None);
+    assert_eq!(advertisement_services("020106"), None);
+    assert_eq!(advertisement_services(""), None);
+}
+
+#[test]
+fn advertisement_services_export_answers_through_the_string_bridge() {
+    use bleradar_jni::Java_com_hse_bleradar_NativeRadar_advertisementServices as services_of;
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let hex = mock.string(SERVICES_HEX);
+    assert_eq!(
+        mock.read(services_of(env, null, hex)).as_deref(),
+        Some("Heart Rate, Battery")
+    );
+    let none = mock.string(IBEACON_HEX);
+    assert!(services_of(env, null, none).is_null());
+    assert!(services_of(env, null, null).is_null());
+    assert!(services_of(null, null, hex).is_null());
+}
+
+#[test]
+fn history_merge_and_lookup_keep_only_public_devices_across_sessions() {
+    use bleradar_jni::{history_lookup, history_merge};
+    let public = "3c:5a:b4:11:22:01";
+    let randomized = "aa:bb:cc:dd:ee:02";
+    let state = history_merge("", &format!("{public}\n{randomized}\n"), 1_000);
+    // A later session, past the visit gap, loaded from the persisted text.
+    let state = history_merge(&state, public, 1_000 + 10 * 60 * 1000);
+    assert_eq!(
+        history_lookup(&state, &format!("{public}\n{randomized}")),
+        "1000\t2\n\n"
+    );
+    // A negative wall clock clamps to zero instead of wrapping.
+    assert_eq!(
+        history_lookup(&history_merge("", public, -5), public),
+        "0\t1\n"
+    );
+    // Garbage state starts over.
+    assert_eq!(history_lookup("garbage", public), "\n");
+}
+
+#[test]
+fn history_exports_answer_through_the_string_bridge() {
+    use bleradar_jni::{
+        Java_com_hse_bleradar_NativeRadar_historyLookup as lookup,
+        Java_com_hse_bleradar_NativeRadar_historyMerge as merge,
+    };
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let key = mock.string("3c:5a:b4:11:22:01");
+    // A null state is an empty history: the first launch.
+    let state = mock.read(merge(env, null, null, key, 42)).expect("state");
+    assert!(state.starts_with("bleradar-history v1\n"), "{state:?}");
+    let state_ref = mock.string(&state);
+    assert_eq!(
+        mock.read(lookup(env, null, state_ref, key)).as_deref(),
+        Some("42\t1\n")
+    );
+    // A null key list merges nothing but still returns the state.
+    assert_eq!(
+        mock.read(merge(env, null, state_ref, null, 43)).as_deref(),
+        Some(state.as_str())
+    );
+    assert!(lookup(env, null, state_ref, null).is_null());
+    assert!(merge(null, null, state_ref, key, 1).is_null());
+    assert!(lookup(null, null, state_ref, key).is_null());
 }

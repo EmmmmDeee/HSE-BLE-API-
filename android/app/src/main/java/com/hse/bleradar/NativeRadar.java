@@ -108,8 +108,15 @@ public final class NativeRadar {
     /** {@link #remoteManifestDisposition(int, int)} result: assess the bundled manifest; nothing to retry before the next scheduled check. */
     public static final int MANIFEST_SOURCE_FALLBACK_NO_RETRY = 2;
 
+    /** {@link #deviceAddressTrackability(String)} result: a globally-administered (real hardware) address — a followable device. */
+    public static final int TRACKABILITY_TRACKABLE = 0;
+    /** {@link #deviceAddressTrackability(String)} result: a locally-administered (rotating/privacy) address — a throwaway, never a followable device. */
+    public static final int TRACKABILITY_RANDOMIZED = 1;
+    /** {@link #deviceAddressTrackability(String)} result: not a canonicalisable MAC (or null), so trackability is unknown — never assumed followable. */
+    public static final int TRACKABILITY_UNKNOWN = 2;
+
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 11;
+    public static final int EXPECTED_ABI_VERSION = 17;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -487,4 +494,79 @@ public final class NativeRadar {
      * artifact becomes installable.
      */
     public static native int artifactVerifyFile(String path, String manifestText);
+
+    /**
+     * Classifies a BLE/Wi-Fi device address as one of the {@code TRACKABILITY_*}
+     * constants above, from the U/L bit of its canonical MAC. A
+     * locally-administered address is a rotating/privacy address — a throwaway
+     * the radar must never plot or track as a followable physical device — while
+     * a globally-administered address is real hardware. A string that is not a
+     * canonicalisable MAC (or null) is {@link #TRACKABILITY_UNKNOWN}, never
+     * assumed followable. Owned by {@code bleradar_core::address_trackability}.
+     */
+    public static native int deviceAddressTrackability(String mac);
+
+    /**
+     * The first manufacturer company identifier in a BLE advertising payload
+     * ({@code ScanRecord.getBytes()} as lowercase or uppercase hex), as four
+     * lowercase hex digits (for example {@code "004c"} for Apple), or
+     * {@code null} when the payload has no manufacturer data or the hand-off is
+     * malformed. Decoded by {@code bleradar_core::adv}, the single authority.
+     */
+    public static native String advertisementCompanyId(String advertisementHex);
+
+    /**
+     * The recognised beacon kind in a BLE advertising payload (hex as above) —
+     * {@code "iBeacon"}, {@code "Eddystone-UID"}, {@code "Eddystone-URL"} or
+     * {@code "Eddystone-TLM"} — or {@code null}: a frame that does not match a
+     * beacon shape is never force-fit. Decoded by {@code bleradar_core::adv}.
+     */
+    public static native String advertisementBeacon(String advertisementHex);
+
+    /**
+     * The stable key to group observations of one physical device under, across
+     * BLE address rotation, from its MAC and hex advertising payload
+     * ({@code ScanRecord.getBytes()}), or {@code null} when it cannot be grouped.
+     * A public (stable) address keys by itself; a randomized (rotating) address
+     * keys by the advertisement's distinctive shape, so a device's successive
+     * random addresses share one key. Two devices with the same non-null key are
+     * the same device (public) or at least possibly the same (randomized).
+     * Owned by {@code bleradar_core::group_key}.
+     */
+    public static native String deviceGroupKey(String mac, String advertisementHex);
+
+    /**
+     * The Bluetooth SIG assignee name for the first manufacturer block's company
+     * identifier in a BLE advertising payload (hex), or {@code null} when there
+     * is no manufacturer data or the identifier is not in the bundled table — in
+     * which case the caller shows the raw {@link #advertisementCompanyId} hex.
+     * Owned by {@code bleradar_core::adv::company_name}, a curated, versioned
+     * subset of the public Bluetooth SIG Assigned Numbers.
+     */
+    public static native String advertisementManufacturerName(String advertisementHex);
+
+    /**
+     * The names of the advertisement's well-known Bluetooth SIG services
+     * (hex payload), comma-separated (for example {@code "Heart Rate, Battery"}),
+     * or {@code null} when none are named — the raw service UUIDs remain in the
+     * decoded advertisement. Owned by {@code bleradar_core::adv::service_uuid_name}.
+     */
+    public static native String advertisementServices(String advertisementHex);
+
+    /**
+     * Records each newline-separated device key (a canonical public address;
+     * anything else is ignored) at {@code nowEpochMillis} into the device
+     * history serialized as {@code state} ({@code null} or unparseable starts
+     * empty) and returns the new serialization, or {@code null} only on a VM
+     * failure. Owned by {@code bleradar_core::history}: which keys are kept,
+     * what counts as a new visit, the size bound and damaged-file recovery.
+     */
+    public static native String historyMerge(String state, String keys, long nowEpochMillis);
+
+    /**
+     * For each newline-separated key, one line {@code first_seen_ms\tvisits}
+     * when the history serialized as {@code state} remembers it, or an empty
+     * line; {@code null} for a {@code null} key list.
+     */
+    public static native String historyLookup(String state, String keys);
 }

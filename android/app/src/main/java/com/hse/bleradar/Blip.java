@@ -29,6 +29,62 @@ final class Blip {
     volatile int trend = NativeRadar.TREND_STABLE;
     volatile int freshness = NativeRadar.FRESHNESS_STALE;
     volatile int confidencePercent;
+    /**
+     * BLE address trackability — one of {@link NativeRadar}'s {@code TRACKABILITY_*}
+     * constants. Classified once from the device's canonical MAC (the address is
+     * fixed for the life of a blip). A locally-administered (rotating/privacy)
+     * address is {@link NativeRadar#TRACKABILITY_RANDOMIZED} and must never be
+     * treated as a followable physical device; real hardware is
+     * {@link NativeRadar#TRACKABILITY_TRACKABLE}. Defaults to
+     * {@link NativeRadar#TRACKABILITY_UNKNOWN} until the native core classifies it.
+     */
+    volatile int trackability = NativeRadar.TRACKABILITY_UNKNOWN;
+    /**
+     * The advertisement summary decoded by the Rust core, or {@code null} until
+     * a payload has been decoded. Published as one immutable object so a reader
+     * (the API/UI thread) never sees the company identifier from one
+     * advertisement paired with the beacon kind from another.
+     */
+    volatile AdvSummary advertisement;
+    /**
+     * The hex advertising payload {@link #advertisement} was decoded from, so an
+     * unchanged advertisement is not re-decoded on every scan result.
+     */
+    volatile String lastAdvertisementHex;
+
+    /** The advertisement-derived summaries the Rust core produces, published together. */
+    static final class AdvSummary {
+        /** First manufacturer company identifier (four lowercase hex digits), or {@code null}. */
+        final String companyId;
+        /** Recognised beacon kind (e.g. {@code "iBeacon"}), or {@code null}. */
+        final String beacon;
+        /** Manufacturer (Bluetooth SIG assignee) name, or {@code null} when unknown. */
+        final String manufacturer;
+        /** Comma-separated well-known service names (e.g. {@code "Heart Rate, Battery"}), or {@code null}. */
+        final String services;
+        /**
+         * Stable cross-rotation grouping key, or {@code null} when the device
+         * cannot be grouped — the Rust {@code group_key}. Two blips with the same
+         * non-null key are the same physical device across address rotation.
+         */
+        final String identityKey;
+
+        AdvSummary(String companyId, String beacon, String manufacturer, String services, String identityKey) {
+            this.companyId = companyId;
+            this.beacon = beacon;
+            this.manufacturer = manufacturer;
+            this.services = services;
+            this.identityKey = identityKey;
+        }
+    }
+    /**
+     * Wall-clock time this device was first seen, across every session the
+     * persistent {@link DeviceHistory} remembers, or {@code -1} when it is not
+     * remembered (a randomized address, or no native core).
+     */
+    volatile long firstSeenEpochMillis = -1L;
+    /** Separate visits the history remembers, or {@code 0} when not remembered. */
+    volatile int visits;
     volatile long lastSeenUptimeMillis;
     /**
      * Most recently observed device-advertised TX power in dBm, or

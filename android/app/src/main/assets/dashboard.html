@@ -100,7 +100,7 @@ footer a { color: var(--info); }
       <thead>
         <tr>
           <th>#</th><th>Address</th><th>Name</th><th>Distance</th><th>RSSI</th>
-          <th>Proximity</th><th>Trend</th><th>Freshness</th><th>Confidence</th><th>Seen</th>
+          <th>Proximity</th><th>Address type</th><th>Advertisement</th><th>Identity</th><th>Trend</th><th>Freshness</th><th>Confidence</th><th>Seen</th>
         </tr>
       </thead>
       <tbody id="devices"></tbody>
@@ -237,23 +237,60 @@ footer a { color: var(--info); }
     return span;
   }
 
+  // The persistent cross-session history: "3 visits since 2026-09-25" (UTC date).
+  function fmtHistory(device) {
+    if (!isNumber(device.visits) || !isNumber(device.first_seen_ms) || device.visits < 1) {
+      return '';
+    }
+    var since = new Date(device.first_seen_ms).toISOString().slice(0, 10);
+    return device.visits + (device.visits === 1 ? ' visit' : ' visits') + ' since ' + since;
+  }
+
   function renderDevices(devices) {
     var rows = document.createDocumentFragment();
     for (var i = 0; i < devices.length; i++) {
       var device = devices[i];
       var proximity = text(device.proximity, 'UNKNOWN');
+      var trackability = text(device.trackability, 'UNKNOWN');
       var trend = text(device.trend, 'UNKNOWN');
       var freshness = text(device.freshness, 'UNKNOWN');
       var tr = document.createElement('tr');
       tr.setAttribute('data-address', text(device.address, ''));
       tr.setAttribute('data-freshness', freshness);
       tr.setAttribute('data-proximity', proximity);
+      tr.setAttribute('data-trackability', trackability);
+      var beacon = text(device.beacon, '');
+      var companyId = text(device.company_id, '');
+      var manufacturer = text(device.manufacturer, '');
+      var identityKey = text(device.identity_key, '');
+      var services = text(device.services, '');
+      var advParts = [];
+      if (manufacturer) { advParts.push(manufacturer); }
+      if (beacon) { advParts.push(beacon); }
+      if (services) { advParts.push(services); }
+      var advText = advParts.join(' · ') || (companyId ? 'mfr ' + companyId : '—');
+      if (beacon) {
+        tr.setAttribute('data-beacon', beacon);
+      }
+      if (identityKey) {
+        tr.setAttribute('data-identity', identityKey);
+      }
+      if (services) {
+        tr.setAttribute('data-services', services);
+      }
+      var history = fmtHistory(device);
+      if (history) {
+        tr.setAttribute('data-visits', String(device.visits));
+      }
       cell(tr, String(i + 1), 'num');
       cell(tr, text(device.address, '—'), 'addr');
       cell(tr, text(device.name, '') || 'Unnamed device');
       cell(tr, distanceCell(device));
       cell(tr, fmtRssi(device.rssi_dbm), 'num');
       cell(tr, proximity, 'prox-' + proximity);
+      cell(tr, trackability, 'track-' + trackability);
+      cell(tr, advText, 'adv');
+      cell(tr, [identityKey || '—', history].filter(Boolean).join(' · '), 'ident');
       cell(tr, (TREND_GLYPH[trend] || '—') + ' ' + trend);
       cell(tr, freshness);
       cell(tr, fmtPercent(device.confidence_percent), 'num');

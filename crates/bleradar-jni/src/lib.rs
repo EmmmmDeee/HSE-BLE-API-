@@ -109,6 +109,111 @@ pub fn proximity_label_ordinal(rssi_dbm: f64) -> i32 {
 }
 
 /// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_deviceAddressTrackability`].
+///
+/// Encodes [`bleradar_core::AddressTrackability`] as a small ordinal
+/// (`0` = `Trackable`, `1` = `Randomized`, `2` = `Unknown`) since JNI has no
+/// shared enum type; `NativeRadar.java` mirrors this mapping in matching `int`
+/// constants. A MAC that does not canonicalise is `Unknown` (`2`), never
+/// silently treated as a followable device — the BLE-radar failure mode this
+/// classification exists to prevent (a rotating/randomized address is a
+/// throwaway, not a physical device to track).
+#[must_use]
+pub fn address_trackability_ordinal(mac: &str) -> i32 {
+    use bleradar_core::AddressTrackability::{Randomized, Trackable, Unknown};
+    match bleradar_core::address_trackability(mac) {
+        Trackable => 0,
+        Randomized => 1,
+        Unknown => 2,
+    }
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_advertisementCompanyId`]: the first
+/// manufacturer company identifier in a hex-encoded BLE advertising payload, as
+/// four lowercase hex digits, or `None` (no manufacturer data, or a malformed
+/// hand-off). Decoded by [`bleradar_core::adv`], the single authority.
+#[must_use]
+pub fn advertisement_company_id(advertisement_hex: &str) -> Option<String> {
+    bleradar_core::adv::summary_company_id(&bleradar_core::adv::decode_hex(advertisement_hex))
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_advertisementManufacturerName`]: the
+/// Bluetooth SIG assignee name for the first manufacturer block's company
+/// identifier in a hex-encoded advertising payload, or `None` when there is no
+/// manufacturer data or the identifier is not in the bundled table (the caller
+/// then shows the raw hex id). Owned by [`bleradar_core::adv::company_name`].
+#[must_use]
+pub fn advertisement_manufacturer_name(advertisement_hex: &str) -> Option<String> {
+    bleradar_core::adv::summary_manufacturer_name(&bleradar_core::adv::decode_hex(
+        advertisement_hex,
+    ))
+    .map(str::to_string)
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_advertisementServices`]: the names of the
+/// advertisement's well-known Bluetooth SIG services, comma-separated (for
+/// example `"Heart Rate, Battery"`), or `None` when none are named. Owned by
+/// [`bleradar_core::adv::summary_service_names`]; the raw UUIDs stay available.
+#[must_use]
+pub fn advertisement_services(advertisement_hex: &str) -> Option<String> {
+    let report = bleradar_core::adv::decode_hex(advertisement_hex);
+    let names = bleradar_core::adv::summary_service_names(&report);
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_historyMerge`]: records each
+/// newline-separated key at `now_ms` (wall clock; a negative value clamps to
+/// 0) into the device history serialized as `state` and returns the new
+/// serialization. Owned by [`bleradar_core::history_merge`]; an unparseable
+/// `state` starts an empty history, never an error.
+#[must_use]
+pub fn history_merge(state: &str, keys: &str, now_ms: i64) -> String {
+    bleradar_core::history_merge(state, keys, jni_nonneg_u64(now_ms))
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_historyLookup`]: one line per
+/// newline-separated key, `first_seen_ms\tvisits` when the history remembers
+/// it and empty otherwise. Owned by [`bleradar_core::history_lookup`].
+#[must_use]
+pub fn history_lookup(state: &str, keys: &str) -> String {
+    bleradar_core::history_lookup(state, keys)
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_advertisementBeacon`]: the recognised
+/// beacon kind (`iBeacon`, `Eddystone-UID`, `Eddystone-URL`, `Eddystone-TLM`)
+/// in a hex-encoded BLE advertising payload, or `None` — a frame that does not
+/// match a beacon shape is never force-fit.
+#[must_use]
+pub fn advertisement_beacon(advertisement_hex: &str) -> Option<String> {
+    bleradar_core::adv::summary_beacon(&bleradar_core::adv::decode_hex(advertisement_hex))
+        .map(str::to_string)
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_deviceGroupKey`]: the stable key to group
+/// observations of one physical device under across address rotation, from its
+/// MAC and hex-encoded advertising payload, or `None` when it cannot be grouped
+/// (a public address keys by itself; a randomized address keys by the
+/// advertisement's correlation id, or `None` when the evidence is too sparse).
+/// Owned by [`bleradar_core::group_key`], fed by [`bleradar_core::adv`].
+#[must_use]
+pub fn device_group_key(mac: &str, advertisement_hex: &str) -> Option<String> {
+    let report = bleradar_core::adv::decode_hex(advertisement_hex);
+    let evidence = bleradar_core::IdentityEvidence::from_advertisement(&report, None);
+    bleradar_core::group_key(mac, &evidence)
+}
+
+/// Pure, unit-testable core of
 /// [`Java_com_hse_bleradar_NativeRadar_signalTrend`].
 ///
 /// Encodes [`SignalTrend`] as a small ordinal (`0` = [`SignalTrend::Stronger`],
@@ -1301,6 +1406,128 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(
     artifact_verify_file(&path, &manifest_text)
 }
 
+/// `NativeRadar.deviceAddressTrackability(String): int` — see
+/// [`address_trackability_ordinal`]. Reads `env` only through [`env`](mod@env);
+/// a null MAC canonicalises to nothing and so is `Unknown` (`2`), never a
+/// followable device.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceAddressTrackability(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    mac: JStringRef,
+) -> i32 {
+    match read_text(env, mac) {
+        Some(mac) => address_trackability_ordinal(&mac),
+        None => 2,
+    }
+}
+
+/// `NativeRadar.advertisementCompanyId(String): String` — see
+/// [`advertisement_company_id`]. Reads `env` only through [`env`](mod@env); a
+/// null payload, a malformed hand-off, or no manufacturer data answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementCompanyId(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    advertisement_hex: JStringRef,
+) -> JStringRef {
+    string_export(env, advertisement_hex, advertisement_company_id)
+}
+
+/// `NativeRadar.advertisementBeacon(String): String` — see
+/// [`advertisement_beacon`]. Reads `env` only through [`env`](mod@env); a null
+/// payload, a malformed hand-off, or no recognised beacon answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementBeacon(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    advertisement_hex: JStringRef,
+) -> JStringRef {
+    string_export(env, advertisement_hex, advertisement_beacon)
+}
+
+/// `NativeRadar.advertisementManufacturerName(String): String` — see
+/// [`advertisement_manufacturer_name`]. Reads `env` only through [`env`](mod@env);
+/// a null payload, a malformed hand-off, or an unknown company identifier
+/// answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementManufacturerName(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    advertisement_hex: JStringRef,
+) -> JStringRef {
+    string_export(env, advertisement_hex, advertisement_manufacturer_name)
+}
+
+/// `NativeRadar.advertisementServices(String): String` — see
+/// [`advertisement_services`]. Reads `env` only through [`env`](mod@env); a null
+/// payload, a malformed hand-off, or no named service answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementServices(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    advertisement_hex: JStringRef,
+) -> JStringRef {
+    string_export(env, advertisement_hex, advertisement_services)
+}
+
+/// `NativeRadar.deviceGroupKey(String, String): String` — see
+/// [`device_group_key`]. Reads `env` only through [`env`](mod@env); a null or
+/// malformed MAC, or a device that cannot be grouped, answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    mac: JStringRef,
+    advertisement_hex: JStringRef,
+) -> JStringRef {
+    let Some(mac) = read_text(env, mac) else {
+        return core::ptr::null_mut();
+    };
+    let advertisement_hex = read_text(env, advertisement_hex).unwrap_or_default();
+    match device_group_key(&mac, &advertisement_hex) {
+        Some(key) => make_text(env, &key),
+        None => core::ptr::null_mut(),
+    }
+}
+
+/// `NativeRadar.historyMerge(String, String, long): String` — see
+/// [`history_merge`]. Reads `env` only through [`env`](mod@env); a null state
+/// or key list is read as empty, and only a null `env` or a VM allocation
+/// failure answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_historyMerge(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    state: JStringRef,
+    keys: JStringRef,
+    now_ms: i64,
+) -> JStringRef {
+    if env.is_null() {
+        return core::ptr::null_mut();
+    }
+    let state = read_text(env, state).unwrap_or_default();
+    let keys = read_text(env, keys).unwrap_or_default();
+    make_text(env, &history_merge(&state, &keys, now_ms))
+}
+
+/// `NativeRadar.historyLookup(String, String): String` — see
+/// [`history_lookup`]. Reads `env` only through [`env`](mod@env); a null state
+/// is an empty history, a null key list answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_historyLookup(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    state: JStringRef,
+    keys: JStringRef,
+) -> JStringRef {
+    let Some(keys) = read_text(env, keys) else {
+        return core::ptr::null_mut();
+    };
+    let state = read_text(env, state).unwrap_or_default();
+    make_text(env, &history_lookup(&state, &keys))
+}
+
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side
 /// calls once at startup to confirm the loaded `.so` matches the ABI this
 /// file documents, independent of the app's own version number.
@@ -1312,11 +1539,20 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(
 /// and to `10` when the string bridge and the release-manifest / artifact
 /// surface (`releaseManifestCanonical`, `releaseManifestError`,
 /// `releaseManifestField`, `artifactVerifyFile`) were added, and to `11` when
-/// the remote-manifest disposition (`remoteManifestDisposition`) was added.
+/// the remote-manifest disposition (`remoteManifestDisposition`) was added, and
+/// to `12` when the BLE address trackability classification
+/// (`deviceAddressTrackability`) was added, and to `13` when the BLE
+/// advertisement decoder surface (`advertisementCompanyId`,
+/// `advertisementBeacon`) was added, and to `14` when the rotating-address
+/// identity grouping (`deviceGroupKey`) was added, and to `15` when the
+/// manufacturer-name lookup (`advertisementManufacturerName`) was added, and to
+/// `16` when the service-name lookup (`advertisementServices`) was added, and
+/// to `17` when the cross-session device history (`historyMerge`,
+/// `historyLookup`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    11
+    17
 }

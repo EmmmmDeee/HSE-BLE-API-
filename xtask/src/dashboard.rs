@@ -76,10 +76,10 @@ const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// the JSON and rendered as text, never as markup.
 pub const DEVICES_JSON: &str = concat!(
     r#"{"devices":["#,
-    r#"{"address":"AA:BB:CC:DD:EE:01","name":"Tag Alpha","distance_m":1.234,"distance_lower_m":0.8,"distance_upper_m":1.9,"rssi_dbm":-61.4,"proximity":"NEAR","trend":"STRONGER","freshness":"LIVE","confidence_percent":87,"last_seen_ago_ms":420},"#,
-    r#"{"address":"AA:BB:CC:DD:EE:02","name":"<b>evil</b> \"Ünïcødé\" \\ 😀","distance_m":7.5,"distance_lower_m":5.2,"distance_upper_m":11.0,"rssi_dbm":-78.0,"proximity":"MID","trend":"WEAKER","freshness":"RECENT","confidence_percent":52,"last_seen_ago_ms":12345},"#,
-    r#"{"address":"AA:BB:CC:DD:EE:03","name":null,"distance_m":null,"distance_lower_m":null,"distance_upper_m":null,"rssi_dbm":-90.2,"proximity":"FAR","trend":"UNKNOWN","freshness":"STALE","confidence_percent":0,"last_seen_ago_ms":75000},"#,
-    r#"{"address":"AA:BB:CC:DD:EE:04","name":"Beacon Delta","distance_m":0.4,"distance_lower_m":0.3,"distance_upper_m":0.6,"rssi_dbm":-45.0,"proximity":"IMMEDIATE","trend":"STABLE","freshness":"LIVE","confidence_percent":99,"last_seen_ago_ms":90}"#,
+    r#"{"address":"3C:5A:B4:11:22:01","name":"Tag Alpha","distance_m":1.234,"distance_lower_m":0.8,"distance_upper_m":1.9,"rssi_dbm":-61.4,"proximity":"NEAR","trackability":"TRACKABLE","company_id":"004c","manufacturer":"Apple","beacon":"iBeacon","services":null,"identity_key":"3c:5a:b4:11:22:01","first_seen_ms":1757000000000,"visits":2,"trend":"STRONGER","freshness":"LIVE","confidence_percent":87,"last_seen_ago_ms":420},"#,
+    r#"{"address":"AA:BB:CC:DD:EE:02","name":"<b>evil</b> \"Ünïcødé\" \\ 😀","distance_m":7.5,"distance_lower_m":5.2,"distance_upper_m":11.0,"rssi_dbm":-78.0,"proximity":"MID","trackability":"RANDOMIZED","company_id":null,"manufacturer":null,"beacon":"Eddystone-URL","services":"Eddystone","identity_key":"p[s:feaa/7]|s[feaa]","first_seen_ms":null,"visits":null,"trend":"WEAKER","freshness":"RECENT","confidence_percent":52,"last_seen_ago_ms":12345},"#,
+    r#"{"address":"AA:BB:CC:DD:EE","name":null,"distance_m":null,"distance_lower_m":null,"distance_upper_m":null,"rssi_dbm":-90.2,"proximity":"FAR","trackability":"UNKNOWN","company_id":null,"manufacturer":null,"beacon":null,"services":null,"identity_key":null,"first_seen_ms":null,"visits":null,"trend":"UNKNOWN","freshness":"STALE","confidence_percent":0,"last_seen_ago_ms":75000},"#,
+    r#"{"address":"AA:BB:CC:DD:EE:04","name":"Beacon Delta","distance_m":0.4,"distance_lower_m":0.3,"distance_upper_m":0.6,"rssi_dbm":-45.0,"proximity":"IMMEDIATE","trackability":"RANDOMIZED","company_id":"0006","manufacturer":"Microsoft","beacon":null,"services":null,"identity_key":"p[m:0006/2/0102]","first_seen_ms":null,"visits":null,"trend":"STABLE","freshness":"LIVE","confidence_percent":99,"last_seen_ago_ms":90}"#,
     r#"],"scanning":true,"native_available":true,"timestamp_ms":1757700000000}"#,
 );
 /// `/api/status` as `ApiHttpServer.statusJson` writes it (uptime 1:02:03).
@@ -618,10 +618,36 @@ pub const HEALTHY_MARKERS: &[&str] = &[
     ">4 devices<",
     ">1:02:03<",
     "retries 2",
-    r#"data-address="AA:BB:CC:DD:EE:01""#,
+    r#"data-address="3C:5A:B4:11:22:01""#,
     r#"data-address="AA:BB:CC:DD:EE:02""#,
-    r#"data-address="AA:BB:CC:DD:EE:03""#,
+    r#"data-address="AA:BB:CC:DD:EE""#,
     r#"data-address="AA:BB:CC:DD:EE:04""#,
+    // Address trackability, classified by the Rust core: real hardware is
+    // TRACKABLE, a locally-administered (rotating) address is RANDOMIZED, a
+    // malformed address is UNKNOWN — rendered, never silently dropped.
+    r#"data-trackability="TRACKABLE""#,
+    r#"data-trackability="RANDOMIZED""#,
+    r#"data-trackability="UNKNOWN""#,
+    r#"class="track-TRACKABLE">TRACKABLE<"#,
+    r#"class="track-RANDOMIZED">RANDOMIZED<"#,
+    // Advertisement decoded by the Rust core: a recognised beacon kind, else
+    // the manufacturer company identifier.
+    r#"data-beacon="iBeacon""#,
+    r#"data-beacon="Eddystone-URL""#,
+    r#"class="adv">Apple · iBeacon<"#,
+    r#"class="adv">Eddystone-URL · Eddystone<"#,
+    r#"data-services="Eddystone""#,
+    r#"class="adv">Microsoft<"#,
+    // Cross-rotation identity grouping keys (Rust group_key): a public device
+    // keyed by its address, a randomized one by its advertisement's shape.
+    r#"data-identity="3c:5a:b4:11:22:01""#,
+    r#"data-identity="p[s:feaa/7]|s[feaa]""#,
+    r#"data-identity="p[m:0006/2/0102]""#,
+    // The persistent cross-session history (Rust bleradar_core::history): the
+    // public device remembered over two visits; nothing else is remembered.
+    r#"data-visits="2""#,
+    r#"class="ident">3c:5a:b4:11:22:01 · 2 visits since 2025-09-04<"#,
+    r#"class="ident">p[s:feaa/7]|s[feaa]<"#,
     "Tag Alpha",
     "&lt;b&gt;evil&lt;/b&gt; \"Ünïcødé\" \\ 😀",
     "Unnamed device",
@@ -1134,8 +1160,8 @@ mod tests {
             assert!(error.contains(marker), "{error}");
         }
         let swapped = healthy_dom().replace(
-            "data-address=\"AA:BB:CC:DD:EE:01\"\ndata-address=\"AA:BB:CC:DD:EE:02\"",
-            "data-address=\"AA:BB:CC:DD:EE:02\"\ndata-address=\"AA:BB:CC:DD:EE:01\"",
+            "data-address=\"3C:5A:B4:11:22:01\"\ndata-address=\"AA:BB:CC:DD:EE:02\"",
+            "data-address=\"AA:BB:CC:DD:EE:02\"\ndata-address=\"3C:5A:B4:11:22:01\"",
         );
         assert_eq!(
             check_dom(Scenario::Healthy, &swapped).unwrap_err(),
@@ -1399,7 +1425,7 @@ mod tests {
     #[test]
     fn json_contract_locks_the_java_writer_the_fixture_and_the_page_together() {
         let counts = check_json_contract(API_HTTP_SERVER_JAVA, DASHBOARD_HTML).unwrap();
-        assert_eq!(counts.get("/api/devices"), Some(&15));
+        assert_eq!(counts.get("/api/devices"), Some(&23));
         assert_eq!(counts.get("/api/status"), Some(&4));
         assert_eq!(counts.get("/api/updates"), Some(&3));
         assert_eq!(counts.get("/api/scan/*"), Some(&1));

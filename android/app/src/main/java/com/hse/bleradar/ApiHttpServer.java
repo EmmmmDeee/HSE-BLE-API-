@@ -48,7 +48,20 @@ import java.util.logging.Logger;
  *       {@code distance_m} / {@code distance_lower_m} /
  *       {@code distance_upper_m} (metres, {@code null} when unavailable),
  *       {@code rssi_dbm} ({@code null} when unavailable), {@code proximity}
- *       ({@code IMMEDIATE|NEAR|MID|FAR|UNKNOWN}), {@code trend}
+ *       ({@code IMMEDIATE|NEAR|MID|FAR|UNKNOWN}), {@code trackability}
+ *       ({@code TRACKABLE|RANDOMIZED|UNKNOWN}), {@code company_id} (the
+ *       advertisement's first manufacturer company identifier as four hex
+ *       digits, {@code null} when absent), {@code manufacturer} (its Bluetooth
+ *       SIG assignee name, {@code null} when the id is unknown), {@code beacon}
+ *       ({@code iBeacon|Eddystone-UID|Eddystone-URL|Eddystone-TLM}, {@code null}
+ *       when not a beacon), {@code services} (comma-separated well-known
+ *       service names, {@code null} when none), {@code identity_key} (the stable cross-rotation
+ *       grouping key, {@code null} when the device cannot be grouped),
+ *       {@code first_seen_ms} (wall-clock epoch milliseconds of the first
+ *       sighting the persistent device history remembers, across sessions) and
+ *       {@code visits} (separate visits it remembers) — both {@code null} when
+ *       the device is not remembered (only public addresses are),
+ *       {@code trend}
  *       ({@code STRONGER|WEAKER|STABLE|UNKNOWN}), {@code freshness}
  *       ({@code LIVE|RECENT|STALE|UNKNOWN}), {@code confidence_percent},
  *       {@code last_seen_ago_ms}; plus the top-level {@code scanning},
@@ -360,6 +373,22 @@ public final class ApiHttpServer {
             json.name("distance_upper_m").value(device.distanceUpperBoundMetres);
             json.name("rssi_dbm").value(device.lastRssiDbm);
             json.name("proximity").value(proximityLabel(device.proximity));
+            json.name("trackability").value(trackabilityLabel(device.trackability));
+            Blip.AdvSummary advertisement = device.advertisement;
+            json.name("company_id").value(advertisement == null ? null : advertisement.companyId);
+            json.name("manufacturer").value(advertisement == null ? null : advertisement.manufacturer);
+            json.name("beacon").value(advertisement == null ? null : advertisement.beacon);
+            json.name("services").value(advertisement == null ? null : advertisement.services);
+            json.name("identity_key").value(advertisement == null ? null : advertisement.identityKey);
+            long firstSeen = device.firstSeenEpochMillis;
+            int visits = device.visits;
+            if (firstSeen >= 0 && visits > 0) {
+                json.name("first_seen_ms").value(firstSeen);
+                json.name("visits").value((long) visits);
+            } else {
+                json.name("first_seen_ms").value((String) null);
+                json.name("visits").value((String) null);
+            }
             json.name("trend").value(trendLabel(device.trend));
             json.name("freshness").value(freshnessLabel(device.freshness));
             json.name("confidence_percent").value(device.confidencePercent);
@@ -435,6 +464,17 @@ public final class ApiHttpServer {
                 return "MID";
             case NativeRadar.PROXIMITY_FAR:
                 return "FAR";
+            default:
+                return "UNKNOWN";
+        }
+    }
+
+    private static String trackabilityLabel(int trackability) {
+        switch (trackability) {
+            case NativeRadar.TRACKABILITY_TRACKABLE:
+                return "TRACKABLE";
+            case NativeRadar.TRACKABILITY_RANDOMIZED:
+                return "RANDOMIZED";
             default:
                 return "UNKNOWN";
         }
