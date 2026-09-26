@@ -77,6 +77,14 @@ final class Blip {
             this.identityKey = identityKey;
         }
     }
+    /**
+     * Wall-clock time this device was first seen, across every session the
+     * persistent {@link DeviceHistory} remembers, or {@code -1} when it is not
+     * remembered (a randomized address, or no native core).
+     */
+    volatile long firstSeenEpochMillis = -1L;
+    /** Separate visits the history remembers, or {@code 0} when not remembered. */
+    volatile int visits;
     volatile long lastSeenUptimeMillis;
     /**
      * Most recently observed device-advertised TX power in dBm, or

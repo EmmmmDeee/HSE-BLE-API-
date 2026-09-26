@@ -57,6 +57,10 @@ import java.util.logging.Logger;
  *       when not a beacon), {@code services} (comma-separated well-known
  *       service names, {@code null} when none), {@code identity_key} (the stable cross-rotation
  *       grouping key, {@code null} when the device cannot be grouped),
+ *       {@code first_seen_ms} (wall-clock epoch milliseconds of the first
+ *       sighting the persistent device history remembers, across sessions) and
+ *       {@code visits} (separate visits it remembers) — both {@code null} when
+ *       the device is not remembered (only public addresses are),
  *       {@code trend}
  *       ({@code STRONGER|WEAKER|STABLE|UNKNOWN}), {@code freshness}
  *       ({@code LIVE|RECENT|STALE|UNKNOWN}), {@code confidence_percent},
@@ -376,6 +380,15 @@ public final class ApiHttpServer {
             json.name("beacon").value(advertisement == null ? null : advertisement.beacon);
             json.name("services").value(advertisement == null ? null : advertisement.services);
             json.name("identity_key").value(advertisement == null ? null : advertisement.identityKey);
+            long firstSeen = device.firstSeenEpochMillis;
+            int visits = device.visits;
+            if (firstSeen >= 0 && visits > 0) {
+                json.name("first_seen_ms").value(firstSeen);
+                json.name("visits").value((long) visits);
+            } else {
+                json.name("first_seen_ms").value((String) null);
+                json.name("visits").value((String) null);
+            }
             json.name("trend").value(trendLabel(device.trend));
             json.name("freshness").value(freshnessLabel(device.freshness));
             json.name("confidence_percent").value(device.confidencePercent);

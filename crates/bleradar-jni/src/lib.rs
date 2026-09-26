@@ -169,6 +169,26 @@ pub fn advertisement_services(advertisement_hex: &str) -> Option<String> {
 }
 
 /// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_historyMerge`]: records each
+/// newline-separated key at `now_ms` (wall clock; a negative value clamps to
+/// 0) into the device history serialized as `state` and returns the new
+/// serialization. Owned by [`bleradar_core::history_merge`]; an unparseable
+/// `state` starts an empty history, never an error.
+#[must_use]
+pub fn history_merge(state: &str, keys: &str, now_ms: i64) -> String {
+    bleradar_core::history_merge(state, keys, jni_nonneg_u64(now_ms))
+}
+
+/// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_historyLookup`]: one line per
+/// newline-separated key, `first_seen_ms\tvisits` when the history remembers
+/// it and empty otherwise. Owned by [`bleradar_core::history_lookup`].
+#[must_use]
+pub fn history_lookup(state: &str, keys: &str) -> String {
+    bleradar_core::history_lookup(state, keys)
+}
+
+/// Pure, unit-testable core of
 /// [`Java_com_hse_bleradar_NativeRadar_advertisementBeacon`]: the recognised
 /// beacon kind (`iBeacon`, `Eddystone-UID`, `Eddystone-URL`, `Eddystone-TLM`)
 /// in a hex-encoded BLE advertising payload, or `None` — a frame that does not
@@ -1471,6 +1491,43 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
     }
 }
 
+/// `NativeRadar.historyMerge(String, String, long): String` — see
+/// [`history_merge`]. Reads `env` only through [`env`](mod@env); a null state
+/// or key list is read as empty, and only a null `env` or a VM allocation
+/// failure answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_historyMerge(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    state: JStringRef,
+    keys: JStringRef,
+    now_ms: i64,
+) -> JStringRef {
+    if env.is_null() {
+        return core::ptr::null_mut();
+    }
+    let state = read_text(env, state).unwrap_or_default();
+    let keys = read_text(env, keys).unwrap_or_default();
+    make_text(env, &history_merge(&state, &keys, now_ms))
+}
+
+/// `NativeRadar.historyLookup(String, String): String` — see
+/// [`history_lookup`]. Reads `env` only through [`env`](mod@env); a null state
+/// is an empty history, a null key list answers null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_historyLookup(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    state: JStringRef,
+    keys: JStringRef,
+) -> JStringRef {
+    let Some(keys) = read_text(env, keys) else {
+        return core::ptr::null_mut();
+    };
+    let state = read_text(env, state).unwrap_or_default();
+    make_text(env, &history_lookup(&state, &keys))
+}
+
 /// `NativeRadar.abiVersion(): int` — a constant sanity check the Java side
 /// calls once at startup to confirm the loaded `.so` matches the ABI this
 /// file documents, independent of the app's own version number.
@@ -1489,11 +1546,13 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
 /// `advertisementBeacon`) was added, and to `14` when the rotating-address
 /// identity grouping (`deviceGroupKey`) was added, and to `15` when the
 /// manufacturer-name lookup (`advertisementManufacturerName`) was added, and to
-/// `16` when the service-name lookup (`advertisementServices`) was added.
+/// `16` when the service-name lookup (`advertisementServices`) was added, and
+/// to `17` when the cross-session device history (`historyMerge`,
+/// `historyLookup`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    16
+    17
 }

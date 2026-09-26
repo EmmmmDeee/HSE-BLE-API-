@@ -39,6 +39,7 @@ pub(crate) const HOST_JAVA_SOURCES: &[&str] = &[
     "ApiHttpServer.java",
     "AssetSource.java",
     "Blip.java",
+    "DeviceHistory.java",
     "Json.java",
     "NativeRadar.java",
     "ReleaseManifest.java",
@@ -101,6 +102,7 @@ public final class ApiSmoke {
 
     private static final long NOW_UPTIME_MS = 100_000L;
     private static final long NOW_EPOCH_MS = 1_757_700_000_000L;
+    private static final long HISTORY_FIRST_SEEN_MS = 1_757_000_000_000L;
     private static final long SCAN_UPTIME_MS = 3_723_000L;
 
     /** The scripted scan state; starts scanning, as the browser fixtures say. */
@@ -242,6 +244,19 @@ public final class ApiSmoke {
                     NativeRadar.advertisementManufacturerName(advertisementHex),
                     NativeRadar.advertisementServices(advertisementHex),
                     NativeRadar.deviceGroupKey(address, advertisementHex));
+        }
+        // The persistent history through the real natives and the app's own
+        // row parser: two sessions an hour apart (past the visit gap), so a
+        // public device reads 2 visits since the first; randomized and unknown
+        // addresses are not remembered.
+        if (blip.trackability == NativeRadar.TRACKABILITY_TRACKABLE) {
+            String key = address.toLowerCase(java.util.Locale.ROOT);
+            String state = NativeRadar.historyMerge(null, key, HISTORY_FIRST_SEEN_MS);
+            state = NativeRadar.historyMerge(state, key, HISTORY_FIRST_SEEN_MS + 3_600_000L);
+            DeviceHistory.Record record = DeviceHistory.parseRow(
+                    NativeRadar.historyLookup(state, key).split("\n", -1)[0]);
+            blip.firstSeenEpochMillis = record.firstSeenEpochMillis;
+            blip.visits = record.visits;
         }
         blip.trend = trend;
         blip.freshness = freshness;

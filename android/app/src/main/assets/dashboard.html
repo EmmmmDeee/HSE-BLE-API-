@@ -237,6 +237,15 @@ footer a { color: var(--info); }
     return span;
   }
 
+  // The persistent cross-session history: "3 visits since 2026-09-25" (UTC date).
+  function fmtHistory(device) {
+    if (!isNumber(device.visits) || !isNumber(device.first_seen_ms) || device.visits < 1) {
+      return '';
+    }
+    var since = new Date(device.first_seen_ms).toISOString().slice(0, 10);
+    return device.visits + (device.visits === 1 ? ' visit' : ' visits') + ' since ' + since;
+  }
+
   function renderDevices(devices) {
     var rows = document.createDocumentFragment();
     for (var i = 0; i < devices.length; i++) {
@@ -269,6 +278,10 @@ footer a { color: var(--info); }
       if (services) {
         tr.setAttribute('data-services', services);
       }
+      var history = fmtHistory(device);
+      if (history) {
+        tr.setAttribute('data-visits', String(device.visits));
+      }
       cell(tr, String(i + 1), 'num');
       cell(tr, text(device.address, '—'), 'addr');
       cell(tr, text(device.name, '') || 'Unnamed device');
@@ -277,7 +290,7 @@ footer a { color: var(--info); }
       cell(tr, proximity, 'prox-' + proximity);
       cell(tr, trackability, 'track-' + trackability);
       cell(tr, advText, 'adv');
-      cell(tr, identityKey || '—', 'ident');
+      cell(tr, [identityKey || '—', history].filter(Boolean).join(' · '), 'ident');
       cell(tr, (TREND_GLYPH[trend] || '—') + ' ' + trend);
       cell(tr, freshness);
       cell(tr, fmtPercent(device.confidence_percent), 'num');

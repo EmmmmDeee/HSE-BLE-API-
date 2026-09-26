@@ -116,7 +116,7 @@ public final class NativeRadar {
     public static final int TRACKABILITY_UNKNOWN = 2;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 16;
+    public static final int EXPECTED_ABI_VERSION = 17;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -552,4 +552,21 @@ public final class NativeRadar {
      * decoded advertisement. Owned by {@code bleradar_core::adv::service_uuid_name}.
      */
     public static native String advertisementServices(String advertisementHex);
+
+    /**
+     * Records each newline-separated device key (a canonical public address;
+     * anything else is ignored) at {@code nowEpochMillis} into the device
+     * history serialized as {@code state} ({@code null} or unparseable starts
+     * empty) and returns the new serialization, or {@code null} only on a VM
+     * failure. Owned by {@code bleradar_core::history}: which keys are kept,
+     * what counts as a new visit, the size bound and damaged-file recovery.
+     */
+    public static native String historyMerge(String state, String keys, long nowEpochMillis);
+
+    /**
+     * For each newline-separated key, one line {@code first_seen_ms\tvisits}
+     * when the history serialized as {@code state} remembers it, or an empty
+     * line; {@code null} for a {@code null} key list.
+     */
+    public static native String historyLookup(String state, String keys);
 }

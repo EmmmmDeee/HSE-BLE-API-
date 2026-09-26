@@ -1180,3 +1180,52 @@ fn advertisement_services_export_answers_through_the_string_bridge() {
     assert!(services_of(env, null, null).is_null());
     assert!(services_of(null, null, hex).is_null());
 }
+
+#[test]
+fn history_merge_and_lookup_keep_only_public_devices_across_sessions() {
+    use bleradar_jni::{history_lookup, history_merge};
+    let public = "3c:5a:b4:11:22:01";
+    let randomized = "aa:bb:cc:dd:ee:02";
+    let state = history_merge("", &format!("{public}\n{randomized}\n"), 1_000);
+    // A later session, past the visit gap, loaded from the persisted text.
+    let state = history_merge(&state, public, 1_000 + 10 * 60 * 1000);
+    assert_eq!(
+        history_lookup(&state, &format!("{public}\n{randomized}")),
+        "1000\t2\n\n"
+    );
+    // A negative wall clock clamps to zero instead of wrapping.
+    assert_eq!(
+        history_lookup(&history_merge("", public, -5), public),
+        "0\t1\n"
+    );
+    // Garbage state starts over.
+    assert_eq!(history_lookup("garbage", public), "\n");
+}
+
+#[test]
+fn history_exports_answer_through_the_string_bridge() {
+    use bleradar_jni::{
+        Java_com_hse_bleradar_NativeRadar_historyLookup as lookup,
+        Java_com_hse_bleradar_NativeRadar_historyMerge as merge,
+    };
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let key = mock.string("3c:5a:b4:11:22:01");
+    // A null state is an empty history: the first launch.
+    let state = mock.read(merge(env, null, null, key, 42)).expect("state");
+    assert!(state.starts_with("bleradar-history v1\n"), "{state:?}");
+    let state_ref = mock.string(&state);
+    assert_eq!(
+        mock.read(lookup(env, null, state_ref, key)).as_deref(),
+        Some("42\t1\n")
+    );
+    // A null key list merges nothing but still returns the state.
+    assert_eq!(
+        mock.read(merge(env, null, state_ref, null, 43)).as_deref(),
+        Some(state.as_str())
+    );
+    assert!(lookup(env, null, state_ref, null).is_null());
+    assert!(merge(null, null, state_ref, key, 1).is_null());
+    assert!(lookup(null, null, state_ref, key).is_null());
+}

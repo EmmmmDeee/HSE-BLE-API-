@@ -8,6 +8,7 @@ mod advancement;
 mod evidence;
 mod fusion;
 mod geo;
+mod history;
 mod identity;
 mod infrastructure;
 mod osint;
@@ -66,6 +67,10 @@ pub use fusion::{
     ExpectedEvidence, FalsificationReport, FusionError, FusionResult, HypothesisScore,
 };
 pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
+pub use history::{
+    HISTORY_HEADER, History, HistoryRecord, MAX_ENTRIES as HISTORY_MAX_ENTRIES,
+    VISIT_GAP_MS as HISTORY_VISIT_GAP_MS, history_lookup, history_merge, is_history_key,
+};
 pub use identity::{
     AddressKind, DeviceIdentity, Distinctiveness, IdentityEvidence, IdentityMatch, MatchVerdict,
     canonical_mac, group_key, is_locally_administered, resolve,
