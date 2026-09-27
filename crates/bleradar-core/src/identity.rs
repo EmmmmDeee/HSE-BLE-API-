@@ -325,7 +325,13 @@ pub fn resolve(a: &DeviceIdentity, b: &DeviceIdentity) -> IdentityMatch {
         (Some(_), Some(_)) => contradictions.push("advertisement shape differs".to_string()),
         _ => {}
     }
-    if !a.evidence.services.is_empty() || !b.evidence.services.is_empty() {
+    // A service list is evidence only when both observations actually carried
+    // one. An advertising packet often omits the UUID list (it arrives in a
+    // later scan response); an empty list means "not observed", the same as a
+    // missing name, not an observed empty set. Comparing it anyway made one
+    // public device `LikelyDifferent` from itself whenever a single packet
+    // dropped the list, and the hardware-address match below never ran.
+    if !a.evidence.services.is_empty() && !b.evidence.services.is_empty() {
         if a.evidence.services == b.evidence.services {
             supporting.push("same service set".to_string());
         } else {
@@ -505,6 +511,31 @@ mod resolve_tests {
         let m = resolve(&a, &b);
         assert_eq!(m.verdict, MatchVerdict::LikelyDifferent);
         assert!(!m.contradictions.is_empty());
+    }
+
+    #[test]
+    fn an_unobserved_service_list_is_not_a_contradiction() {
+        // Same hardware: one packet carried the UUID list and the next did not.
+        let with_services = identity(PUB_A, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[0x180D]);
+        let without = identity(PUB_A, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[]);
+        assert_eq!(
+            resolve(&with_services, &without).verdict,
+            MatchVerdict::LikelySame,
+            "a missing service list must not override a public address"
+        );
+        // Across rotation the matching shape still correlates.
+        let rotating = identity(RPA_1, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[0x180D]);
+        let rotating_bare = identity(RPA_2, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[]);
+        assert_eq!(
+            resolve(&rotating, &rotating_bare).verdict,
+            MatchVerdict::PossiblySame
+        );
+        // Two observed, different lists remain a contradiction, even on one address.
+        let other = identity(PUB_A, Some((0x004C, &[1, 2, 3])), Some("Tag"), &[0x180F]);
+        assert_eq!(
+            resolve(&with_services, &other).verdict,
+            MatchVerdict::LikelyDifferent
+        );
     }
 
     #[test]
