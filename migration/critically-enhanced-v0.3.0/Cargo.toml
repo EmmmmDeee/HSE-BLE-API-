@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/bleradar-core", "crates/bleradar-compat"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license = "Proprietary"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "deny"
