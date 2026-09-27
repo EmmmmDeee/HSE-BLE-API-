@@ -12,3 +12,7 @@ dependencies = [
 [[package]]
 name = "bleradar-core"
 version = "0.3.0"
+
+[[package]]
+name = "bleradar-tools"
+version = "0.3.0"

@@ -1,6 +1,8 @@
 //! Device-centric observation and map-tracking state.
 
-use crate::{haversine_m, LatLon, ProximityBand, RssiEma, SignalTrend, signal_trend, proximity_label};
+use crate::{
+    LatLon, ProximityBand, RssiEma, SignalTrend, haversine_m, proximity_label, signal_trend,
+};
 
 /// Normalized confidence score in the inclusive range 0..=100.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -110,16 +112,23 @@ impl DeviceTrack {
         if !observation.rssi_dbm.is_finite() {
             return Err(TrackError::NonFiniteRssi);
         }
-        if let Some(accuracy) = observation.gps_accuracy_m {
-            if !accuracy.is_finite() || accuracy <= 0.0 {
-                return Err(TrackError::InvalidGpsAccuracy);
-            }
+        if let Some(accuracy) = observation.gps_accuracy_m
+            && (!accuracy.is_finite() || accuracy <= 0.0)
+        {
+            return Err(TrackError::InvalidGpsAccuracy);
         }
-        if self.observations.last().is_some_and(|last| observation.timestamp_ms < last.timestamp_ms) {
+        if self
+            .observations
+            .last()
+            .is_some_and(|last| observation.timestamp_ms < last.timestamp_ms)
+        {
             return Err(TrackError::NonMonotonicTime);
         }
 
-        let next = self.filter.push(observation.rssi_dbm).map_err(|_| TrackError::NonFiniteRssi)?;
+        let next = self
+            .filter
+            .push(observation.rssi_dbm)
+            .map_err(|_| TrackError::NonFiniteRssi)?;
         if let Some(previous) = self.filtered_rssi {
             self.trend = signal_trend(previous, next, 2.0);
         }
@@ -180,13 +189,22 @@ impl DeviceTrack {
         let positioned: Vec<_> = self
             .observations
             .iter()
-            .filter_map(|obs| Some((obs.observer_position?, obs.gps_accuracy_m.unwrap_or(50.0), obs.rssi_dbm)))
+            .filter_map(|obs| {
+                Some((
+                    obs.observer_position?,
+                    obs.gps_accuracy_m.unwrap_or(50.0),
+                    obs.rssi_dbm,
+                ))
+            })
             .collect();
         if positioned.len() < 2 {
             return None;
         }
 
-        let max_rssi = positioned.iter().map(|(_, _, rssi)| *rssi).fold(f64::NEG_INFINITY, f64::max);
+        let max_rssi = positioned
+            .iter()
+            .map(|(_, _, rssi)| *rssi)
+            .fold(f64::NEG_INFINITY, f64::max);
         let mut weight_sum = 0.0;
         let mut lat_sum = 0.0;
         let mut lon_sum = 0.0;
@@ -251,7 +269,11 @@ pub struct SelectedDevice {
 impl SelectedDevice {
     /// Creates a selected-device state with tracking disabled.
     pub fn new(id: impl Into<String>, rssi_alpha: f64) -> Result<Self, crate::FilterError> {
-        Ok(Self { id: id.into(), tracking: false, track: DeviceTrack::new(rssi_alpha)? })
+        Ok(Self {
+            id: id.into(),
+            tracking: false,
+            track: DeviceTrack::new(rssi_alpha)?,
+        })
     }
 
     /// Locks the selection for active tracking.

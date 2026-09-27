@@ -9,9 +9,13 @@ mod identity;
 mod signal;
 mod tracking;
 
-pub use geo::{bearing_deg, haversine_m, LatLon, GeoError};
-pub use identity::{canonical_mac, is_locally_administered, AddressKind, DeviceIdentity, IdentityEvidence};
-pub use signal::{ble_distance_m, proximity_label, signal_trend, FilterError, ProximityBand, RssiEma, SignalTrend};
+pub use geo::{GeoError, LatLon, bearing_deg, haversine_m};
+pub use identity::{
+    AddressKind, DeviceIdentity, IdentityEvidence, canonical_mac, is_locally_administered,
+};
+pub use signal::{
+    FilterError, ProximityBand, RssiEma, SignalTrend, ble_distance_m, proximity_label, signal_trend,
+};
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, MapPoint, SelectedDevice,
     SpatialEstimate, TrackError,
@@ -32,9 +36,9 @@ pub fn wifi_channel_to_frequency(channel: u16) -> Option<u16> {
 #[must_use]
 pub fn wifi_frequency_to_channel(mhz: u16) -> Option<u16> {
     match mhz {
-        2412..=2472 if (mhz - 2407) % 5 == 0 => Some((mhz - 2407) / 5),
+        2412..=2472 if (mhz - 2407).is_multiple_of(5) => Some((mhz - 2407) / 5),
         2484 => Some(14),
-        5160..=5885 if (mhz - 5000) % 5 == 0 => Some((mhz - 5000) / 5),
+        5160..=5885 if (mhz - 5000).is_multiple_of(5) => Some((mhz - 5000) / 5),
         _ => None,
     }
 }

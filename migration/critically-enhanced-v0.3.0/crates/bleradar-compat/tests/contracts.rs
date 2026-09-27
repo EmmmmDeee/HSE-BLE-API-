@@ -1,4 +1,5 @@
-use bleradar_compat::{coverage_counts, is_observed_contract, parity_status, ParityStatus};
+//! Semantic-registry tests for the high-value native contracts.
+use bleradar_compat::{ParityStatus, coverage_counts, is_observed_contract, parity_status};
 
 #[test]
 fn high_value_contracts_are_in_inventory() {
@@ -9,9 +10,15 @@ fn high_value_contracts_are_in_inventory() {
 
 #[test]
 fn registry_does_not_confuse_observed_with_reconstructed() {
-    assert_eq!(parity_status("bearing_deg"), Some(ParityStatus::Reconstructed));
+    assert_eq!(
+        parity_status("bearing_deg"),
+        Some(ParityStatus::Reconstructed)
+    );
     assert_eq!(parity_status("RadarStore"), Some(ParityStatus::OracleOnly));
-    assert_eq!(parity_status("ui_radar_points"), Some(ParityStatus::Blocked));
+    assert_eq!(
+        parity_status("ui_radar_points"),
+        Some(ParityStatus::Blocked)
+    );
 }
 
 #[test]

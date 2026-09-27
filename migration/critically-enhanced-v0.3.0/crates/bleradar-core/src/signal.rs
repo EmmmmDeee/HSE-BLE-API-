@@ -103,7 +103,11 @@ pub fn proximity_label(rssi_dbm: f64) -> ProximityBand {
 /// estimate only and should be displayed with an uncertainty band rather than as exact range.
 #[must_use]
 pub fn ble_distance_m(rssi_dbm: f64, rssi_at_1m_dbm: f64, path_loss_exponent: f64) -> Option<f64> {
-    if !rssi_dbm.is_finite() || !rssi_at_1m_dbm.is_finite() || !path_loss_exponent.is_finite() || path_loss_exponent <= 0.0 {
+    if !rssi_dbm.is_finite()
+        || !rssi_at_1m_dbm.is_finite()
+        || !path_loss_exponent.is_finite()
+        || path_loss_exponent <= 0.0
+    {
         return None;
     }
     Some(10_f64.powf((rssi_at_1m_dbm - rssi_dbm) / (10.0 * path_loss_exponent)))

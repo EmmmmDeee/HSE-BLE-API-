@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bleradar-core", "crates/bleradar-compat"]
+members = ["crates/bleradar-core", "crates/bleradar-compat", "crates/bleradar-tools"]
 
 [workspace.package]
 edition = "2024"

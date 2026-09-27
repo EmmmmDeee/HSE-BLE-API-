@@ -21,7 +21,9 @@ pub fn canonical_mac(input: &str) -> Option<String> {
 pub fn is_locally_administered(mac: &str) -> Option<bool> {
     let canonical = canonical_mac(mac)?;
     let first = canonical.get(0..2)?;
-    u8::from_str_radix(first, 16).ok().map(|octet| octet & 0x02 != 0)
+    u8::from_str_radix(first, 16)
+        .ok()
+        .map(|octet| octet & 0x02 != 0)
 }
 
 /// Address persistence classification.
@@ -66,6 +68,10 @@ impl DeviceIdentity {
         } else {
             AddressKind::Public
         };
-        Some(Self { address, address_kind, evidence })
+        Some(Self {
+            address,
+            address_kind,
+            evidence,
+        })
     }
 }

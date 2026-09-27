@@ -1,8 +1,9 @@
+//! Domain tests for geometry, identity, signal, and tracking.
 use bleradar_core::{
-    bearing_deg, ble_distance_m, canonical_mac, haversine_m, is_locally_administered,
-    signal_trend, wifi_channel_to_frequency, wifi_frequency_to_channel, AddressKind,
-    DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, IdentityEvidence, LatLon,
-    ProximityBand, RssiEma, SelectedDevice, SignalTrend, TrackError,
+    AddressKind, DeviceIdentity, DeviceObservation, DeviceTrack, EstimateKind, IdentityEvidence,
+    LatLon, ProximityBand, RssiEma, SelectedDevice, SignalTrend, TrackError, bearing_deg,
+    ble_distance_m, canonical_mac, haversine_m, is_locally_administered, signal_trend,
+    wifi_channel_to_frequency, wifi_frequency_to_channel,
 };
 
 #[test]
@@ -20,7 +21,10 @@ fn bearing_north_is_zero() {
 
 #[test]
 fn mac_canonicalization_and_local_bit() {
-    assert_eq!(canonical_mac("36-32-62-36-31-33").as_deref(), Some("36:32:62:36:31:33"));
+    assert_eq!(
+        canonical_mac("36-32-62-36-31-33").as_deref(),
+        Some("36:32:62:36:31:33")
+    );
     assert_eq!(is_locally_administered("36:32:62:36:31:33"), Some(true));
     assert_eq!(is_locally_administered("00:11:22:33:44:55"), Some(false));
 }
@@ -57,8 +61,24 @@ fn distance_model_is_calibrated_not_absolute() {
 fn track_rejects_time_reversal() {
     let mut track = DeviceTrack::new(0.5).unwrap();
     let p = LatLon::new(-26.8, 152.8).unwrap();
-    track.push(DeviceObservation { timestamp_ms: 10, observer_position: Some(p), gps_accuracy_m: Some(5.0), rssi_dbm: -70.0, tx_power_dbm: None }).unwrap();
-    let err = track.push(DeviceObservation { timestamp_ms: 9, observer_position: Some(p), gps_accuracy_m: Some(5.0), rssi_dbm: -69.0, tx_power_dbm: None }).unwrap_err();
+    track
+        .push(DeviceObservation {
+            timestamp_ms: 10,
+            observer_position: Some(p),
+            gps_accuracy_m: Some(5.0),
+            rssi_dbm: -70.0,
+            tx_power_dbm: None,
+        })
+        .unwrap();
+    let err = track
+        .push(DeviceObservation {
+            timestamp_ms: 9,
+            observer_position: Some(p),
+            gps_accuracy_m: Some(5.0),
+            rssi_dbm: -69.0,
+            tx_power_dbm: None,
+        })
+        .unwrap_err();
     assert_eq!(err, TrackError::NonMonotonicTime);
 }
 
@@ -66,7 +86,15 @@ fn track_rejects_time_reversal() {
 fn map_points_remain_observed_not_inferred() {
     let mut track = DeviceTrack::new(0.5).unwrap();
     let p = LatLon::new(-26.8, 152.8).unwrap();
-    track.push(DeviceObservation { timestamp_ms: 1, observer_position: Some(p), gps_accuracy_m: Some(4.0), rssi_dbm: -55.0, tx_power_dbm: None }).unwrap();
+    track
+        .push(DeviceObservation {
+            timestamp_ms: 1,
+            observer_position: Some(p),
+            gps_accuracy_m: Some(4.0),
+            rssi_dbm: -55.0,
+            tx_power_dbm: None,
+        })
+        .unwrap();
     let points = track.observed_map_points();
     assert_eq!(points.len(), 1);
     assert_eq!(points[0].kind, EstimateKind::Observed);
@@ -75,8 +103,24 @@ fn map_points_remain_observed_not_inferred() {
 #[test]
 fn stronger_samples_produce_hotter_state() {
     let mut track = DeviceTrack::new(0.5).unwrap();
-    track.push(DeviceObservation { timestamp_ms: 1, observer_position: None, gps_accuracy_m: None, rssi_dbm: -80.0, tx_power_dbm: None }).unwrap();
-    track.push(DeviceObservation { timestamp_ms: 2, observer_position: None, gps_accuracy_m: None, rssi_dbm: -50.0, tx_power_dbm: None }).unwrap();
+    track
+        .push(DeviceObservation {
+            timestamp_ms: 1,
+            observer_position: None,
+            gps_accuracy_m: None,
+            rssi_dbm: -80.0,
+            tx_power_dbm: None,
+        })
+        .unwrap();
+    track
+        .push(DeviceObservation {
+            timestamp_ms: 2,
+            observer_position: None,
+            gps_accuracy_m: None,
+            rssi_dbm: -50.0,
+            tx_power_dbm: None,
+        })
+        .unwrap();
     assert_eq!(track.trend(), SignalTrend::Stronger);
     assert_eq!(track.proximity(), Some(ProximityBand::Near));
 }
@@ -86,9 +130,25 @@ fn spatial_estimate_requires_multiple_positioned_observations() {
     let mut track = DeviceTrack::new(0.4).unwrap();
     let a = LatLon::new(-26.8000, 152.8000).unwrap();
     let b = LatLon::new(-26.8001, 152.8001).unwrap();
-    track.push(DeviceObservation { timestamp_ms: 1, observer_position: Some(a), gps_accuracy_m: Some(5.0), rssi_dbm: -65.0, tx_power_dbm: None }).unwrap();
+    track
+        .push(DeviceObservation {
+            timestamp_ms: 1,
+            observer_position: Some(a),
+            gps_accuracy_m: Some(5.0),
+            rssi_dbm: -65.0,
+            tx_power_dbm: None,
+        })
+        .unwrap();
     assert!(track.spatial_estimate().is_none());
-    track.push(DeviceObservation { timestamp_ms: 2, observer_position: Some(b), gps_accuracy_m: Some(5.0), rssi_dbm: -55.0, tx_power_dbm: None }).unwrap();
+    track
+        .push(DeviceObservation {
+            timestamp_ms: 2,
+            observer_position: Some(b),
+            gps_accuracy_m: Some(5.0),
+            rssi_dbm: -55.0,
+            tx_power_dbm: None,
+        })
+        .unwrap();
     let estimate = track.spatial_estimate().unwrap();
     assert_eq!(estimate.supporting_observations, 2);
     assert!(estimate.uncertainty_m > 0.0);

@@ -7,7 +7,7 @@ The deliverable is verified in two layers.
 1. Create the final ZIP.
 2. Extract it to a fresh directory.
 3. Verify every `SHA256SUMS` entry.
-4. Run `python tools/parity_report.py` from the extracted copy.
+4. Run `cargo run -p bleradar-tools --locked -- parity-report` from the extracted copy.
 5. Confirm the Git history bundle lists the recovery tags and enhancement commit.
 
 ## Layer 2 — Rust execution gates (required, unavailable on this host)

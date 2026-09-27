@@ -58,7 +58,7 @@ No populated user/API credential values were found in the supplied APK. No value
 
 Package-level verification performed here:
 - original oracle files retained and checksummed;
-- parity report generation executes successfully under Python;
+- parity report generation is the dependency-free Rust command `bleradar-tools parity-report` (the original delivery script was Python; that script is not in this tree);
 - Git recovery history regenerated and tagged at the critical enhancement point;
 - ZIP is re-extracted and all packaged SHA-256 entries are checked before delivery.
 

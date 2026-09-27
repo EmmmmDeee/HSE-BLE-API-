@@ -30,24 +30,96 @@ pub struct ContractStatus {
 /// The complete symbol census remains in `docs/NATIVE_ABI.txt`; this registry
 /// records the migration frontier for semantic contracts.
 pub const CONTRACTS: &[ContractStatus] = &[
-    ContractStatus { name: "bearing_deg", status: ParityStatus::Reconstructed, evidence: "safe Rust implementation + geometry regression tests" },
-    ContractStatus { name: "haversine_m", status: ParityStatus::Reconstructed, evidence: "safe Rust implementation + geometry regression tests" },
-    ContractStatus { name: "wifi_channel_to_frequency", status: ParityStatus::Reconstructed, evidence: "safe Rust implementation + round-trip tests" },
-    ContractStatus { name: "wifi_frequency_to_channel", status: ParityStatus::Reconstructed, evidence: "safe Rust implementation + round-trip tests" },
-    ContractStatus { name: "ble_distance", status: ParityStatus::Reconstructed, evidence: "calibrated log-distance implementation; exact legacy coefficients still need differential proof" },
-    ContractStatus { name: "proximity_label", status: ParityStatus::Reconstructed, evidence: "coarse safe-Rust proximity bands; exact legacy thresholds still need oracle comparison" },
-    ContractStatus { name: "ui_radar_points", status: ParityStatus::Blocked, evidence: "record layout and visual semantics not fully recoverable from stripped binary" },
-    ContractStatus { name: "ui_geo_sketch", status: ParityStatus::Blocked, evidence: "record layout and exact weighting semantics unknown" },
-    ContractStatus { name: "multilaterate", status: ParityStatus::OracleOnly, evidence: "original native implementation preserved in oracle/libbleradar_core.so" },
-    ContractStatus { name: "assess_threat", status: ParityStatus::OracleOnly, evidence: "original native implementation preserved; policy thresholds are private" },
-    ContractStatus { name: "correlate", status: ParityStatus::OracleOnly, evidence: "original native implementation preserved; private correlation policy" },
-    ContractStatus { name: "export_device_json", status: ParityStatus::Blocked, evidence: "exact serialization schema/error behavior requires differential characterization" },
-    ContractStatus { name: "export_session_json", status: ParityStatus::Blocked, evidence: "exact serialization schema/error behavior requires differential characterization" },
-    ContractStatus { name: "import_parse", status: ParityStatus::Blocked, evidence: "parser edge/error behavior unavailable from ABI metadata alone" },
-    ContractStatus { name: "mac_info", status: ParityStatus::Blocked, evidence: "full record schema and OUI policy require oracle characterization" },
-    ContractStatus { name: "oui_vendor", status: ParityStatus::OracleOnly, evidence: "embedded vendor database exists only in original native oracle" },
-    ContractStatus { name: "RadarStore", status: ParityStatus::OracleOnly, evidence: "stateful store implementation retained in original native oracle" },
-    ContractStatus { name: "session_to_track", status: ParityStatus::Blocked, evidence: "exact DeviceTrack record layout and conversion semantics unknown" },
+    ContractStatus {
+        name: "bearing_deg",
+        status: ParityStatus::Reconstructed,
+        evidence: "safe Rust implementation + geometry regression tests",
+    },
+    ContractStatus {
+        name: "haversine_m",
+        status: ParityStatus::Reconstructed,
+        evidence: "safe Rust implementation + geometry regression tests",
+    },
+    ContractStatus {
+        name: "wifi_channel_to_frequency",
+        status: ParityStatus::Reconstructed,
+        evidence: "safe Rust implementation + round-trip tests",
+    },
+    ContractStatus {
+        name: "wifi_frequency_to_channel",
+        status: ParityStatus::Reconstructed,
+        evidence: "safe Rust implementation + round-trip tests",
+    },
+    ContractStatus {
+        name: "ble_distance",
+        status: ParityStatus::Reconstructed,
+        evidence: "calibrated log-distance implementation; exact legacy coefficients still need differential proof",
+    },
+    ContractStatus {
+        name: "proximity_label",
+        status: ParityStatus::Reconstructed,
+        evidence: "coarse safe-Rust proximity bands; exact legacy thresholds still need oracle comparison",
+    },
+    ContractStatus {
+        name: "ui_radar_points",
+        status: ParityStatus::Blocked,
+        evidence: "record layout and visual semantics not fully recoverable from stripped binary",
+    },
+    ContractStatus {
+        name: "ui_geo_sketch",
+        status: ParityStatus::Blocked,
+        evidence: "record layout and exact weighting semantics unknown",
+    },
+    ContractStatus {
+        name: "multilaterate",
+        status: ParityStatus::OracleOnly,
+        evidence: "original native implementation preserved in oracle/libbleradar_core.so",
+    },
+    ContractStatus {
+        name: "assess_threat",
+        status: ParityStatus::OracleOnly,
+        evidence: "original native implementation preserved; policy thresholds are private",
+    },
+    ContractStatus {
+        name: "correlate",
+        status: ParityStatus::OracleOnly,
+        evidence: "original native implementation preserved; private correlation policy",
+    },
+    ContractStatus {
+        name: "export_device_json",
+        status: ParityStatus::Blocked,
+        evidence: "exact serialization schema/error behavior requires differential characterization",
+    },
+    ContractStatus {
+        name: "export_session_json",
+        status: ParityStatus::Blocked,
+        evidence: "exact serialization schema/error behavior requires differential characterization",
+    },
+    ContractStatus {
+        name: "import_parse",
+        status: ParityStatus::Blocked,
+        evidence: "parser edge/error behavior unavailable from ABI metadata alone",
+    },
+    ContractStatus {
+        name: "mac_info",
+        status: ParityStatus::Blocked,
+        evidence: "full record schema and OUI policy require oracle characterization",
+    },
+    ContractStatus {
+        name: "oui_vendor",
+        status: ParityStatus::OracleOnly,
+        evidence: "embedded vendor database exists only in original native oracle",
+    },
+    ContractStatus {
+        name: "RadarStore",
+        status: ParityStatus::OracleOnly,
+        evidence: "stateful store implementation retained in original native oracle",
+    },
+    ContractStatus {
+        name: "session_to_track",
+        status: ParityStatus::Blocked,
+        evidence: "exact DeviceTrack record layout and conversion semantics unknown",
+    },
 ];
 
 /// Returns whether a contract name is in the semantic registry.
@@ -59,7 +131,10 @@ pub fn is_observed_contract(name: &str) -> bool {
 /// Returns migration status for a registered contract.
 #[must_use]
 pub fn parity_status(name: &str) -> Option<ParityStatus> {
-    CONTRACTS.iter().find(|contract| contract.name == name).map(|contract| contract.status)
+    CONTRACTS
+        .iter()
+        .find(|contract| contract.name == name)
+        .map(|contract| contract.status)
 }
 
 /// Counts contracts by migration state as `(reconstructed, oracle_only, blocked)`.

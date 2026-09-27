@@ -1,3 +1,4 @@
 # Cargo build artifacts
 /target
 /xtask/target
+/migration/critically-enhanced-v0.3.0/target
