@@ -31,7 +31,20 @@ final class DeviceHistory {
 
     /** {@code java.util.logging}, which Android forwards to logcat, so this class also runs on a plain JVM. */
     private static final Logger LOG = Logger.getLogger("DeviceHistory");
+    /** The BLE device history's file in the app's private files directory. */
     static final String FILE_NAME = "device_history.txt";
+    /**
+     * The Wi-Fi survey's history: the same store under the same Rust rules, in
+     * its own file so a BLE address and a BSSID that happen to be equal cannot
+     * share a record.
+     */
+    static final String WIFI_FILE_NAME = "wifi_history.txt";
+    /**
+     * Every file this app persists in its files directory, which the Auto
+     * Backup rules ({@code res/xml/backup_rules.xml}, {@code data_extraction_rules.xml})
+     * must name and nothing else; {@code cargo xtask} tests hold the two in step.
+     */
+    static final String[] PERSISTED_FILES = {FILE_NAME, WIFI_FILE_NAME};
     /** Sightings of devices already known this session are merged at most this often. */
     private static final long FLUSH_INTERVAL_MILLIS = 10_000L;
     /**
@@ -77,7 +90,11 @@ final class DeviceHistory {
     private long lastFlushUptimeMillis = -FLUSH_INTERVAL_MILLIS;
 
     DeviceHistory(File directory) {
-        this.file = new File(directory, FILE_NAME);
+        this(directory, FILE_NAME);
+    }
+
+    DeviceHistory(File directory, String fileName) {
+        this.file = new File(directory, fileName);
         this.state = load(file);
     }
 

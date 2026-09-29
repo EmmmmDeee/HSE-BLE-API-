@@ -105,6 +105,11 @@ const BEACON_COMPANY_ID_JSON: &str = "\"company_id\":\"ffff\"";
 const BEACON_IDENTITY_JSON: &str = "\"identity_key\":\"c0:de:be:ac:0d:01\"";
 /// The app's persistent device history on the device (readable under `adb root`).
 const HISTORY_FILE: &str = "/data/data/com.hse.bleradar/files/device_history.txt";
+/// The Wi-Fi survey's history, the same store in its own file.
+const WIFI_HISTORY_FILE: &str = "/data/data/com.hse.bleradar/files/wifi_history.txt";
+/// The OS's on-device backup transport: it backs up and restores exactly as the
+/// cloud transport does, with no account, so Auto Backup can be proven here.
+const LOCAL_TRANSPORT: &str = "com.android.localtransport/.LocalTransport";
 /// Its first line (`bleradar_core::HISTORY_HEADER`).
 const HISTORY_HEADER_LINE: &str = "bleradar-history v1";
 /// How long the beacon's row may take to carry its history (merges are batched).
@@ -1263,6 +1268,13 @@ fn exercise(
                 ));
             }
         }
+        // The survey merges each read into its history before it builds the rows,
+        // so a remembered access point carries it on the very first read.
+        if !survey.contains(r#""first_seen_ms":1"#) || !survey.contains(r#""visits":1"#) {
+            return Err(format!(
+                "the surveyed access point does not carry its first sighting and one visit: {survey}"
+            ));
+        }
         report.push(format!(
             "GET /api/wifi: active with an access point {:.1}s after the scan started, every rule key present: {survey}",
             waited.as_secs_f64()
@@ -1483,6 +1495,18 @@ fn exercise(
         report.push(format!(
             "history: {HISTORY_FILE} survived kill -9 and remembers {BEACON_HISTORY_KEY} first seen at {beacon_first_seen}"
         ));
+        let wifi_history = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
+        if wifi_history.lines().next() != Some(HISTORY_HEADER_LINE)
+            || wifi_history.lines().count() < 2
+        {
+            return Err(format!(
+                "after kill -9 {WIFI_HISTORY_FILE} holds no remembered access point:\n{wifi_history}"
+            ));
+        }
+        report.push(format!(
+            "history: {WIFI_HISTORY_FILE} survived kill -9 with {} remembered access point(s)",
+            wifi_history.lines().count() - 1
+        ));
     }
 
     println!("== the update check the first launch started ==");
@@ -1658,6 +1682,8 @@ fn exercise(
         revoked.elapsed().as_secs_f64()
     ));
 
+    backup_phase(adb, report)?;
+
     upgrade_phase(adb, config, port, report)?;
 
     println!("== crash log ==");
@@ -1693,6 +1719,70 @@ fn exercise(
 /// unchanged — the release URL fetched, the remote manifest taken by the
 /// core, `Available` decided, the artifact downloaded by `DownloadManager`
 /// and verified by the core, handed to the package installer, installed.
+/// The restore-set token in `bmgr list sets` output (`  <token> : <description>`).
+pub fn restore_token(sets: &str) -> Option<u64> {
+    sets.lines()
+        .filter_map(|line| line.trim().split_once(':'))
+        .find_map(|(token, _)| token.trim().parse().ok())
+}
+
+/// Auto Backup, proven on the runtime through the OS's own on-device transport
+/// (no account, no network): both history files are backed up, the app's data is
+/// wiped, and the restore must bring both back byte for byte. The rules
+/// (`res/xml/backup_rules.xml`, `data_extraction_rules.xml`) are what the OS
+/// reads, so this is the path a reinstall or a device move takes.
+fn backup_phase(adb: &Adb, report: &mut Report) -> Result<(), String> {
+    println!(
+        "== Auto Backup: back up, wipe and restore the history through the OS's local transport =="
+    );
+    let transports = adb.shell("bmgr list transports")?;
+    if !transports.contains(LOCAL_TRANSPORT) {
+        return Err(format!(
+            "the guest has no {LOCAL_TRANSPORT} backup transport:\n{transports}"
+        ));
+    }
+    adb.shell("bmgr enable true")?;
+    adb.shell(&format!("bmgr transport {LOCAL_TRANSPORT}"))?;
+
+    let devices = adb.shell(&format!("cat {HISTORY_FILE}"))?;
+    let wifi = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
+    for (file, text) in [(HISTORY_FILE, &devices), (WIFI_HISTORY_FILE, &wifi)] {
+        if text.lines().next() != Some(HISTORY_HEADER_LINE) || text.lines().count() < 2 {
+            return Err(format!("{file} holds no history to back up:\n{text}"));
+        }
+    }
+
+    let backup = adb.shell(&format!("bmgr backupnow {PACKAGE}"))?;
+    if !backup.contains("Success") {
+        return Err(format!(
+            "bmgr backupnow {PACKAGE} did not succeed:\n{backup}"
+        ));
+    }
+    adb.shell(&format!("pm clear {PACKAGE}"))?;
+    let listing = adb.shell_lenient(&format!("ls /data/data/{PACKAGE}/files"));
+    if listing.contains("device_history.txt") || listing.contains("wifi_history.txt") {
+        return Err(format!("pm clear left the history in place:\n{listing}"));
+    }
+
+    let sets = adb.shell("bmgr list sets")?;
+    let token = restore_token(&sets)
+        .ok_or_else(|| format!("bmgr list sets names no restore set:\n{sets}"))?;
+    let restore = adb.shell(&format!("bmgr restore {token} {PACKAGE}"))?;
+    let restored_devices = adb.shell(&format!("cat {HISTORY_FILE}"))?;
+    let restored_wifi = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
+    if restored_devices != devices || restored_wifi != wifi {
+        return Err(format!(
+            "the restore did not bring the history back byte for byte (restore said: {restore})\ndevices before:\n{devices}\ndevices after:\n{restored_devices}\nwifi before:\n{wifi}\nwifi after:\n{restored_wifi}"
+        ));
+    }
+    report.push(format!(
+        "Auto Backup: {LOCAL_TRANSPORT} backed up both history files, `pm clear` wiped them, `bmgr restore {token}` brought back {} device record(s) and {} access point(s) byte for byte",
+        devices.lines().count() - 1,
+        wifi.lines().count() - 1
+    ));
+    Ok(())
+}
+
 fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> Result<(), String> {
     let proof = config.upgrade;
     proof.check_files()?;
@@ -2226,6 +2316,20 @@ pub fn run(config: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_restore_token_is_read_from_bmgr_list_sets() {
+        assert_eq!(
+            restore_token("Available restore sets:\n  1 : Local disk image\n"),
+            Some(1)
+        );
+        assert_eq!(
+            restore_token("Available restore sets:\n  4a : x\n  1234567890 : cloud set\n"),
+            Some(1_234_567_890)
+        );
+        assert_eq!(restore_token("Available restore sets:\n"), None);
+        assert_eq!(restore_token(""), None);
+    }
 
     #[test]
     fn adb_outputs_are_parsed() {

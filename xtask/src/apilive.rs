@@ -165,7 +165,17 @@ public final class ApiSmoke {
             if (ap == null) {
                 droppedScanResults++;
             } else {
-                accessPoints.add(ap);
+                // The persistent history through the real natives and the app's own
+                // row parser, as the engine merges it: two sessions an hour apart for
+                // a trackable BSSID, nothing for a randomized one.
+                DeviceHistory.Record remembered = null;
+                if ("TRACKABLE".equals(ap.trackability)) {
+                    String state = NativeRadar.historyMerge(null, ap.bssid, HISTORY_FIRST_SEEN_MS);
+                    state = NativeRadar.historyMerge(state, ap.bssid, HISTORY_FIRST_SEEN_MS + 3_600_000L);
+                    remembered = DeviceHistory.parseRow(
+                            NativeRadar.historyLookup(state, ap.bssid).split("\n", -1)[0]);
+                }
+                accessPoints.add(ap.withHistory(remembered));
             }
         }
         accessPoints.sort(WifiAp.STRONGEST_FIRST);

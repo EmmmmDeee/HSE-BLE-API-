@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup for Android 6-11 (android:fullBackupContent): back up exactly the
+  app's persistent history and nothing else. An <include> list means every other
+  file (the *.tmp a write leaves behind, anything a later version adds) stays
+  out unless it is named here. `cargo xtask` tests hold this list equal to
+  DeviceHistory.PERSISTED_FILES and to data_extraction_rules.xml.
+-->
+<full-backup-content>
+    <include domain="file" path="device_history.txt" />
+    <include domain="file" path="wifi_history.txt" />
+</full-backup-content>

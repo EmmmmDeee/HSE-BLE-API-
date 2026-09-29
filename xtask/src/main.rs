@@ -4604,6 +4604,78 @@ mod tests {
 
     /// Both directions of the boundary are written down: the document exists
     /// and the README points at it.
+    /// The `path` of every `<include domain="file" …/>` in `xml`.
+    fn backup_included_files(xml: &str) -> std::collections::BTreeSet<String> {
+        let mut files = std::collections::BTreeSet::new();
+        for tag in xml.split("<include ").skip(1) {
+            let tag = tag.split('>').next().unwrap_or("");
+            if !tag.contains(r#"domain="file""#) {
+                continue;
+            }
+            if let Some(rest) = tag.split(r#"path=""#).nth(1)
+                && let Some(path) = rest.split('"').next()
+            {
+                files.insert(path.to_string());
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn the_backup_rule_reader_sees_only_included_files() {
+        let xml = r#"<full-backup-content>
+            <include domain="file" path="a.txt" />
+            <include domain="database" path="b.db" />
+            <exclude domain="file" path="c.txt" />
+            <include domain="file" path="d.txt"/>
+        </full-backup-content>"#;
+        let files: Vec<String> = backup_included_files(xml).into_iter().collect();
+        assert_eq!(files, ["a.txt", "d.txt"]);
+    }
+
+    #[test]
+    fn auto_backup_names_exactly_the_files_the_app_persists() {
+        let root = repo_root().expect("repo root");
+        let app = root.join("android/app/src/main");
+        let java = read_to_string(&app.join("java/com/hse/bleradar/DeviceHistory.java"))
+            .expect("DeviceHistory.java");
+        let history = crate::emulator::java_static_final_string(&java, "FILE_NAME")
+            .expect("DeviceHistory.FILE_NAME");
+        let wifi = crate::emulator::java_static_final_string(&java, "WIFI_FILE_NAME")
+            .expect("DeviceHistory.WIFI_FILE_NAME");
+        assert!(
+            java.contains("PERSISTED_FILES = {FILE_NAME, WIFI_FILE_NAME}"),
+            "PERSISTED_FILES lists every file the app persists"
+        );
+        let persisted: std::collections::BTreeSet<String> = [history, wifi].into_iter().collect();
+
+        // Backup is on, and points at both rule files (Android 6-11 and 12+).
+        let manifest = read_to_string(&app.join("AndroidManifest.xml")).expect("manifest");
+        assert!(manifest.contains(r#"android:allowBackup="true""#));
+        assert!(manifest.contains(r#"android:fullBackupContent="@xml/backup_rules""#));
+        assert!(manifest.contains(r#"android:dataExtractionRules="@xml/data_extraction_rules""#));
+
+        // Every rule set names exactly the persisted files: a file the app adds
+        // without a rule is never backed up, and a rule for a file it no longer
+        // writes is a stale promise.
+        let rules = read_to_string(&app.join("res/xml/backup_rules.xml")).expect("backup_rules");
+        assert_eq!(backup_included_files(&rules), persisted, "backup_rules.xml");
+        let extraction = read_to_string(&app.join("res/xml/data_extraction_rules.xml"))
+            .expect("data_extraction_rules");
+        for section in ["cloud-backup", "device-transfer"] {
+            let body = extraction
+                .split(&format!("<{section}>"))
+                .nth(1)
+                .and_then(|rest| rest.split(&format!("</{section}>")).next())
+                .unwrap_or_else(|| panic!("<{section}> in data_extraction_rules.xml"));
+            assert_eq!(
+                backup_included_files(body),
+                persisted,
+                "data_extraction_rules.xml <{section}>"
+            );
+        }
+    }
+
     #[test]
     fn the_boundary_document_exists_and_is_linked() {
         let root = repo_root().expect("repo root");

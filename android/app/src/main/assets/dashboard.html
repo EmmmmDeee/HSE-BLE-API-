@@ -117,7 +117,7 @@ footer a { color: var(--info); }
   <table>
     <thead>
       <tr>
-        <th>#</th><th>SSID</th><th>BSSID</th><th>Ch</th><th>RSSI</th><th>Proximity</th><th>Security</th><th>Address type</th><th>Seen</th>
+        <th>#</th><th>SSID</th><th>BSSID</th><th>Ch</th><th>RSSI</th><th>Proximity</th><th>Security</th><th>Address type</th><th>History</th><th>Seen</th>
       </tr>
     </thead>
     <tbody id="wifi"></tbody>
@@ -348,6 +348,10 @@ footer a { color: var(--info); }
       tr.setAttribute('data-channel', isNumber(wifiAp.channel) ? String(wifiAp.channel) : '');
       tr.setAttribute('data-frequency', isNumber(wifiAp.frequency_mhz) ? String(wifiAp.frequency_mhz) : '');
       tr.setAttribute('data-reliability', text(wifiAp.reliability, 'UNKNOWN'));
+      var wifiHistory = fmtHistory(wifiAp);
+      if (wifiHistory) {
+        tr.setAttribute('data-visits', String(wifiAp.visits));
+      }
       cell(tr, String(i + 1), 'num');
       cell(tr, text(wifiAp.ssid, '') || '(hidden)');
       cell(tr, text(wifiAp.bssid, '—'), 'addr');
@@ -356,6 +360,7 @@ footer a { color: var(--info); }
       cell(tr, proximity || '—', 'prox-' + (proximity || 'UNKNOWN'));
       cell(tr, security + (wifiAp.enterprise === true ? ' · 802.1X' : ''), 'sec-' + security);
       cell(tr, trackability, 'track-' + trackability);
+      cell(tr, wifiHistory || '—', 'hist');
       cell(tr, fmtAgo(wifiDoc.timestamp_ms - wifiAp.last_seen_ms) + ' ago', 'num');
       rows.appendChild(tr);
     }
@@ -447,7 +452,8 @@ footer a { color: var(--info); }
           || !isNumberOrNull(wifiAp.channel) || !isNumber(wifiAp.rssi_dbm)
           || typeof wifiAp.reliability !== 'string' || !isStringOrNull(wifiAp.proximity)
           || typeof wifiAp.security !== 'string' || typeof wifiAp.enterprise !== 'boolean'
-          || typeof wifiAp.trackability !== 'string' || !isNumber(wifiAp.last_seen_ms)) {
+          || typeof wifiAp.trackability !== 'string' || !isNumber(wifiAp.last_seen_ms)
+          || !isNumberOrNull(wifiAp.first_seen_ms) || !isNumberOrNull(wifiAp.visits)) {
         throw new Error('/api/wifi entry ' + i + ' is malformed');
       }
     }
