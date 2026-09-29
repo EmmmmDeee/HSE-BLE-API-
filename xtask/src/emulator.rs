@@ -105,6 +105,11 @@ const BEACON_COMPANY_ID_JSON: &str = "\"company_id\":\"ffff\"";
 const BEACON_IDENTITY_JSON: &str = "\"identity_key\":\"c0:de:be:ac:0d:01\"";
 /// The app's persistent device history on the device (readable under `adb root`).
 const HISTORY_FILE: &str = "/data/data/com.hse.bleradar/files/device_history.txt";
+/// The Wi-Fi survey's history, the same store in its own file.
+const WIFI_HISTORY_FILE: &str = "/data/data/com.hse.bleradar/files/wifi_history.txt";
+/// The OS's on-device backup transport: it backs up and restores exactly as the
+/// cloud transport does, with no account, so Auto Backup can be proven here.
+const LOCAL_TRANSPORT: &str = "com.android.localtransport/.LocalTransport";
 /// Its first line (`bleradar_core::HISTORY_HEADER`).
 const HISTORY_HEADER_LINE: &str = "bleradar-history v1";
 /// How long the beacon's row may take to carry its history (merges are batched).
@@ -1263,6 +1268,13 @@ fn exercise(
                 ));
             }
         }
+        // The survey merges each read into its history before it builds the rows,
+        // so a remembered access point carries it on the very first read.
+        if !survey.contains(r#""first_seen_ms":1"#) || !survey.contains(r#""visits":1"#) {
+            return Err(format!(
+                "the surveyed access point does not carry its first sighting and one visit: {survey}"
+            ));
+        }
         report.push(format!(
             "GET /api/wifi: active with an access point {:.1}s after the scan started, every rule key present: {survey}",
             waited.as_secs_f64()
@@ -1483,6 +1495,18 @@ fn exercise(
         report.push(format!(
             "history: {HISTORY_FILE} survived kill -9 and remembers {BEACON_HISTORY_KEY} first seen at {beacon_first_seen}"
         ));
+        let wifi_history = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
+        if wifi_history.lines().next() != Some(HISTORY_HEADER_LINE)
+            || wifi_history.lines().count() < 2
+        {
+            return Err(format!(
+                "after kill -9 {WIFI_HISTORY_FILE} holds no remembered access point:\n{wifi_history}"
+            ));
+        }
+        report.push(format!(
+            "history: {WIFI_HISTORY_FILE} survived kill -9 with {} remembered access point(s)",
+            wifi_history.lines().count() - 1
+        ));
     }
 
     println!("== the update check the first launch started ==");
@@ -1684,6 +1708,110 @@ fn exercise(
     }
     report.push(format!(
         "logcat: no Java or native crash of {PACKAGE}, no leaked ServiceConnection"
+    ));
+
+    // Last on purpose: `pm clear` wipes the app's data and revokes its runtime
+    // permissions, so no later step may depend on the app's state, and the crash
+    // log above has already been read. It makes its own history (see its docs).
+    backup_phase(adb, port, report)?;
+    Ok(())
+}
+
+/// The restore-set token in `bmgr list sets` output (`  <token> : <description>`),
+/// as the text `bmgr restore` takes back. Android prints and reads these
+/// hexadecimal, so the token is validated as hex and passed through unchanged,
+/// never converted to a number and formatted again (which would change a token
+/// made only of decimal digits, or reject one with `a`-`f`).
+pub fn restore_token(sets: &str) -> Option<String> {
+    sets.lines()
+        .filter_map(|line| line.trim().split_once(':'))
+        .map(|(token, _)| token.trim())
+        .find(|token| !token.is_empty() && token.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_string)
+}
+
+/// A file the app never writes, planted beside the history to prove the backup
+/// rules are an include list: it must not come back from the restore.
+const BACKUP_DECOY: &str = "backup_decoy.txt";
+
+/// Auto Backup, proven on the runtime through the OS's own on-device transport
+/// (no account, no network): the Wi-Fi survey's history is backed up, the app's
+/// data is wiped, and the restore must bring it back byte for byte while a decoy
+/// file beside it, which the rules do not name, must not come back. The rules
+/// (`res/xml/backup_rules.xml`, `data_extraction_rules.xml`) are what the OS
+/// reads, so this is the path a reinstall or a device move takes.
+///
+/// It runs last and makes its own history: the upgrade phase reinstalls the app
+/// (`pm uninstall`, then an install), which wipes everything the earlier phases
+/// left, and `pm clear` here revokes the runtime permissions, so nothing after it
+/// could rely on the app's state. The survey writes `wifi_history.txt` on its
+/// first read, so a scan is all the setup it needs.
+fn backup_phase(adb: &Adb, port: u16, report: &mut Report) -> Result<(), String> {
+    println!(
+        "== Auto Backup: back up, wipe and restore the history through the OS's local transport =="
+    );
+    start_scan(port)?;
+    let (survey, _) = wait_for_wifi_survey(port)?;
+    // Paused, so the app writes nothing while the files are read and compared.
+    let stop = post(port, "/api/scan/stop")?;
+    if stop.status != 200 {
+        return Err(format!(
+            "POST /api/scan/stop answered {} {}",
+            stop.status,
+            body_text(&stop)
+        ));
+    }
+    wait_for_status(port, "scanning", "false")?;
+
+    let decoy = format!("/data/data/{PACKAGE}/files/{BACKUP_DECOY}");
+    adb.shell(&format!("echo decoy > {decoy}"))?;
+    let wifi = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
+    if wifi.lines().next() != Some(HISTORY_HEADER_LINE) || wifi.lines().count() < 2 {
+        return Err(format!(
+            "{WIFI_HISTORY_FILE} holds no history to back up (the survey said: {survey}):\n{wifi}"
+        ));
+    }
+
+    let transports = adb.shell("bmgr list transports")?;
+    if !transports.contains(LOCAL_TRANSPORT) {
+        return Err(format!(
+            "the guest has no {LOCAL_TRANSPORT} backup transport:\n{transports}"
+        ));
+    }
+    adb.shell("bmgr enable true")?;
+    adb.shell(&format!("bmgr transport {LOCAL_TRANSPORT}"))?;
+    let backup = adb.shell(&format!("bmgr backupnow {PACKAGE}"))?;
+    if !backup.contains("Success") {
+        return Err(format!(
+            "bmgr backupnow {PACKAGE} did not succeed:\n{backup}"
+        ));
+    }
+
+    adb.shell(&format!("pm clear {PACKAGE}"))?;
+    let listing = adb.shell_lenient(&format!("ls /data/data/{PACKAGE}/files"));
+    if listing.contains("wifi_history.txt") || listing.contains(BACKUP_DECOY) {
+        return Err(format!("pm clear left files in place:\n{listing}"));
+    }
+
+    let sets = adb.shell("bmgr list sets")?;
+    let token = restore_token(&sets)
+        .ok_or_else(|| format!("bmgr list sets names no restore set:\n{sets}"))?;
+    let restore = adb.shell(&format!("bmgr restore {token} {PACKAGE}"))?;
+    let restored = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
+    if restored != wifi {
+        return Err(format!(
+            "the restore did not bring the Wi-Fi history back byte for byte (restore said: {restore})\nbefore:\n{wifi}\nafter:\n{restored}"
+        ));
+    }
+    let after = adb.shell_lenient(&format!("ls /data/data/{PACKAGE}/files"));
+    if after.contains(BACKUP_DECOY) {
+        return Err(format!(
+            "the restore brought back {BACKUP_DECOY}, which the backup rules do not name: the rules are not an include list:\n{after}"
+        ));
+    }
+    report.push(format!(
+        "Auto Backup: {LOCAL_TRANSPORT} backed up the app, `pm clear` wiped it, `bmgr restore {token}` brought back {WIFI_HISTORY_FILE} byte for byte ({} remembered access point(s)) and not {BACKUP_DECOY}, which the rules do not name",
+        wifi.lines().count() - 1
     ));
     Ok(())
 }
@@ -2226,6 +2354,28 @@ pub fn run(config: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_restore_token_is_the_hex_text_bmgr_list_sets_prints() {
+        let token = |sets: &str| restore_token(sets);
+        assert_eq!(
+            token("Available restore sets:\n  1 : Local disk image\n").as_deref(),
+            Some("1")
+        );
+        // Android's tokens are hexadecimal: a letter is a digit, and a token of
+        // decimal-looking digits must come back unchanged (not reformatted).
+        assert_eq!(
+            token("Available restore sets:\n  4a1f : x\n").as_deref(),
+            Some("4a1f")
+        );
+        assert_eq!(
+            token("Available restore sets:\n  1234567890 : cloud set\n").as_deref(),
+            Some("1234567890")
+        );
+        assert_eq!(token("Available restore sets:\n  zz : not hex\n"), None);
+        assert_eq!(token("Available restore sets:\n"), None);
+        assert_eq!(token(""), None);
+    }
 
     #[test]
     fn adb_outputs_are_parsed() {

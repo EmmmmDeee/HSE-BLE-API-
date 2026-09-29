@@ -30,9 +30,9 @@ pub const TEST_PACKAGE_DIR: &str = "android/app/src/test/java/com/hse/bleradar";
 /// test method that vanishes is noticed too.
 pub const HOST_TEST_CLASSES: &[(&str, usize)] = &[
     ("BlipTest.java", 14),
-    ("DeviceHistoryTest.java", 6),
+    ("DeviceHistoryTest.java", 9),
     ("ReleaseManifestTest.java", 50),
-    ("WifiApTest.java", 9),
+    ("WifiApTest.java", 10),
     ("WifiSurveyTest.java", 4),
 ];
 

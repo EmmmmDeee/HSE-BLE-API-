@@ -70,8 +70,10 @@ import java.util.logging.Logger;
  *       {@link WifiSurveySource}: {@code access_points} (each with {@code bssid},
  *       {@code ssid}, {@code frequency_mhz}, {@code channel}, {@code rssi_dbm},
  *       {@code reliability}, {@code proximity}, {@code security},
- *       {@code enterprise}, {@code trackability}, {@code last_seen_ms}, every
- *       reading rule decided by the Rust core), {@code state} (why the list may be
+ *       {@code enterprise}, {@code trackability}, {@code last_seen_ms}, and
+ *       {@code first_seen_ms} / {@code visits} from the persistent history, both
+ *       {@code null} for an access point that is not remembered (only a
+ *       trackable BSSID is); every reading rule decided by the Rust core), {@code state} (why the list may be
  *       empty), {@code dropped}, {@code native_available}, {@code timestamp_ms}.</li>
  *   <li>{@code /api/status} — {@code scanning}, {@code device_count},
  *       {@code native_available}, {@code uptime_ms}.</li>
@@ -439,6 +441,14 @@ public final class ApiHttpServer {
             json.name("enterprise").value(ap.enterprise);
             json.name("trackability").value(ap.trackability);
             json.name("last_seen_ms").value(ap.lastSeenEpochMillis);
+            DeviceHistory.Record remembered = ap.history;
+            if (remembered != null) {
+                json.name("first_seen_ms").value(remembered.firstSeenEpochMillis);
+                json.name("visits").value((long) remembered.visits);
+            } else {
+                json.name("first_seen_ms").value((String) null);
+                json.name("visits").value((String) null);
+            }
             json.endObject();
         }
         json.endArray();

@@ -47,6 +47,11 @@ final class WifiScanEngine implements WifiSurveySource {
     static final long SCAN_INTERVAL_MILLIS = 35_000L;
 
     private final Context appContext;
+    /**
+     * The survey's cross-session memory: the same Rust store and rules as the
+     * BLE device history (only a trackable BSSID is remembered), in its own file.
+     */
+    private final DeviceHistory history;
     private final Handler handler = new Handler(Looper.getMainLooper());
     /** The one published generation; replaced whole, never edited in place. */
     private volatile WifiSurvey survey = WifiSurvey.empty(STATE_IDLE);
@@ -69,6 +74,7 @@ final class WifiScanEngine implements WifiSurveySource {
         this.appContext = context.getApplicationContext() == null
                 ? context
                 : context.getApplicationContext();
+        this.history = new DeviceHistory(appContext.getFilesDir(), DeviceHistory.WIFI_FILE_NAME);
     }
 
     /** Whether the permission the survey reads scan results under is granted. */
@@ -125,6 +131,7 @@ final class WifiScanEngine implements WifiSurveySource {
         // empty survey: a start that failed (no radio, no permission) must not
         // keep reporting its refusal, or its last count, after the scan ends.
         survey = WifiSurvey.empty(STATE_IDLE);
+        history.flush(SystemClock.uptimeMillis());
     }
 
     /** Stops the survey and refuses every later {@link #start()}: the service is being destroyed. */
@@ -196,7 +203,20 @@ final class WifiScanEngine implements WifiSurveySource {
                 byBssid.put(ap.bssid, ap);
             }
         }
-        List<WifiAp> rows = new ArrayList<>(byBssid.values());
+        // One write per read: every trackable BSSID is recorded at the time the
+        // platform actually saw it (not the time it was read, so a cached result
+        // is not a new sighting), then the batch is flushed once, the Rust store
+        // decides what is remembered, and each row carries it.
+        for (WifiAp ap : byBssid.values()) {
+            if ("TRACKABLE".equals(ap.trackability)) {
+                history.record(ap.bssid, ap.lastSeenEpochMillis);
+            }
+        }
+        history.flush(SystemClock.uptimeMillis());
+        List<WifiAp> rows = new ArrayList<>(byBssid.size());
+        for (WifiAp ap : byBssid.values()) {
+            rows.add(ap.withHistory(history.lookup(ap.bssid)));
+        }
         rows.sort(WifiAp.STRONGEST_FIRST);
         return new WifiSurvey(rows, STATE_ACTIVE, refused);
     }

@@ -88,20 +88,23 @@ pub const DEVICES_JSON: &str = concat!(
 /// hidden network (empty SSID), a name with markup that must be rendered as
 /// text, an 802.1X network, a frequency outside the plan (`channel` null) with
 /// no capabilities (`UNKNOWN`, never `OPEN`), and two dropped scan results.
+/// Every trackable BSSID carries the persistent history (two visits an hour
+/// apart, through the real natives); the randomized one carries `null`s, since
+/// a rotating address is not remembered.
 pub const WIFI_JSON: &str = concat!(
     r#"{"access_points":["#,
-    r#"{"bssid":"3c:5a:b4:11:22:01","ssid":"HomeNet","frequency_mhz":2437,"channel":6,"rssi_dbm":-48,"reliability":"VERY_HIGH_PLUS","proximity":"IMMEDIATE","security":"WPA2","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699998800},"#,
-    r#"{"bssid":"3c:5a:b4:11:22:04","ssid":"CorpNet","frequency_mhz":5745,"channel":149,"rssi_dbm":-60,"reliability":"VERY_HIGH","proximity":"NEAR","security":"WPA2","enterprise":true,"trackability":"TRACKABLE","last_seen_ms":1757699997000},"#,
-    r#"{"bssid":"3c:5a:b4:11:22:07","ssid":"OddBand","frequency_mhz":2400,"channel":null,"rssi_dbm":-70,"reliability":"VERY_HIGH","proximity":"MID","security":"UNKNOWN","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699970000},"#,
-    r#"{"bssid":"aa:bb:cc:dd:ee:02","ssid":"<b>evil</b> \"Ünïcødé\" \\ 😀","frequency_mhz":5180,"channel":36,"rssi_dbm":-78,"reliability":"MEDIUM_PLUS","proximity":"MID","security":"WPA3","enterprise":false,"trackability":"RANDOMIZED","last_seen_ms":1757699995000},"#,
-    r#"{"bssid":"3c:5a:b4:11:22:03","ssid":"","frequency_mhz":2462,"channel":11,"rssi_dbm":-90,"reliability":"LOW_MEDIUM","proximity":"FAR","security":"OPEN","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699980000},"#,
-    r#"{"bssid":"3c:5a:b4:11:22:05","ssid":"Corrupt","frequency_mhz":2412,"channel":1,"rssi_dbm":5,"reliability":"LOW_MEDIUM","proximity":null,"security":"WEP","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699999200}"#,
+    r#"{"bssid":"3c:5a:b4:11:22:01","ssid":"HomeNet","frequency_mhz":2437,"channel":6,"rssi_dbm":-48,"reliability":"VERY_HIGH_PLUS","proximity":"IMMEDIATE","security":"WPA2","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699998800,"first_seen_ms":1757000000000,"visits":2},"#,
+    r#"{"bssid":"3c:5a:b4:11:22:04","ssid":"CorpNet","frequency_mhz":5745,"channel":149,"rssi_dbm":-60,"reliability":"VERY_HIGH","proximity":"NEAR","security":"WPA2","enterprise":true,"trackability":"TRACKABLE","last_seen_ms":1757699997000,"first_seen_ms":1757000000000,"visits":2},"#,
+    r#"{"bssid":"3c:5a:b4:11:22:07","ssid":"OddBand","frequency_mhz":2400,"channel":null,"rssi_dbm":-70,"reliability":"VERY_HIGH","proximity":"MID","security":"UNKNOWN","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699970000,"first_seen_ms":1757000000000,"visits":2},"#,
+    r#"{"bssid":"aa:bb:cc:dd:ee:02","ssid":"<b>evil</b> \"Ünïcødé\" \\ 😀","frequency_mhz":5180,"channel":36,"rssi_dbm":-78,"reliability":"MEDIUM_PLUS","proximity":"MID","security":"WPA3","enterprise":false,"trackability":"RANDOMIZED","last_seen_ms":1757699995000,"first_seen_ms":null,"visits":null},"#,
+    r#"{"bssid":"3c:5a:b4:11:22:03","ssid":"","frequency_mhz":2462,"channel":11,"rssi_dbm":-90,"reliability":"LOW_MEDIUM","proximity":"FAR","security":"OPEN","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699980000,"first_seen_ms":1757000000000,"visits":2},"#,
+    r#"{"bssid":"3c:5a:b4:11:22:05","ssid":"Corrupt","frequency_mhz":2412,"channel":1,"rssi_dbm":5,"reliability":"LOW_MEDIUM","proximity":null,"security":"WEP","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699999200,"first_seen_ms":1757000000000,"visits":2}"#,
     r#"],"state":"active","dropped":2,"native_available":true,"timestamp_ms":1757700000000}"#,
 );
 /// A `/api/wifi` answer whose first row has `"enterprise":"yes"` where the
 /// contract has a boolean: the page must reject it, not render it.
 pub const WIFI_MALFORMED_ENTERPRISE_JSON: &str = concat!(
-    r#"{"access_points":[{"bssid":"3c:5a:b4:11:22:01","ssid":"x","frequency_mhz":2437,"channel":6,"rssi_dbm":-48,"reliability":"VERY_HIGH","proximity":"NEAR","security":"WPA2","enterprise":"yes","trackability":"TRACKABLE","last_seen_ms":1}"#,
+    r#"{"access_points":[{"bssid":"3c:5a:b4:11:22:01","ssid":"x","frequency_mhz":2437,"channel":6,"rssi_dbm":-48,"reliability":"VERY_HIGH","proximity":"NEAR","security":"WPA2","enterprise":"yes","trackability":"TRACKABLE","last_seen_ms":1,"first_seen_ms":null,"visits":null}"#,
     r#"],"state":"active","dropped":0,"native_available":true,"timestamp_ms":2}"#,
 );
 /// `/api/status` as `ApiHttpServer.statusJson` writes it (uptime 1:02:03).
@@ -684,12 +687,13 @@ pub const HEALTHY_MARKERS: &[&str] = &[
     r#"class="adv">Microsoft<"#,
     // Cross-rotation identity grouping keys (Rust group_key): a public device
     // keyed by its address, a randomized one by its advertisement's shape.
-    r#"data-identity="3c:5a:b4:11:22:01""#,
+    // (Adjacent on the device row, so one marker proves both the identity key and
+    // the remembered visits without being a substring of the Wi-Fi rows' own.)
+    r#"data-identity="3c:5a:b4:11:22:01" data-visits="2""#,
     r#"data-identity="p[s:feaa/7]|s[feaa]""#,
     r#"data-identity="p[m:0006/2/0102]""#,
     // The persistent cross-session history (Rust bleradar_core::history): the
     // public device remembered over two visits; nothing else is remembered.
-    r#"data-visits="2""#,
     r#"class="ident">3c:5a:b4:11:22:01 · 2 visits since 2025-09-04<"#,
     r#"class="ident">p[s:feaa/7]|s[feaa]<"#,
     "Tag Alpha",
@@ -747,6 +751,9 @@ pub const HEALTHY_MARKERS: &[&str] = &[
     // A frequency outside the plan has no channel; the channel is 149 on 5745 MHz.
     r#"data-security="UNKNOWN" data-trackability="TRACKABLE" data-channel="" data-frequency="2400""#,
     r#"class="num">149<"#,
+    // The persistent history (Rust bleradar_core::history), one attribute per
+    // remembered row; the rendered cells are counted in `check_dom`.
+    r#"data-reliability="VERY_HIGH_PLUS" data-visits="2""#,
     "(hidden)",
     // The corrupt reading is shown as reported, without a proximity band.
     ">5 dBm<",
@@ -755,6 +762,14 @@ pub const HEALTHY_MARKERS: &[&str] = &[
     ">1.2 s ago<",
     ">30 s ago<",
 ];
+
+/// The rendered Wi-Fi history cell of a remembered access point (the harness's
+/// two visits an hour apart from 2025-09-04), which five of the six rows carry:
+/// the sixth is randomized, and a rotating address is not remembered. The cell is
+/// the same text on every row, so it is counted rather than listed as a marker.
+pub const WIFI_HISTORY_CELL: &str = r#"class="hist">2 visits since 2025-09-04<"#;
+/// How many rows carry [`WIFI_HISTORY_CELL`].
+pub const WIFI_HISTORY_CELLS: usize = 5;
 
 /// Text that must never appear: the device name rendered as markup.
 pub const FORBIDDEN_MARKERS: &[&str] = &["<b>evil</b>"];
@@ -780,6 +795,12 @@ pub fn check_dom(scenario: Scenario, dom: &str) -> Result<u32, String> {
                 if dom.contains(marker) {
                     return Err(format!("rendered page contains `{marker}` as markup"));
                 }
+            }
+            let remembered = dom.matches(WIFI_HISTORY_CELL).count();
+            if remembered != WIFI_HISTORY_CELLS {
+                return Err(format!(
+                    "{remembered} Wi-Fi rows show their history; {WIFI_HISTORY_CELLS} expected (a randomized BSSID is not remembered)"
+                ));
             }
             if dom.contains(STOP_DISABLED_MARKER) {
                 return Err(
@@ -1139,6 +1160,10 @@ mod tests {
         let mut dom = String::from(r#"<html><body data-polls="4" "#);
         for marker in HEALTHY_MARKERS {
             dom.push_str(marker);
+            dom.push('\n');
+        }
+        for _ in 0..WIFI_HISTORY_CELLS {
+            dom.push_str(WIFI_HISTORY_CELL);
             dom.push('\n');
         }
         dom.push_str("</body></html>");

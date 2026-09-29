@@ -102,6 +102,50 @@ public class DeviceHistoryTest {
     }
 
     @Test
+    public void a_recorded_batch_is_merged_and_written_only_by_its_flush() throws IOException {
+        File dir = freshDirectory();
+        DeviceHistory history = new DeviceHistory(dir);
+        String second = "00:1a:7d:da:71:13";
+        history.record(PUBLIC_KEY, 1_757_000_000_000L);
+        history.record(second, 1_757_000_000_000L);
+        assertNull("recording merges nothing by itself", history.lookup(PUBLIC_KEY));
+        assertFalse("and writes nothing", new File(dir, DeviceHistory.FILE_NAME).exists());
+        history.flush(0L);
+        assertNotNull("the flush merges the first", history.lookup(PUBLIC_KEY));
+        assertNotNull("and the second", history.lookup(second));
+        String written = persisted(dir);
+        assertTrue("one document holds both", written.contains(PUBLIC_KEY) && written.contains(second));
+    }
+
+    @Test
+    public void a_sighting_is_merged_at_the_time_it_was_seen_not_the_time_it_is_read() throws IOException {
+        DeviceHistory history = new DeviceHistory(freshDirectory());
+        long seen = 1_757_000_000_000L;
+        history.record(PUBLIC_KEY, seen);
+        history.flush(0L);
+        assertEquals("first seen is the observation time", seen, history.lookup(PUBLIC_KEY).firstSeenEpochMillis);
+    }
+
+    @Test
+    public void re_reading_a_cached_sighting_never_adds_a_visit() throws IOException {
+        DeviceHistory history = new DeviceHistory(freshDirectory());
+        long seen = 1_757_000_000_000L;
+        for (int read = 0; read < 5; read++) {
+            history.record(PUBLIC_KEY, seen);
+            history.flush(read * 60_000L);
+        }
+        assertEquals("the same instant read five times is one visit", 1, history.lookup(PUBLIC_KEY).visits);
+        history.record(PUBLIC_KEY, seen + 6 * 60_000L);
+        history.flush(600_000L);
+        assertEquals("a later observation, past the visit gap, is a second visit",
+                2, history.lookup(PUBLIC_KEY).visits);
+        history.record(PUBLIC_KEY, seen);
+        history.flush(700_000L);
+        assertEquals("an older instant read again changes nothing",
+                2, history.lookup(PUBLIC_KEY).visits);
+    }
+
+    @Test
     public void a_save_leaves_no_temporary_file_behind() throws IOException {
         File dir = freshDirectory();
         new DeviceHistory(dir).observe(PUBLIC_KEY, 0L);

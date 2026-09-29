@@ -113,6 +113,33 @@ public class WifiApTest {
     }
 
     @Test
+    public void carrying_a_history_changes_nothing_else_about_an_access_point() {
+        DeviceHistory.Record remembered = new DeviceHistory.Record(1_757_000_000_000L, 3);
+        WifiAp[] originals = {
+            observe("3c:5a:b4:11:22:04", "CorpNet", "[WPA2-EAP-CCMP][ESS]", -60, 5745),
+            observe("3c:5a:b4:11:22:05", "Corrupt", "[WEP][ESS]", 5, 2412),
+            observe("3c:5a:b4:11:22:07", null, null, -70, 2400),
+        };
+        for (WifiAp original : originals) {
+            assertNull("a fresh row has no history", original.history);
+            WifiAp carried = original.withHistory(remembered);
+            assertTrue("the history is attached", remembered == carried.history);
+            assertEquals("bssid", original.bssid, carried.bssid);
+            assertEquals("ssid", original.ssid, carried.ssid);
+            assertEquals("frequency", original.frequencyMhz, carried.frequencyMhz);
+            assertEquals("rssi", original.rssiDbm, carried.rssiDbm);
+            assertEquals("channel", original.channel, carried.channel);
+            assertEquals("trackability", original.trackability, carried.trackability);
+            assertEquals("reliability", original.reliability, carried.reliability);
+            assertEquals("proximity (null stays null)", original.proximity, carried.proximity);
+            assertEquals("security", original.security, carried.security);
+            assertEquals("enterprise", original.enterprise, carried.enterprise);
+            assertEquals("last seen", original.lastSeenEpochMillis, carried.lastSeenEpochMillis);
+            assertNull("and it can be taken away again", carried.withHistory(null).history);
+        }
+    }
+
+    @Test
     public void the_survey_ranks_usable_readings_strongest_first_and_a_corrupt_one_last() {
         List<WifiAp> rows = new ArrayList<>();
         rows.add(observe("3c:5a:b4:11:22:05", "corrupt", "[WEP][ESS]", 5, 2412));

@@ -129,10 +129,10 @@ pub const CAPABILITIES: &[Capability] = &[
         objective: "A per-device timeline (first/last seen, recurrence) persisted across sessions",
         strongest_reference: "BlueHydra / WiGLE",
         rust_module: "bleradar_core::history",
-        runtime_entrypoint: "NativeRadar.historyMerge / NativeRadar.historyLookup",
-        tests: "history 10 unit tests + history_campaign (100k-step differential with persist/reload and corruption); DeviceHistoryTest (restart on the host JVM); verify-api-live; verify-android-emulator (first_seen survives kill -9)",
+        runtime_entrypoint: "NativeRadar.historyMerge / NativeRadar.historyLookup (BLE devices and Wi-Fi access points, one file each), Android Auto Backup",
+        tests: "history 10 unit tests + history_campaign (100k-step differential with persist/reload and corruption); DeviceHistoryTest (restart on the host JVM; a cached sighting is never a new visit); verify-api-live; auto_backup_names_exactly_the_files_the_app_persists; verify-android-emulator (first_seen survives kill -9; a backup, wipe and restore through the OS transport brings the Wi-Fi history back byte for byte and not a file the rules do not name)",
         status: Status::Partial,
-        residual_gap: "Public addresses only (rotating addresses are not remembered); first seen + visit count, not a full sighting timeline or location trail; no history view or export; no competitor benchmark",
+        residual_gap: "Public addresses only (rotating addresses are not remembered); first seen + visit count, not a full sighting timeline or location trail; no history view or export; the cloud leg is the OS's Auto Backup to the user's own account, unobserved here beyond the on-device transport; no competitor benchmark",
     },
     Capability {
         id: "identity-correlation",
@@ -180,9 +180,9 @@ pub const CAPABILITIES: &[Capability] = &[
         strongest_reference: "WiGLE",
         rust_module: "bleradar_core::sweep::wifi_observation",
         runtime_entrypoint: "NativeRadar.wifiObservation -> WifiScanEngine -> GET /api/wifi",
-        tests: "sweep wifi_observation unit tests; jni_bridge wifi_observation 3; WifiApTest 9; WifiSurveyTest 4; verify-api-live /api/wifi golden; verify-dashboard-live survey table; verify-android-emulator survey",
+        tests: "sweep wifi_observation unit tests; jni_bridge wifi_observation 3; WifiApTest 10; WifiSurveyTest 4; verify-api-live /api/wifi golden (with history); verify-dashboard-live survey table; verify-android-emulator survey, its history across kill -9, and backup/restore",
         status: Status::Partial,
-        residual_gap: "A passive snapshot of the platform's scan results only: no location fix per sighting, no persisted history, no map; Android throttles scans (about four per two minutes) and hides results while location is off",
+        residual_gap: "A passive survey of the platform's scan results with first-seen and visit history (trackable BSSIDs only): no location fix per sighting, no full sighting timeline, no map; Android throttles scans (about four per two minutes) and hides results while location is off",
     },
 ];
 

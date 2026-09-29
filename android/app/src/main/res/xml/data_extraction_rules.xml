@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup and device-to-device transfer for Android 12+
+  (android:dataExtractionRules): the same two history files, for both the cloud
+  backup the OS makes to the user's own account and a transfer to a new device.
+  Nothing is uploaded by the app itself and no account or setup is involved: the
+  OS backs up and restores these files, and the user can turn that off in the OS.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="file" path="device_history.txt" />
+        <include domain="file" path="wifi_history.txt" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="device_history.txt" />
+        <include domain="file" path="wifi_history.txt" />
+    </device-transfer>
+</data-extraction-rules>

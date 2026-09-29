@@ -53,6 +53,12 @@ final class WifiAp {
     final boolean enterprise;
     /** Wall-clock epoch milliseconds the platform last saw this access point. */
     final long lastSeenEpochMillis;
+    /**
+     * What the persistent history remembers about this access point (first seen,
+     * visits), or {@code null}: only a trackable BSSID is remembered, and only
+     * once the survey has merged it.
+     */
+    final DeviceHistory.Record history;
 
     private WifiAp(
             String bssid,
@@ -61,7 +67,8 @@ final class WifiAp {
             int rssiDbm,
             String[] f,
             int channel,
-            long lastSeenEpochMillis) {
+            long lastSeenEpochMillis,
+            DeviceHistory.Record history) {
         this.bssid = bssid;
         this.ssid = ssid;
         this.frequencyMhz = frequencyMhz;
@@ -73,6 +80,16 @@ final class WifiAp {
         this.security = f[4];
         this.enterprise = "1".equals(f[5]);
         this.lastSeenEpochMillis = lastSeenEpochMillis;
+        this.history = history;
+    }
+
+    /** This access point with {@code remembered} (possibly {@code null}) as its history. */
+    WifiAp withHistory(DeviceHistory.Record remembered) {
+        return new WifiAp(
+                bssid, ssid, frequencyMhz, rssiDbm,
+                new String[] {trackability, reliability, "", proximity == null ? "" : proximity,
+                    security, enterprise ? "1" : "0"},
+                channel, lastSeenEpochMillis, remembered);
     }
 
     /**
@@ -160,6 +177,6 @@ final class WifiAp {
         }
         return new WifiAp(
                 bssid, ssid == null ? "" : ssid, frequencyMhz, rssiDbm, label, channel,
-                lastSeenEpochMillis);
+                lastSeenEpochMillis, null);
     }
 }
