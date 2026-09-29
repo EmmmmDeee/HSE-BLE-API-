@@ -73,7 +73,7 @@ pub use history::{
 };
 pub use identity::{
     AddressKind, DeviceIdentity, Distinctiveness, IdentityEvidence, IdentityMatch, MatchVerdict,
-    canonical_mac, group_key, is_locally_administered, resolve,
+    canonical_mac, group_key, group_key_typed, is_locally_administered, resolve,
 };
 pub use infrastructure::{
     CompetingExplanation, ControlAssessment, CorrelationEdge, CorrelationFactors,

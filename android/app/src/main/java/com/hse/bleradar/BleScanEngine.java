@@ -255,7 +255,7 @@ final class BleScanEngine implements SnapshotSource {
         if (NativeRadar.isAvailable() && advertisement != null) {
             String advertisementHex = hex(advertisement);
             if (!advertisementHex.equals(blip.lastAdvertisementHex)) {
-                blip.advertisement = Blip.AdvSummary.decode(address, advertisementHex);
+                blip.advertisement = Blip.AdvSummary.decode(address, addressType(result), advertisementHex);
                 blip.lastAdvertisementHex = advertisementHex;
             }
         }

@@ -1110,20 +1110,35 @@ fn device_group_key_correlates_rotating_addresses_and_keys_public_by_address() {
     // A randomized (U/L-set) address keys by the advertisement's correlation id,
     // so two rotating addresses of one device share a key (iBeacon payload +
     // name here make the evidence distinctive).
-    let a = device_group_key("42:11:22:33:44:55", IBEACON_HEX);
-    let b = device_group_key("7e:aa:bb:cc:dd:ee", IBEACON_HEX);
+    let a = device_group_key("42:11:22:33:44:55", 0xFFFF, IBEACON_HEX);
+    let b = device_group_key("7e:aa:bb:cc:dd:ee", 0xFFFF, IBEACON_HEX);
     assert!(a.is_some());
     assert_eq!(a, b);
     assert_ne!(a.as_deref(), Some("42:11:22:33:44:55"));
     // A public (U/L-clear) address keys by itself.
     assert_eq!(
-        device_group_key("a4:c1:38:00:00:01", IBEACON_HEX).as_deref(),
+        device_group_key("a4:c1:38:00:00:01", 0xFFFF, IBEACON_HEX).as_deref(),
         Some("a4:c1:38:00:00:01")
     );
     // A randomized address with no distinctive evidence has no key.
-    assert_eq!(device_group_key("42:11:22:33:44:55", "020106"), None);
+    assert_eq!(
+        device_group_key("42:11:22:33:44:55", 0xFFFF, "020106"),
+        None
+    );
     // Malformed inputs answer None.
-    assert_eq!(device_group_key("not-a-mac", IBEACON_HEX), None);
+    assert_eq!(device_group_key("not-a-mac", 0xFFFF, IBEACON_HEX), None);
+    // The platform type decides: a resolvable private address with its U/L
+    // bit clear (4c:…) rotates, so it keys by the correlation id like the
+    // others, not by itself; a random static address keys by itself.
+    assert_eq!(device_group_key("4c:11:22:33:44:55", 1, IBEACON_HEX), a);
+    assert_eq!(
+        device_group_key("4c:11:22:33:44:55", 0xFFFF, IBEACON_HEX).as_deref(),
+        Some("4c:11:22:33:44:55")
+    );
+    assert_eq!(
+        device_group_key("c0:de:be:ac:0d:01", 1, IBEACON_HEX).as_deref(),
+        Some("c0:de:be:ac:0d:01")
+    );
 }
 
 #[test]
@@ -1136,14 +1151,14 @@ fn device_group_key_export_answers_through_the_string_bridge() {
     let hex = mock.string(IBEACON_HEX);
     assert_eq!(
         mock.read(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
-            env, null, mac, hex
+            env, null, mac, 0, hex
         ))
         .as_deref(),
         Some("a4:c1:38:00:00:01")
     );
     // Null MAC and null env both answer null.
-    assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(env, null, null, hex).is_null());
-    assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(null, null, mac, hex).is_null());
+    assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(env, null, null, 0, hex).is_null());
+    assert!(Java_com_hse_bleradar_NativeRadar_deviceGroupKey(null, null, mac, 0, hex).is_null());
 }
 
 #[test]

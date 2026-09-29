@@ -531,15 +531,16 @@ public final class NativeRadar {
 
     /**
      * The stable key to group observations of one physical device under, across
-     * BLE address rotation, from its MAC and hex advertising payload
-     * ({@code ScanRecord.getBytes()}), or {@code null} when it cannot be grouped.
-     * A public (stable) address keys by itself; a randomized (rotating) address
+     * BLE address rotation, from its MAC, its {@code BluetoothDevice.ADDRESS_TYPE_*}
+     * (as for {@link #deviceAddressTrackability(String, int)}) and hex
+     * advertising payload ({@code ScanRecord.getBytes()}), or {@code null} when
+     * it cannot be grouped. A stable (public or random static) address keys by itself; a randomized (rotating) address
      * keys by the advertisement's distinctive shape, so a device's successive
      * random addresses share one key. Two devices with the same non-null key are
      * the same device (public) or at least possibly the same (randomized).
-     * Owned by {@code bleradar_core::group_key}.
+     * Owned by {@code bleradar_core::group_key_typed}.
      */
-    public static native String deviceGroupKey(String mac, String advertisementHex);
+    public static native String deviceGroupKey(String mac, int addressType, String advertisementHex);
 
     /**
      * The Bluetooth SIG assignee name for the first manufacturer block's company

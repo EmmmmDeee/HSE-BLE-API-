@@ -139,10 +139,10 @@ pub const CAPABILITIES: &[Capability] = &[
         objective: "Correlate one physical device across BLE address rotation with explicit uncertainty",
         strongest_reference: "BlueHydra",
         rust_module: "bleradar_core::identity",
-        runtime_entrypoint: "NativeRadar.deviceGroupKey",
-        tests: "identity 11 unit tests + identity_campaign (300k-pair property); verify-api-live; verify-android-emulator (identity_key on the runtime)",
+        runtime_entrypoint: "NativeRadar.deviceGroupKey(mac, addressType, advertisement)",
+        tests: "identity 13 unit tests + identity_campaign (300k-pair property); verify-api-live; verify-android-emulator (identity_key on the runtime)",
         status: Status::Partial,
-        residual_gap: "Cross-session history covers public addresses only; U/L-bit address-type approximation; app does not yet visually merge rows",
+        residual_gap: "Cross-session history covers stable addresses only; the exact address type needs Android 15+ (older Android falls back to the U/L bit); app does not yet visually merge rows",
     },
     Capability {
         id: "manufacturer-name",

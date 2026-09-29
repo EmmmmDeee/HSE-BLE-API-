@@ -67,10 +67,27 @@ fn locally_administered_bit(canonical: &str) -> Option<bool> {
 /// Address persistence classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressKind {
-    /// Universally administered address; potentially stable hardware identity.
+    /// A stable address — public, or random static — so a potentially stable
+    /// hardware identity.
     Public,
-    /// Locally administered/randomized address; must not be treated as stable identity alone.
+    /// A rotating (private) address, or one whose persistence cannot be told;
+    /// must not be treated as stable identity alone.
     Randomized,
+}
+
+impl AddressKind {
+    /// The kind of a BLE address, from the one authority for BLE address
+    /// persistence ([`crate::ble_address_trackability`]): only an address that
+    /// classifies as trackable is a stable identity; a rotating one, and one of
+    /// the reserved random subtype, are not. `None` for a non-MAC.
+    #[must_use]
+    pub fn of(address: &str, address_type: crate::BleAddressType) -> Option<Self> {
+        match crate::ble_address_trackability(address, address_type) {
+            crate::AddressTrackability::Trackable => Some(Self::Public),
+            crate::AddressTrackability::Randomized => Some(Self::Randomized),
+            crate::AddressTrackability::Unknown => canonical_mac(address).map(|_| Self::Randomized),
+        }
+    }
 }
 
 /// Evidence usable for re-identification without claiming certainty.
@@ -100,12 +117,19 @@ pub struct DeviceIdentity {
 impl DeviceIdentity {
     /// Builds an identity from an observed MAC and evidence.
     pub fn new(address: &str, evidence: IdentityEvidence) -> Option<Self> {
+        Self::with_address_type(address, crate::BleAddressType::Unknown, evidence)
+    }
+
+    /// As [`Self::new`], with the platform-reported BLE address type deciding
+    /// whether the address is a stable identity ([`AddressKind::of`]).
+    #[must_use]
+    pub fn with_address_type(
+        address: &str,
+        address_type: crate::BleAddressType,
+        evidence: IdentityEvidence,
+    ) -> Option<Self> {
+        let address_kind = AddressKind::of(address, address_type)?;
         let address = canonical_mac(address)?;
-        let address_kind = if locally_administered_bit(&address)? {
-            AddressKind::Randomized
-        } else {
-            AddressKind::Public
-        };
         Some(Self {
             address,
             address_kind,
@@ -404,17 +428,27 @@ pub fn resolve(a: &DeviceIdentity, b: &DeviceIdentity) -> IdentityMatch {
 ///
 /// Two observations sharing a non-`None` group key are the same device (a public
 /// address) or at least [`MatchVerdict::PossiblySame`] (a correlated randomized
-/// address). The public/randomized split uses the 802 U/L bit, an approximation
-/// of BLE address types (a static-random or U/L-clear resolvable address can be
-/// misclassified); it is the same signal the trackability classification uses,
-/// so the two never disagree.
+/// address). With no address type the public/randomized split falls back to
+/// the U/L bit ([`group_key_typed`] takes the platform's type); either way it
+/// is the trackability classification's own rule, so the two never disagree.
 #[must_use]
 pub fn group_key(address: &str, evidence: &IdentityEvidence) -> Option<String> {
-    let canonical = canonical_mac(address)?;
-    if locally_administered_bit(&canonical)? {
-        evidence.correlation_id()
-    } else {
-        Some(canonical)
+    group_key_typed(address, crate::BleAddressType::Unknown, evidence)
+}
+
+/// As [`group_key`], with the platform-reported BLE address type deciding
+/// whether the address is a stable identity ([`AddressKind::of`]): a
+/// resolvable private address whose U/L bit happens to be clear is keyed by
+/// its correlation id, not by itself.
+#[must_use]
+pub fn group_key_typed(
+    address: &str,
+    address_type: crate::BleAddressType,
+    evidence: &IdentityEvidence,
+) -> Option<String> {
+    match AddressKind::of(address, address_type)? {
+        AddressKind::Public => canonical_mac(address),
+        AddressKind::Randomized => evidence.correlation_id(),
     }
 }
 
@@ -615,6 +649,38 @@ mod resolve_tests {
             &[0x180D],
         );
         assert_ne!(a.evidence.correlation_id(), d.evidence.correlation_id());
+    }
+
+    #[test]
+    fn the_platform_address_type_decides_stable_identity() {
+        use crate::BleAddressType::{Public, Random, Unknown};
+        // A resolvable private address with its U/L bit clear.
+        let rpa = "4c:11:22:33:44:55";
+        assert_eq!(AddressKind::of(rpa, Unknown), Some(AddressKind::Public));
+        assert_eq!(AddressKind::of(rpa, Random), Some(AddressKind::Randomized));
+        // Random static is stable; the reserved subtype is never assumed so.
+        assert_eq!(
+            AddressKind::of("c0:de:be:ac:0d:01", Random),
+            Some(AddressKind::Public)
+        );
+        assert_eq!(
+            AddressKind::of("80:11:22:33:44:55", Random),
+            Some(AddressKind::Randomized)
+        );
+        assert_eq!(
+            AddressKind::of("02:11:22:33:44:55", Public),
+            Some(AddressKind::Public)
+        );
+        assert_eq!(AddressKind::of("not-a-mac", Public), None);
+        // The resolver follows: two rotating addresses with shared evidence
+        // are only PossiblySame, never keyed or matched as hardware.
+        let ev = identity(PUB_A, Some((0x0059, &[9, 8, 7])), Some("W"), &[0x180F]).evidence;
+        let a = DeviceIdentity::with_address_type(rpa, Random, ev.clone()).unwrap();
+        assert_eq!(a.address_kind, AddressKind::Randomized);
+        assert_eq!(group_key_typed(rpa, Random, &ev), ev.correlation_id());
+        assert_eq!(group_key_typed(rpa, Unknown, &ev), group_key(rpa, &ev));
+        let b = DeviceIdentity::with_address_type("7e:aa:bb:cc:dd:ee", Random, ev).unwrap();
+        assert_eq!(resolve(&a, &b).verdict, MatchVerdict::PossiblySame);
     }
 
     #[test]

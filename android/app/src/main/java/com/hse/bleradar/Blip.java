@@ -78,17 +78,18 @@ final class Blip {
         }
 
         /**
-         * Decodes one advertising payload of the device at {@code address}
-         * through the Rust natives — the single construction path, shared by
-         * {@link BleScanEngine} and the verify-api-live harness.
+         * Decodes one advertising payload of the device at {@code address}, of
+         * platform address type {@code addressType}, through the Rust natives —
+         * the single construction path, shared by {@link BleScanEngine} and the
+         * verify-api-live harness.
          */
-        static AdvSummary decode(String address, String advertisementHex) {
+        static AdvSummary decode(String address, int addressType, String advertisementHex) {
             return new AdvSummary(
                     NativeRadar.advertisementCompanyId(advertisementHex),
                     NativeRadar.advertisementBeacon(advertisementHex),
                     NativeRadar.advertisementManufacturerName(advertisementHex),
                     NativeRadar.advertisementServices(advertisementHex),
-                    NativeRadar.deviceGroupKey(address, advertisementHex));
+                    NativeRadar.deviceGroupKey(address, addressType, advertisementHex));
         }
     }
     /**

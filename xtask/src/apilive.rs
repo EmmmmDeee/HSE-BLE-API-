@@ -238,7 +238,7 @@ public final class ApiSmoke {
         // The same Blip.AdvSummary.decode BleScanEngine calls on a live
         // ScanRecord, published as one object exactly as the engine does.
         if (advertisementHex != null) {
-            blip.advertisement = Blip.AdvSummary.decode(address, advertisementHex);
+            blip.advertisement = Blip.AdvSummary.decode(address, NativeRadar.ADDRESS_TYPE_UNKNOWN, advertisementHex);
         }
         // The persistent history through the real natives and the app's own
         // row parser: two sessions an hour apart (past the visit gap), so a

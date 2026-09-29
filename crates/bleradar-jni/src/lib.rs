@@ -212,10 +212,11 @@ pub fn advertisement_beacon(advertisement_hex: &str) -> Option<String> {
 /// advertisement's correlation id, or `None` when the evidence is too sparse).
 /// Owned by [`bleradar_core::group_key`], fed by [`bleradar_core::adv`].
 #[must_use]
-pub fn device_group_key(mac: &str, advertisement_hex: &str) -> Option<String> {
+pub fn device_group_key(mac: &str, address_type: i32, advertisement_hex: &str) -> Option<String> {
     let report = bleradar_core::adv::decode_hex(advertisement_hex);
     let evidence = bleradar_core::IdentityEvidence::from_advertisement(&report, None);
-    bleradar_core::group_key(mac, &evidence)
+    let address_type = bleradar_core::BleAddressType::from_android(address_type);
+    bleradar_core::group_key_typed(mac, address_type, &evidence)
 }
 
 /// Pure, unit-testable core of
@@ -1477,7 +1478,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_advertisementServices(
     string_export(env, advertisement_hex, advertisement_services)
 }
 
-/// `NativeRadar.deviceGroupKey(String, String): String` — see
+/// `NativeRadar.deviceGroupKey(String, int, String): String` — see
 /// [`device_group_key`]. Reads `env` only through [`env`](mod@env); a null or
 /// malformed MAC, or a device that cannot be grouped, answers null.
 #[unsafe(no_mangle)]
@@ -1485,13 +1486,14 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
     env: JniEnvPtr,
     _class: JniOpaquePtr,
     mac: JStringRef,
+    address_type: i32,
     advertisement_hex: JStringRef,
 ) -> JStringRef {
     let Some(mac) = read_text(env, mac) else {
         return core::ptr::null_mut();
     };
     let advertisement_hex = read_text(env, advertisement_hex).unwrap_or_default();
-    match device_group_key(&mac, &advertisement_hex) {
+    match device_group_key(&mac, address_type, &advertisement_hex) {
         Some(key) => make_text(env, &key),
         None => core::ptr::null_mut(),
     }
@@ -1554,8 +1556,8 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_historyLookup(
 /// manufacturer-name lookup (`advertisementManufacturerName`) was added, and to
 /// `16` when the service-name lookup (`advertisementServices`) was added, and
 /// to `17` when the cross-session device history (`historyMerge`,
-/// `historyLookup`) was added, and to `18` when `deviceAddressTrackability`
-/// took the platform's BLE address type.
+/// `historyLookup`) was added, and to `18` when `deviceAddressTrackability` and
+/// `deviceGroupKey` took the platform's BLE address type.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
