@@ -76,7 +76,11 @@ Code that works in principle but was never executed is incomplete. Features that
 - `RUST_CONVERSION.md` — Rust-first migration boundary and consolidation prerequisites.
 - `.github/workflows/gates.yml` — CI enforcement of every gate below.
 - `BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk` — original APK oracle.
-- `BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip` — original migration archive; also retains the extracted native oracles (`oracle/libbleradar_core.so`, `oracle/classes.dex`) and the migration `git-history.bundle` for differential testing.
+- `BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip` — byte-pinned migration archive (the `check-oracle-integrity` baseline). Its contents are checked in, not only zipped:
+  - `migration/critically-enhanced-v0.3.0/` — the v0.3.0 reconstruction, checked in as Rust. Inventory and parity generation live in `crates/bleradar-tools` (no Python, no shell). The snapshot is **not** a workspace member (`exclude = ["migration"]`) and must not replace the crates on `main`, which have moved past it. `SHA256SUMS` covers this Rust tree; the pinned zip remains the byte-for-byte original archive.
+  - `oracle/libbleradar_core.so` and `oracle/classes.dex` — the immutable native oracle and DEX, same bytes as inside the archive.
+  - `git-history.bundle` — the recovery history (`archive/migration-v0.3.0`, tags `migration/*` and `recovery/*`).
+- The original Python and shell helpers survive only inside the pinned zip, which `check-oracle-integrity` must not modify. The source that builds is Rust: `cargo xtask` on `main`, and `bleradar-tools` inside the v0.3.0 snapshot.
 
 ## Developer setup
 

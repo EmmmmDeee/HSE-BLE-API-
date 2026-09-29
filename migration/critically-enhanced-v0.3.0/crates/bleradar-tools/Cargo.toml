@@ -1,0 +1,11 @@
+[package]
+name = "bleradar-tools"
+version = "0.3.0"
+description = "Dependency-free Rust replacements for the retired Python and shell inventory tools."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
