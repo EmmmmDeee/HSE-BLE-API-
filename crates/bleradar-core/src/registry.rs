@@ -130,7 +130,7 @@ pub const CAPABILITIES: &[Capability] = &[
         strongest_reference: "BlueHydra / WiGLE",
         rust_module: "bleradar_core::history",
         runtime_entrypoint: "NativeRadar.historyMerge / NativeRadar.historyLookup (BLE devices and Wi-Fi access points, one file each), Android Auto Backup",
-        tests: "history 10 unit tests + history_campaign (100k-step differential with persist/reload and corruption); DeviceHistoryTest (restart on the host JVM; a cached sighting is never a new visit); verify-api-live; auto_backup_names_exactly_the_files_the_app_persists; verify-android-emulator (first_seen survives kill -9; a backup, wipe and restore through the OS transport brings both files back byte for byte)",
+        tests: "history 10 unit tests + history_campaign (100k-step differential with persist/reload and corruption); DeviceHistoryTest (restart on the host JVM; a cached sighting is never a new visit); verify-api-live; auto_backup_names_exactly_the_files_the_app_persists; verify-android-emulator (first_seen survives kill -9; a backup, wipe and restore through the OS transport brings the Wi-Fi history back byte for byte and not a file the rules do not name)",
         status: Status::Partial,
         residual_gap: "Public addresses only (rotating addresses are not remembered); first seen + visit count, not a full sighting timeline or location trail; no history view or export; the cloud leg is the OS's Auto Backup to the user's own account, unobserved here beyond the on-device transport; no competitor benchmark",
     },

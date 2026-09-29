@@ -1712,8 +1712,8 @@ fn exercise(
 
     // Last on purpose: `pm clear` wipes the app's data and revokes its runtime
     // permissions, so no later step may depend on the app's state, and the crash
-    // log above has already been read.
-    backup_phase(adb, report)?;
+    // log above has already been read. It makes its own history (see its docs).
+    backup_phase(adb, port, report)?;
     Ok(())
 }
 
@@ -1730,15 +1730,48 @@ pub fn restore_token(sets: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A file the app never writes, planted beside the history to prove the backup
+/// rules are an include list: it must not come back from the restore.
+const BACKUP_DECOY: &str = "backup_decoy.txt";
+
 /// Auto Backup, proven on the runtime through the OS's own on-device transport
-/// (no account, no network): both history files are backed up, the app's data is
-/// wiped, and the restore must bring both back byte for byte. The rules
+/// (no account, no network): the Wi-Fi survey's history is backed up, the app's
+/// data is wiped, and the restore must bring it back byte for byte while a decoy
+/// file beside it, which the rules do not name, must not come back. The rules
 /// (`res/xml/backup_rules.xml`, `data_extraction_rules.xml`) are what the OS
 /// reads, so this is the path a reinstall or a device move takes.
-fn backup_phase(adb: &Adb, report: &mut Report) -> Result<(), String> {
+///
+/// It runs last and makes its own history: the upgrade phase reinstalls the app
+/// (`pm uninstall`, then an install), which wipes everything the earlier phases
+/// left, and `pm clear` here revokes the runtime permissions, so nothing after it
+/// could rely on the app's state. The survey writes `wifi_history.txt` on its
+/// first read, so a scan is all the setup it needs.
+fn backup_phase(adb: &Adb, port: u16, report: &mut Report) -> Result<(), String> {
     println!(
         "== Auto Backup: back up, wipe and restore the history through the OS's local transport =="
     );
+    start_scan(port)?;
+    let (survey, _) = wait_for_wifi_survey(port)?;
+    // Paused, so the app writes nothing while the files are read and compared.
+    let stop = post(port, "/api/scan/stop")?;
+    if stop.status != 200 {
+        return Err(format!(
+            "POST /api/scan/stop answered {} {}",
+            stop.status,
+            body_text(&stop)
+        ));
+    }
+    wait_for_status(port, "scanning", "false")?;
+
+    let decoy = format!("/data/data/{PACKAGE}/files/{BACKUP_DECOY}");
+    adb.shell(&format!("echo decoy > {decoy}"))?;
+    let wifi = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
+    if wifi.lines().next() != Some(HISTORY_HEADER_LINE) || wifi.lines().count() < 2 {
+        return Err(format!(
+            "{WIFI_HISTORY_FILE} holds no history to back up (the survey said: {survey}):\n{wifi}"
+        ));
+    }
+
     let transports = adb.shell("bmgr list transports")?;
     if !transports.contains(LOCAL_TRANSPORT) {
         return Err(format!(
@@ -1747,41 +1780,37 @@ fn backup_phase(adb: &Adb, report: &mut Report) -> Result<(), String> {
     }
     adb.shell("bmgr enable true")?;
     adb.shell(&format!("bmgr transport {LOCAL_TRANSPORT}"))?;
-
-    let devices = adb.shell(&format!("cat {HISTORY_FILE}"))?;
-    let wifi = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
-    for (file, text) in [(HISTORY_FILE, &devices), (WIFI_HISTORY_FILE, &wifi)] {
-        if text.lines().next() != Some(HISTORY_HEADER_LINE) || text.lines().count() < 2 {
-            return Err(format!("{file} holds no history to back up:\n{text}"));
-        }
-    }
-
     let backup = adb.shell(&format!("bmgr backupnow {PACKAGE}"))?;
     if !backup.contains("Success") {
         return Err(format!(
             "bmgr backupnow {PACKAGE} did not succeed:\n{backup}"
         ));
     }
+
     adb.shell(&format!("pm clear {PACKAGE}"))?;
     let listing = adb.shell_lenient(&format!("ls /data/data/{PACKAGE}/files"));
-    if listing.contains("device_history.txt") || listing.contains("wifi_history.txt") {
-        return Err(format!("pm clear left the history in place:\n{listing}"));
+    if listing.contains("wifi_history.txt") || listing.contains(BACKUP_DECOY) {
+        return Err(format!("pm clear left files in place:\n{listing}"));
     }
 
     let sets = adb.shell("bmgr list sets")?;
     let token = restore_token(&sets)
         .ok_or_else(|| format!("bmgr list sets names no restore set:\n{sets}"))?;
     let restore = adb.shell(&format!("bmgr restore {token} {PACKAGE}"))?;
-    let restored_devices = adb.shell(&format!("cat {HISTORY_FILE}"))?;
-    let restored_wifi = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
-    if restored_devices != devices || restored_wifi != wifi {
+    let restored = adb.shell(&format!("cat {WIFI_HISTORY_FILE}"))?;
+    if restored != wifi {
         return Err(format!(
-            "the restore did not bring the history back byte for byte (restore said: {restore})\ndevices before:\n{devices}\ndevices after:\n{restored_devices}\nwifi before:\n{wifi}\nwifi after:\n{restored_wifi}"
+            "the restore did not bring the Wi-Fi history back byte for byte (restore said: {restore})\nbefore:\n{wifi}\nafter:\n{restored}"
+        ));
+    }
+    let after = adb.shell_lenient(&format!("ls /data/data/{PACKAGE}/files"));
+    if after.contains(BACKUP_DECOY) {
+        return Err(format!(
+            "the restore brought back {BACKUP_DECOY}, which the backup rules do not name: the rules are not an include list:\n{after}"
         ));
     }
     report.push(format!(
-        "Auto Backup: {LOCAL_TRANSPORT} backed up both history files, `pm clear` wiped them, `bmgr restore {token}` brought back {} device record(s) and {} access point(s) byte for byte",
-        devices.lines().count() - 1,
+        "Auto Backup: {LOCAL_TRANSPORT} backed up the app, `pm clear` wiped it, `bmgr restore {token}` brought back {WIFI_HISTORY_FILE} byte for byte ({} remembered access point(s)) and not {BACKUP_DECOY}, which the rules do not name",
         wifi.lines().count() - 1
     ));
     Ok(())
