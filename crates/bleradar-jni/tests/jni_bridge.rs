@@ -1168,7 +1168,7 @@ fn advertisement_manufacturer_name_resolves_known_ids_only() {
     use bleradar_jni::advertisement_manufacturer_name;
     assert_eq!(
         advertisement_manufacturer_name(IBEACON_HEX).as_deref(),
-        Some("Apple")
+        Some("Apple, Inc.")
     );
     assert_eq!(
         advertisement_manufacturer_name(MICROSOFT_HEX).as_deref(),
@@ -1189,7 +1189,7 @@ fn advertisement_manufacturer_name_export_answers_through_the_string_bridge() {
     let ibeacon = mock.string(IBEACON_HEX);
     assert_eq!(
         mock.read(name_of(env, null, ibeacon)).as_deref(),
-        Some("Apple")
+        Some("Apple, Inc.")
     );
     // Unknown id, null string and null env all answer null.
     let ffff = mock.string(EMULATOR_BEACON_HEX);

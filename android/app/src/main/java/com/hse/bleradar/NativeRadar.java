@@ -576,8 +576,8 @@ public final class NativeRadar {
      * identifier in a BLE advertising payload (hex), or {@code null} when there
      * is no manufacturer data or the identifier is not in the bundled table — in
      * which case the caller shows the raw {@link #advertisementCompanyId} hex.
-     * Owned by {@code bleradar_core::adv::company_name}, a curated, versioned
-     * subset of the public Bluetooth SIG Assigned Numbers.
+     * Owned by {@code bleradar_core::adv::company_name}: the Bluetooth SIG's
+     * complete company-identifier registry, in the SIG's own spelling.
      */
     public static native String advertisementManufacturerName(String advertisementHex);
 

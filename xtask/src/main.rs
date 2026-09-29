@@ -13,6 +13,7 @@
 //! invoking it from a subdirectory still works.
 
 mod apilive;
+mod companyids;
 mod dashboard;
 mod dex;
 mod elf;
@@ -100,6 +101,7 @@ fn main() -> ExitCode {
         "verify-android-emulator" => cmd_verify_android_emulator(),
         "android-sdk-packages" => cmd_android_sdk_packages(&rest),
         "android-sdk-install" => cmd_android_sdk_install(&rest),
+        "sync-company-ids" => cmd_sync_company_ids(),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -152,6 +154,7 @@ fn print_usage() {
          \x20 verify-android-emulator    install the committed APK on a headless Android emulator (KVM) and exercise the app's real lifecycle through the loopback API\n\
          \x20 android-sdk-packages [--system-image|--emulator]  print the pinned sdkmanager package set the Android proofs are built with (CI installs exactly this)\n\
          \x20 android-sdk-install [--system-image|--emulator]   install that set into the discovered SDK: licenses accepted, sdkmanager retried, every package checked complete and discoverable (what CI runs)\n\
+         \x20 sync-company-ids          refresh the bundled Bluetooth SIG company-identifier registry (crates/bleradar-core/data) from the SIG, keeping the old file if the core rejects the new one\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/jni-contract/test/doc/checks/audit/deny)"
@@ -3952,6 +3955,10 @@ fn run_status(mut cmd: Command) -> Result<(), String> {
         return Err(format!("{program} exited with {status}"));
     }
     Ok(())
+}
+
+fn cmd_sync_company_ids() -> Result<(), String> {
+    companyids::sync(&repo_root()?)
 }
 
 fn cmd_audit() -> Result<(), String> {
