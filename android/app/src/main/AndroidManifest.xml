@@ -14,6 +14,8 @@
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <!-- The Wi-Fi survey is optional: CHANGE_WIFI_STATE would otherwise imply a required Wi-Fi radio. -->
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
