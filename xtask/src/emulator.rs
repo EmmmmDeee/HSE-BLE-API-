@@ -91,6 +91,26 @@ const BEACON_ADDRESS: &str = "C0:DE:BE:AC:0D:01";
 /// Its advertising interval in 0.625 ms units: 100 ms, the low-latency
 /// scan window the app asks for.
 const BEACON_INTERVAL: u16 = 0x00A0;
+/// The manufacturer-specific data it advertises: company identifier 0xFFFF,
+/// which the Bluetooth SIG reserves for testing (never a shipping product's),
+/// and a two-byte payload. The Rust advertisement decoder must report it on
+/// the runtime as the row's `company_id`.
+const BEACON_COMPANY_ID: u16 = 0xFFFF;
+const BEACON_MANUFACTURER_PAYLOAD: &[u8] = &[0xBE, 0xAC];
+/// `BEACON_COMPANY_ID` as the API renders it (four lowercase hex digits).
+const BEACON_COMPANY_ID_JSON: &str = "\"company_id\":\"ffff\"";
+/// The beacon's cross-rotation identity key as the API renders it. Its address
+/// `C0:...` has the U/L bit clear, so the Rust `group_key` keys it by its
+/// canonical (lowercase) address rather than by advertisement shape.
+const BEACON_IDENTITY_JSON: &str = "\"identity_key\":\"c0:de:be:ac:0d:01\"";
+/// The app's persistent device history on the device (readable under `adb root`).
+const HISTORY_FILE: &str = "/data/data/com.hse.bleradar/files/device_history.txt";
+/// Its first line (`bleradar_core::HISTORY_HEADER`).
+const HISTORY_HEADER_LINE: &str = "bleradar-history v1";
+/// How long the beacon's row may take to carry its history (merges are batched).
+const HISTORY_TIMEOUT: Duration = Duration::from_secs(15);
+/// The beacon's key in that history: its canonical public address.
+const BEACON_HISTORY_KEY: &str = "c0:de:be:ac:0d:01";
 /// How long the scan may take to list the beacon after it started.
 const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the row may outlive the beacon: the Standard tracking profile
@@ -103,8 +123,18 @@ const HCI_PORT: u16 = 6402;
 /// Command Complete by then went to a wrong port or a dead daemon.
 const HCI_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the upgrade pathway may take from the launch to the installer
-/// hand-off (the fetch, the decision, the download, the verification).
-const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
+/// hand-off (the fetch, the decision, the download, the verification). Generous
+/// because the download runs through Android's `DownloadManager`, whose
+/// scheduling can stall for a minute or more on a contended CI runner even
+/// though the transfer itself is a few hundred KB over the loopback proxy (seen
+/// once: an enqueued download that had not progressed within 120 s on a runner
+/// that also booted slowly and logged graphics errors). The window only bounds
+/// how long to wait; it never weakens what the proof then requires — a completed
+/// download, a size + SHA-256 verification, and the installer hand-off.
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long the upgrade proof lets the guest apply the global proxy: one run
+/// that launched about 2 s after the setting fetched with no proxy yet.
+const PROXY_SETTLE: Duration = Duration::from_secs(20);
 /// How long the package installer may take once its button is tapped.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the installer may take to show its confirmation.
@@ -343,6 +373,13 @@ pub fn device_row<'a>(devices_json: &'a str, key: &str, value: &str) -> Option<&
     let start = devices_json[..at].rfind('{')?;
     let end = at + devices_json[at..].find('}')?;
     Some(&devices_json[start..=end])
+}
+
+/// The virtual advertiser's row in a `/api/devices` document: its address as
+/// the guest reports it, else the name its advertisement carries.
+fn beacon_row(devices_json: &str) -> Option<&str> {
+    device_row(devices_json, "address", BEACON_ADDRESS)
+        .or_else(|| device_row(devices_json, "name", BEACON_NAME))
 }
 
 /// The port `--hci-port`/`--hci_port` names on netsimd's command line
@@ -664,7 +701,13 @@ impl Beacon {
                 )
             })?;
         let bd_addr = controller.read_bd_addr()?;
-        controller.advertise(BEACON_ADDRESS, BEACON_NAME, BEACON_INTERVAL)?;
+        controller.advertise(
+            BEACON_ADDRESS,
+            BEACON_NAME,
+            BEACON_COMPANY_ID,
+            BEACON_MANUFACTURER_PAYLOAD,
+            BEACON_INTERVAL,
+        )?;
         Ok(Self {
             controller,
             port,
@@ -676,7 +719,7 @@ impl Beacon {
 
     fn describe(&self) -> String {
         format!(
-            "a second virtual controller on netsimd's HCI socket 127.0.0.1:{} ({}, {}), public address {}, advertising every {} ms as {BEACON_ADDRESS} {BEACON_NAME:?}",
+            "a second virtual controller on netsimd's HCI socket 127.0.0.1:{} ({}, {}), public address {}, advertising every {} ms as {BEACON_ADDRESS} {BEACON_NAME:?} with manufacturer data 0x{BEACON_COMPANY_ID:04x}",
             self.port,
             self.source,
             if self.listed {
@@ -1164,11 +1207,7 @@ fn exercise(
             // The bound is judged after the answer (a request retries on
             // its own), so a row that arrived late never passes as on time.
             let after = created.elapsed();
-            // The advertiser's address as the guest reports it, else the
-            // name the advertisement carries.
-            if let Some(row) = device_row(&text, "address", BEACON_ADDRESS)
-                .or_else(|| device_row(&text, "name", BEACON_NAME))
-            {
+            if let Some(row) = beacon_row(&text) {
                 if after <= BEACON_TIMEOUT {
                     listed = Some((row.to_string(), after));
                 }
@@ -1200,6 +1239,57 @@ fn exercise(
                 "the beacon's row carries no distance (the Rust estimate never reached it): {row}"
             ));
         }
+        // The advertising payload went through the platform's BLE stack,
+        // ScanRecord.getBytes(), the JNI string bridge and bleradar_core::adv:
+        // the manufacturer block must come back as its company identifier,
+        // and a plain manufacturer block is not a beacon.
+        if !row.contains(BEACON_COMPANY_ID_JSON)
+            || !row.contains("\"beacon\":null")
+            // 0xFFFF is the SIG testing id: it has a raw company id but no name.
+            || !row.contains("\"manufacturer\":null")
+            // The beacon advertises no service list.
+            || !row.contains("\"services\":null")
+        {
+            return Err(format!(
+                "the beacon's row does not carry the decoded advertisement ({BEACON_COMPANY_ID_JSON}, \"manufacturer\":null, \"beacon\":null) — the Rust advertisement decoder never reached it: {row}"
+            ));
+        }
+        // The Rust identity engine ran on the runtime: a public address is
+        // grouped by itself.
+        if !row.contains(BEACON_IDENTITY_JSON) {
+            return Err(format!(
+                "the beacon's row does not carry its identity key ({BEACON_IDENTITY_JSON}) — the Rust group_key never reached it: {row}"
+            ));
+        }
+        // The persistent device history (bleradar_core::history) ran on the
+        // runtime: a public address is remembered from its first sighting, on
+        // its first visit. Sightings are batched (a new device merges within
+        // about a second), so the row is re-read until the history reaches it.
+        let history_awaited = Instant::now();
+        let mut history_row = row.clone();
+        let beacon_first_seen = loop {
+            if let Some(first_seen) =
+                json_integer(&history_row, "first_seen_ms").filter(|first_seen| *first_seen > 0)
+            {
+                break first_seen;
+            }
+            if history_awaited.elapsed() >= HISTORY_TIMEOUT {
+                return Err(format!(
+                    "within {}s the beacon's row carried no first_seen_ms — the persistent history never recorded it: {history_row}",
+                    HISTORY_TIMEOUT.as_secs()
+                ));
+            }
+            thread::sleep(Duration::from_secs(1));
+            let text = body_text(&get(port, "/api/devices")?);
+            if let Some(fresh) = beacon_row(&text) {
+                history_row = fresh.to_string();
+            }
+        };
+        if json_integer(&history_row, "visits") != Some(1) {
+            return Err(format!(
+                "the beacon's row is not on its first visit (\"visits\":1): {history_row}"
+            ));
+        }
         report.push(format!(
             "beacon: listed {:.1}s after its start: {row}",
             after.as_secs_f64()
@@ -1215,10 +1305,7 @@ fn exercise(
             // error answer or an idle engine has an empty list for other
             // reasons than the freshness policy.
             let observed = response.status == 200 && json_has(&text, "scanning", "true");
-            if observed
-                && device_row(&text, "address", BEACON_ADDRESS).is_none()
-                && device_row(&text, "name", BEACON_NAME).is_none()
-            {
+            if observed && beacon_row(&text).is_none() {
                 if after > PRUNE_TIMEOUT {
                     return Err(format!(
                         "the row was gone only {:.1}s after the beacon's removal (bound {}s)",
@@ -1296,6 +1383,20 @@ fn exercise(
         report.push(format!(
             "kill -9 {pid}: the system restarted the service (pid {new_pid}) and the scan resumed {:.1}s later",
             after.as_secs_f64()
+        ));
+        // The history outlived the process: the file the killed process wrote
+        // still holds the beacon with the first sighting its row reported.
+        let history = adb.shell(&format!("cat {HISTORY_FILE}"))?;
+        let expected = format!("{BEACON_HISTORY_KEY}\t{beacon_first_seen}\t");
+        if history.lines().next() != Some(HISTORY_HEADER_LINE)
+            || !history.lines().any(|line| line.starts_with(&expected))
+        {
+            return Err(format!(
+                "after kill -9 {HISTORY_FILE} does not remember the beacon first seen at {beacon_first_seen}:\n{history}"
+            ));
+        }
+        report.push(format!(
+            "history: {HISTORY_FILE} survived kill -9 and remembers {BEACON_HISTORY_KEY} first seen at {beacon_first_seen}"
         ));
     }
 
@@ -1685,6 +1786,30 @@ fn wait_for_unmetered_network(adb: &Adb) -> Result<updateproof::ActiveNetwork, S
     }
 }
 
+/// Lets the global proxy setting reach the guest's network stack before the
+/// launch, and says how long that was. Nothing observable marks the moment on
+/// API 34: `dumpsys connectivity` does not print a global proxy (run
+/// 36606105502), and the platform's own traffic reaches the stand-in's proxy
+/// only after the launch (run 36607081595). So this settles for
+/// [`PROXY_SETTLE`], returning early should the proxy already have seen a
+/// guest connection.
+fn wait_for_global_proxy(host: &updateproof::ReleaseHost) -> String {
+    let started = Instant::now();
+    while started.elapsed() < PROXY_SETTLE {
+        if host.tunnel_count() > 0 {
+            return format!(
+                "proxy applied: the guest's first connection reached it {:.1}s after the setting",
+                started.elapsed().as_secs_f64()
+            );
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    format!(
+        "proxy setting given {}s to reach the network stack before the launch (not observable earlier on this platform)",
+        PROXY_SETTLE.as_secs()
+    )
+}
+
 /// The guest side of [`upgrade_phase`], with the stand-in up: trust, proxy,
 /// launch, the pathway's milestones from the service's log, the installer.
 fn upgrade_through(
@@ -1747,6 +1872,11 @@ fn upgrade_through(
         "global http proxy {GUEST_HOST_ALIAS}:{} (a CONNECT relay to the stand-in on the host, {RELEASE_HOST}:443 only)",
         host.proxy_port
     ));
+    // The setting is applied to the network asynchronously: a launch right
+    // after it once resolved github.com directly and fell back to the bundled
+    // manifest (UnknownHostException, no proxy yet). Wait until the proxy
+    // sees the guest's first connection before launching.
+    report.push(wait_for_global_proxy(host));
 
     println!("== am start -W {ACTIVITY}: the fresh install's first check, against the stand-in ==");
     // Only this launch's lines: logcat since the guest's clock now.

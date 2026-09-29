@@ -29,6 +29,77 @@ final class Blip {
     volatile int trend = NativeRadar.TREND_STABLE;
     volatile int freshness = NativeRadar.FRESHNESS_STALE;
     volatile int confidencePercent;
+    /**
+     * BLE address trackability — one of {@link NativeRadar}'s {@code TRACKABILITY_*}
+     * constants. Classified once from the device's canonical MAC (the address is
+     * fixed for the life of a blip). A locally-administered (rotating/privacy)
+     * address is {@link NativeRadar#TRACKABILITY_RANDOMIZED} and must never be
+     * treated as a followable physical device; real hardware is
+     * {@link NativeRadar#TRACKABILITY_TRACKABLE}. Defaults to
+     * {@link NativeRadar#TRACKABILITY_UNKNOWN} until the native core classifies it.
+     */
+    volatile int trackability = NativeRadar.TRACKABILITY_UNKNOWN;
+    /**
+     * The advertisement summary decoded by the Rust core, or {@code null} until
+     * a payload has been decoded. Published as one immutable object so a reader
+     * (the API/UI thread) never sees the company identifier from one
+     * advertisement paired with the beacon kind from another.
+     */
+    volatile AdvSummary advertisement;
+    /**
+     * The hex advertising payload {@link #advertisement} was decoded from, so an
+     * unchanged advertisement is not re-decoded on every scan result.
+     */
+    volatile String lastAdvertisementHex;
+
+    /** The advertisement-derived summaries the Rust core produces, published together. */
+    static final class AdvSummary {
+        /** First manufacturer company identifier (four lowercase hex digits), or {@code null}. */
+        final String companyId;
+        /** Recognised beacon kind (e.g. {@code "iBeacon"}), or {@code null}. */
+        final String beacon;
+        /** Manufacturer (Bluetooth SIG assignee) name, or {@code null} when unknown. */
+        final String manufacturer;
+        /** Comma-separated well-known service names (e.g. {@code "Heart Rate, Battery"}), or {@code null}. */
+        final String services;
+        /**
+         * Stable cross-rotation grouping key, or {@code null} when the device
+         * cannot be grouped — the Rust {@code group_key}. Two blips with the same
+         * non-null key are the same physical device across address rotation.
+         */
+        final String identityKey;
+
+        private AdvSummary(String companyId, String beacon, String manufacturer, String services, String identityKey) {
+            this.companyId = companyId;
+            this.beacon = beacon;
+            this.manufacturer = manufacturer;
+            this.services = services;
+            this.identityKey = identityKey;
+        }
+
+        /**
+         * Decodes one advertising payload of the device at {@code address}, of
+         * platform address type {@code addressType}, through the Rust natives —
+         * the single construction path, shared by {@link BleScanEngine} and the
+         * verify-api-live harness.
+         */
+        static AdvSummary decode(String address, int addressType, String advertisementHex) {
+            return new AdvSummary(
+                    NativeRadar.advertisementCompanyId(advertisementHex),
+                    NativeRadar.advertisementBeacon(advertisementHex),
+                    NativeRadar.advertisementManufacturerName(advertisementHex),
+                    NativeRadar.advertisementServices(advertisementHex),
+                    NativeRadar.deviceGroupKey(address, addressType, advertisementHex));
+        }
+    }
+    /**
+     * What the persistent {@link DeviceHistory} remembers about this device
+     * across sessions (first seen, visits), or {@code null} when it is not
+     * remembered (a randomized address, or no native core). Published as one
+     * immutable record, like {@link #advertisement}, so a reader never sees a
+     * first-seen time from one lookup beside a visit count from another.
+     */
+    volatile DeviceHistory.Record history;
     volatile long lastSeenUptimeMillis;
     /**
      * Most recently observed device-advertised TX power in dBm, or

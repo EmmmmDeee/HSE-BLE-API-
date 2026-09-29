@@ -89,6 +89,7 @@ fn main() -> ExitCode {
         "verify-android-live" => cmd_verify_android_live(),
         "check-app-version" => cmd_check_app_version(),
         "release-manifest" => cmd_release_manifest(&rest),
+        "release-plan" => cmd_release_plan(&rest),
         "oracle-differential" => cmd_oracle_differential(),
         "verify-jni-target" => cmd_verify_jni_target(),
         "prepare-bionic-sysroot" => cmd_prepare_bionic_sysroot(&rest),
@@ -140,6 +141,7 @@ fn print_usage() {
          \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
          \x20 check-app-version          fail unless the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME and no artifact of another version remains\n\
          \x20 release-manifest [--url <artifact url>] [--out <path>]  print (or write) the release manifest for the committed APK: its version, exact size and SHA-256\n\
+         \x20 release-plan               print the authoritative release identity (tag, apk, manifest, version) as key=value lines for the release workflow, after checking the committed APK exists and no stale artifact remains\n\
          \x20 oracle-differential        execute the immutable oracle under qemu-aarch64 and check the committed executed-oracle vectors (see docs/ORACLE_DIFFERENTIAL.md)\n\
          \x20 verify-jni-target          run the bleradar-jni test suite cross-compiled for aarch64-linux-android under qemu-aarch64 against a Bionic runtime\n\
          \x20 prepare-bionic-sysroot <dir>  extract the Bionic runtime (linker64 + libc/libm/libdl/libc++) from the installed android-24 arm64 system image into <dir>, for BIONIC_SYSROOT\n\
@@ -2255,7 +2257,10 @@ struct ApkVersion {
 /// Where `build-update-proof` writes and `verify-android-emulator` reads the
 /// upgrade proof's packages; under `target/`, never committed.
 const UPDATE_PROOF_DIR: &str = "target/android-apk/proof";
-/// The successor's release manifest, beside its package.
+/// The filename the release manifest is published under, both as the bundled
+/// asset (`assets/release_manifest.txt`) and as the release asset the app
+/// fetches from `releases/latest/download/`. One name, one authority
+/// (the update proof writes the successor's beside its package).
 const UPDATE_PROOF_MANIFEST_FILE: &str = "release_manifest.txt";
 
 /// The version the upgrade proof offers the installed app: the next code
@@ -3141,6 +3146,35 @@ fn release_manifest_text_for(
     )
 }
 
+/// The authoritative release identity for a version name: the git tag, the
+/// committed APK filename, and the manifest asset filename. Pure, so the
+/// release workflow and its regression test read the same values the build
+/// and the self-update URL are derived from.
+fn release_plan_lines(version_name: &str, version_code: u32) -> String {
+    format!(
+        "tag=v{version_name}\napk={}\nmanifest={UPDATE_PROOF_MANIFEST_FILE}\nversion_name={version_name}\nversion_code={version_code}\napk_url={}\n",
+        apk_output_name_for(version_name),
+        release_artifact_url_for(version_name),
+    )
+}
+
+/// `cargo xtask release-plan`: emit the release identity (tag, committed APK,
+/// manifest filename, version, artifact URL) as `key=value` lines the release
+/// workflow appends to `$GITHUB_OUTPUT`. Fails first if the committed APK the
+/// release would publish is missing or an artifact of another version is still
+/// committed beside it, so the workflow never publishes an incoherent release.
+fn cmd_release_plan(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err(format!(
+            "usage: cargo xtask release-plan (unexpected argument {})",
+            args[0]
+        ));
+    }
+    require_single_committed_apk(&repo_root()?)?;
+    print!("{}", release_plan_lines(APP_VERSION_NAME, APP_VERSION_CODE));
+    Ok(())
+}
+
 /// Reads the version `aapt2 dump badging` sees in the built package and
 /// requires the constants: the build is the one place a stamped version
 /// could drift from the authority.
@@ -3181,6 +3215,17 @@ fn cmd_check_app_version() -> Result<(), String> {
     let root = repo_root()?;
     let manifest = read_to_string(&root.join(BUNDLED_RELEASE_MANIFEST_PATH))?;
     check_bundled_manifest_version(&manifest)?;
+    require_single_committed_apk(&root)?;
+    println!(
+        "app version {APP_VERSION_CODE} ({APP_VERSION_NAME}): the bundled release manifest and the committed APK's name agree, no artifact of another version remains"
+    );
+    Ok(())
+}
+
+/// The current version's APK is committed at `root`, and no artifact of another
+/// version is committed beside it — what both `check-app-version` and
+/// `release-plan` require before naming the one published artifact.
+fn require_single_committed_apk(root: &Path) -> Result<(), String> {
     let apk = root.join(apk_output_name());
     if !apk.is_file() {
         return Err(format!(
@@ -3188,21 +3233,18 @@ fn cmd_check_app_version() -> Result<(), String> {
             apk.display()
         ));
     }
-    let names = fs::read_dir(&root)
+    let names = fs::read_dir(root)
         .map_err(|e| format!("listing {}: {e}", root.display()))?
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned());
     let stale = stale_artifacts(names);
     if !stale.is_empty() {
         return Err(format!(
-            "artifacts of another version are still committed beside {}: {} (one artifact is committed; `git rm` the others)",
+            "artifacts of another version are still committed beside {}: {} (one artifact is committed and published; `git rm` the others)",
             apk_output_name(),
             stale.join(", ")
         ));
     }
-    println!(
-        "app version {APP_VERSION_CODE} ({APP_VERSION_NAME}): the bundled release manifest and the committed APK's name agree, no artifact of another version remains"
-    );
     Ok(())
 }
 
@@ -4693,6 +4735,41 @@ mod tests {
             ]
         );
         assert!(stale_artifacts(std::iter::once(apk_output_name())).is_empty());
+
+        // The release plan the workflow consumes is the same identity the
+        // build and the self-update URL are derived from: the tag is the
+        // versioned tag the artifact URL is published under, the apk line is
+        // the committed artifact, the manifest asset is the one the app
+        // fetches from releases/latest/download, and the versions are the
+        // constants.
+        let plan = release_plan_lines(APP_VERSION_NAME, APP_VERSION_CODE);
+        assert!(
+            plan.contains(&format!("tag=v{APP_VERSION_NAME}\n")),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("apk={}\n", apk_output_name())),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("manifest={UPDATE_PROOF_MANIFEST_FILE}\n")),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("version_name={APP_VERSION_NAME}\n")),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("version_code={APP_VERSION_CODE}\n")),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!("apk_url={}\n", release_artifact_url())),
+            "{plan}"
+        );
+        // The bundled asset the app ships and the release asset the app fetches
+        // are the same filename, so the update loop's two ends never drift.
+        assert!(BUNDLED_RELEASE_MANIFEST_PATH.ends_with(UPDATE_PROOF_MANIFEST_FILE));
 
         // The successor's bundled manifest: the committed asset describing
         // the successor, every other line untouched; what the core refuses

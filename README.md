@@ -31,6 +31,17 @@ Code that works in principle but was never executed is incomplete. Features that
   … → stop on diminishing information gain): a temporal+geo graph with
   bridge/cluster detection, a round-over-round diminishing-information-gain
   stop criterion, and explicit stage tracking across the whole loop.
+- `crates/bleradar-core::sweep` — the Huntsman Search Engine's multi-sensor
+  radar sweep domain, consolidated here as the single authority for the sensor
+  rules HSE's `signal_radar` had reimplemented: real-vs-placeholder device
+  addresses, locally-administered (randomized) vs trackable MAC classification,
+  the Wi-Fi RSSI reliability tiers (a positive dBm reading is corrupt input and
+  scores the worst tier, never the best), 802.11 channel and coarse RSSI
+  proximity derivation, per-radio cell identity (`cid`/`ci`/`nci` with the
+  `Integer.MAX_VALUE` and zero unavailable filters), the canonical
+  `mcc-mnc-lac-cid` tower id, and the sighting key. Dependency-free and
+  regression-locked so the radar's sensor math has one home rather than a
+  reimplementation that can silently drift.
 - `crates/bleradar-core::{entity,coords,tags}` — the Huntsman Search Engine
   (HSE) dependency-free entity model imported for the radar domain: SHA-256
   deterministic UIDs, per-kind normalisation, a cross-source corroboration
@@ -60,7 +71,7 @@ Code that works in principle but was never executed is incomplete. Features that
 - `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, executed-oracle differential verification under `qemu-aarch64` (`oracle-differential`, see `docs/ORACLE_DIFFERENTIAL.md`), and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
 - `android/app/src/main` — the hand-built Android radar app that consumes `bleradar-core` through `crates/bleradar-jni`; its design record is `docs/ANDROID_APP.md`.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
-- `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, and verification records. Host toolchain / PATH setup: `docs/DEVELOPMENT.md`.
+- `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, the generated capability supersession matrix (`docs/CAPABILITY_MATRIX.md`, rendered by `bleradar_core::registry`), and verification records. Host toolchain / PATH setup: `docs/DEVELOPMENT.md`.
 - `benchmarks/` — benchmark harness notes.
 - `RUST_CONVERSION.md` — Rust-first migration boundary and consolidation prerequisites.
 - `.github/workflows/gates.yml` — CI enforcement of every gate below.
@@ -448,7 +459,7 @@ the gate — because until decision #98 every file there was dormant: 2,731
 lines of JUnit-style tests that had never run, 2,091 of them asserting
 literals against themselves. `BlipTest` (the RSSI window, the spread, the
 address-derived angle) and `ReleaseManifestTest` (the manifest contract
-through the real core) remain and run: 64 tests. It needs a JDK; CI's
+through the real core) remain and run: 70 tests. It needs a JDK; CI's
 `gates` job runs it after `verify-api-live`.
 
 ```sh
@@ -536,6 +547,7 @@ cargo xtask build-update-proof     # the current version and its successor on on
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
 cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)
 cargo xtask check-app-version      # the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME, no artifact of another version remains (a gates step)
+cargo xtask release-plan           # the release identity (tag, apk, manifest, version) as key=value lines, after checking the committed APK; what the release workflow reads
 cargo xtask release-manifest [--url <artifact url>] [--out <path>]   # the manifest a release publishes: the committed APK's version, exact size and SHA-256
 cargo xtask audit                  # cargo audit, offline, vendored advisory db
 cargo xtask deny                   # cargo deny check, offline, vendored advisory db
@@ -568,10 +580,15 @@ git rm HSE-BLE-Radar-arm64-v<previous>.apk # one artifact is committed: check-ap
 cargo xtask check-app-version              # the bundled manifest, the artifact's name, no stale artifact (also a `gates` step)
 cargo xtask verify-android-live            # the built version read back; the package's entries reproduced by a second build
 git add HSE-BLE-Radar-arm64-v<version name>.apk
-git tag v<version name>                    # the tag `release-manifest`'s default URL assumes
-cargo xtask release-manifest --out release_manifest.txt   # the APK's exact size and SHA-256
-# 2. create the GitHub release for the tag with both files attached, unmodified
+# 2. merge to main — the `release` workflow tags v<version name>, generates the
+#    manifest and publishes the GitHub release itself
 ```
+
+Publishing is automated: once the change is on `main` and `gates` passes, the
+`release` workflow publishes the committed APK and its manifest as the latest
+`v<version name>` release, so a user only ever downloads and installs the APK
+— see "Publishing" in `docs/AUTO_UPDATE.md` for exactly when it runs and what
+it refuses.
 
 `release-manifest` refuses a non-`https` URL, and `verify-api-live` serves
 the manifest it generates to the real core as the accepted-manifest scenario,

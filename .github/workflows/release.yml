@@ -1,0 +1,118 @@
+name: release
+
+# Publish the committed, CI-verified APK as a downloadable GitHub Release so an
+# end user only installs it on Android — no Termux, checkout, shell, build, or
+# configuration. The release also carries release_manifest.txt at the stable
+# `releases/latest/download/` URL the app's UpdateCheckService polls, closing
+# the self-update loop against a real artifact.
+#
+# It runs only after the `gates` workflow succeeds on main, so nothing is ever
+# published that CI has not already built from a fresh checkout, exercised on a
+# real Android runtime, and proven the committed APK reproduces from source.
+# It re-publishes the exact committed bytes (no rebuild, no re-sign), so no
+# signing key or any other secret is needed or embedded (only the default
+# GITHUB_TOKEN, to create the release).
+
+on:
+  workflow_run:
+    workflows: [gates]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # To confirm a manually dispatched commit already passed `gates`.
+  actions: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # A workflow_run only for a successful gates run on a push to this
+    # repository's main (never a pull request, whose head branch — even one
+    # named main, from a fork — is attacker-controlled); a manual dispatch only
+    # from main, and the step below then requires gates to have passed on it.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact commit gates verified
+        uses: actions/checkout@v4
+        with:
+          # For workflow_run, publish the precise commit CI passed on; for a
+          # manual dispatch, main.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
+      - name: Publish only the verified tip of main
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          tip="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "$commit" != "$tip" ]; then
+            # A re-run of an older gates run, or main moved on: the newer
+            # commit's own gates run publishes it. Never republish the past.
+            echo "Commit $commit is not the tip of main ($tip); nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          passed="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow gates --commit "$commit" \
+            --event push --status success --json databaseId --jq length)"
+          if [ "$passed" = "0" ]; then
+            echo "::error::gates has not passed on $commit; refusing to publish."
+            exit 1
+          fi
+          echo "sha=$commit" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+      - name: Install pinned toolchain from rust-toolchain.toml
+        if: steps.commit.outputs.publish == 'true'
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Resolve the authoritative release identity
+        if: steps.commit.outputs.publish == 'true'
+        id: plan
+        run: cargo xtask release-plan >> "$GITHUB_OUTPUT"
+      - name: Generate the release manifest from the committed APK
+        if: steps.commit.outputs.publish == 'true'
+        run: cargo xtask release-manifest --out "${{ steps.plan.outputs.manifest }}"
+      - name: Publish or refresh the release with the committed APK and manifest
+        if: steps.commit.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          APK: ${{ steps.plan.outputs.apk }}
+          MANIFEST: ${{ steps.plan.outputs.manifest }}
+          VERSION_NAME: ${{ steps.plan.outputs.version_name }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          notes="HSE BLE Radar ${VERSION_NAME} — Android ARM64.
+
+          Install: download **${APK}** and open it on Android (allow installing from this source if prompted). No Termux, checkout, shell, or configuration; the only first-run step is granting the Android permissions the app requests.
+
+          Published automatically from commit ${COMMIT} after the \`gates\` workflow passed. The APK is the committed artifact, which CI proved reproduces from source (a fresh-checkout rebuild matching its entries) and exercised on a real Android runtime; \`${MANIFEST}\` carries its pinned size and SHA-256 for the in-app updater."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Same version, newer commit: move the tag with the assets so the
+            # release's source never disagrees with its APK.
+            echo "Release $TAG exists; moving it to $COMMIT and refreshing its assets."
+            git tag -f "$TAG" "$COMMIT"
+            git push -f origin "refs/tags/$TAG"
+            gh release upload "$TAG" "$APK" "$MANIFEST" --clobber
+            gh release edit "$TAG" --latest --notes "$notes"
+          else
+            echo "Creating release $TAG on $COMMIT."
+            gh release create "$TAG" "$APK" "$MANIFEST" \
+              --target "$COMMIT" \
+              --title "HSE BLE Radar ${VERSION_NAME}" \
+              --latest \
+              --notes "$notes"
+          fi
+          echo "Published: $(gh release view "$TAG" --json url --jq .url)"

@@ -20,13 +20,14 @@ package com.hse.bleradar;
  * to the OS {@code PackageInstaller} remain the platform boundary — see
  * {@code docs/AUTO_UPDATE.md}.
  *
- * <p>Since ABI 10 the façade also carries the string bridge:
+ * <p>Since ABI 10 the façade also carries the string bridge: first
  * {@link #releaseManifestCanonical}, {@link #releaseManifestError},
- * {@link #releaseManifestField} and {@link #artifactVerifyFile} are the only
- * natives that take or return objects. The Rust side reads them through the
- * audited {@code env} module of {@code crates/bleradar-jni}, so release-manifest
- * validation and artifact integrity are decided by the verified core as well;
- * a {@code null} argument always yields the documented "invalid" answer.
+ * {@link #releaseManifestField} and {@link #artifactVerifyFile}, then (ABI
+ * 12–17) the address, advertisement, group-key and history natives. The Rust
+ * side reads every object argument through the audited {@code env} module of
+ * {@code crates/bleradar-jni}, so those decisions are the verified core's too;
+ * a {@code null} argument never crashes and yields each native's documented
+ * answer.
  */
 public final class NativeRadar {
 
@@ -108,8 +109,17 @@ public final class NativeRadar {
     /** {@link #remoteManifestDisposition(int, int)} result: assess the bundled manifest; nothing to retry before the next scheduled check. */
     public static final int MANIFEST_SOURCE_FALLBACK_NO_RETRY = 2;
 
+    /** {@link #deviceAddressTrackability(String, int)} result: a globally-administered (real hardware) address — a followable device. */
+    public static final int TRACKABILITY_TRACKABLE = 0;
+    /** {@link #deviceAddressTrackability(String, int)} result: a locally-administered (rotating/privacy) address — a throwaway, never a followable device. */
+    public static final int TRACKABILITY_RANDOMIZED = 1;
+    /** {@link #deviceAddressTrackability(String, int)} result: not a canonicalisable MAC (or null), so trackability is unknown — never assumed followable. */
+    public static final int TRACKABILITY_UNKNOWN = 2;
+    /** Android's {@code BluetoothDevice.ADDRESS_TYPE_UNKNOWN}: what {@link #deviceAddressTrackability(String, int)} is given when the platform reports no address type. */
+    public static final int ADDRESS_TYPE_UNKNOWN = 0xFFFF;
+
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 11;
+    public static final int EXPECTED_ABI_VERSION = 18;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -459,10 +469,10 @@ public final class NativeRadar {
      * The canonical form of a release manifest the Rust update core accepts
      * ({@code bleradar_core::update::ReleaseManifest::parse} then
      * {@code serialize}), or {@code null} when {@code text} is {@code null} or
-     * rejected. The four natives below are the only ones that take or return
-     * objects; they cross the boundary through the audited string bridge in
+     * rejected. It and the three manifest/artifact natives below cross the
+     * boundary through the audited string bridge in
      * {@code crates/bleradar-jni/src/env.rs}, and a {@code null} argument is
-     * always answered with the documented "invalid" sentinel, never a crash.
+     * answered with the documented "invalid" sentinel, never a crash.
      */
     public static native String releaseManifestCanonical(String text);
 
@@ -487,4 +497,83 @@ public final class NativeRadar {
      * artifact becomes installable.
      */
     public static native int artifactVerifyFile(String path, String manifestText);
+
+    /**
+     * Classifies a BLE device address as one of the {@code TRACKABILITY_*}
+     * constants above, from {@code addressType} — Android's
+     * {@code BluetoothDevice.ADDRESS_TYPE_*} code ({@code getAddressType()}, API
+     * 35+; {@link #ADDRESS_TYPE_UNKNOWN} before that) — and the address. Public
+     * and random static addresses are followable hardware; resolvable and
+     * non-resolvable private addresses rotate, so they are throwaways the radar
+     * never tracks or remembers. With no reported type it falls back to the
+     * U/L bit. A string that is not a canonicalisable MAC (or null) is
+     * {@link #TRACKABILITY_UNKNOWN}, never assumed followable. Owned by
+     * {@code bleradar_core::ble_address_trackability}.
+     */
+    public static native int deviceAddressTrackability(String mac, int addressType);
+
+    /**
+     * The first manufacturer company identifier in a BLE advertising payload
+     * ({@code ScanRecord.getBytes()} as lowercase or uppercase hex), as four
+     * lowercase hex digits (for example {@code "004c"} for Apple), or
+     * {@code null} when the payload has no manufacturer data or the hand-off is
+     * malformed. Decoded by {@code bleradar_core::adv}, the single authority.
+     */
+    public static native String advertisementCompanyId(String advertisementHex);
+
+    /**
+     * The recognised beacon kind in a BLE advertising payload (hex as above) —
+     * {@code "iBeacon"}, {@code "Eddystone-UID"}, {@code "Eddystone-URL"} or
+     * {@code "Eddystone-TLM"} — or {@code null}: a frame that does not match a
+     * beacon shape is never force-fit. Decoded by {@code bleradar_core::adv}.
+     */
+    public static native String advertisementBeacon(String advertisementHex);
+
+    /**
+     * The stable key to group observations of one physical device under, across
+     * BLE address rotation, from its MAC, its {@code BluetoothDevice.ADDRESS_TYPE_*}
+     * (as for {@link #deviceAddressTrackability(String, int)}) and hex
+     * advertising payload ({@code ScanRecord.getBytes()}), or {@code null} when
+     * it cannot be grouped. A stable (public or random static) address keys by itself; a randomized (rotating) address
+     * keys by the advertisement's distinctive shape, so a device's successive
+     * random addresses share one key. Two devices with the same non-null key are
+     * the same device (public) or at least possibly the same (randomized).
+     * Owned by {@code bleradar_core::group_key_typed}.
+     */
+    public static native String deviceGroupKey(String mac, int addressType, String advertisementHex);
+
+    /**
+     * The Bluetooth SIG assignee name for the first manufacturer block's company
+     * identifier in a BLE advertising payload (hex), or {@code null} when there
+     * is no manufacturer data or the identifier is not in the bundled table — in
+     * which case the caller shows the raw {@link #advertisementCompanyId} hex.
+     * Owned by {@code bleradar_core::adv::company_name}, a curated, versioned
+     * subset of the public Bluetooth SIG Assigned Numbers.
+     */
+    public static native String advertisementManufacturerName(String advertisementHex);
+
+    /**
+     * The names of the advertisement's well-known Bluetooth SIG services
+     * (hex payload), comma-separated (for example {@code "Heart Rate, Battery"}),
+     * or {@code null} when none are named — the raw service UUIDs remain in the
+     * decoded advertisement. Owned by {@code bleradar_core::adv::service_uuid_name}.
+     */
+    public static native String advertisementServices(String advertisementHex);
+
+    /**
+     * Records each newline-separated device key (a canonical public address;
+     * anything else is ignored) at {@code nowEpochMillis} into the device
+     * history serialized as {@code state} ({@code null} or unparseable starts
+     * empty) and returns the new serialization, or {@code null} only on a VM
+     * failure. Owned by {@code bleradar_core::history}: which keys are kept,
+     * what counts as a new visit, the size bound and damaged-file recovery.
+     */
+    public static native String historyMerge(String state, String keys, long nowEpochMillis);
+
+    /**
+     * For each newline-separated key, one line {@code first_seen_ms\tvisits}
+     * when the history serialized as {@code state} remembers it, or an empty
+     * line; {@code null} for a {@code null} key list.
+     */
+    public static native String historyLookup(String state, String keys);
 }

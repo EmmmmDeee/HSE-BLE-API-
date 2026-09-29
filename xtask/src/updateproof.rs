@@ -405,6 +405,12 @@ pub struct Release<'a> {
 }
 
 impl ReleaseHost {
+    /// How many connections the proxy has seen so far, relayed or refused:
+    /// the first one proves the guest's global proxy setting is live.
+    pub fn tunnel_count(&self) -> usize {
+        self.tunnels.lock().map_or(0, |t| t.len())
+    }
+
     /// Compiles and starts the stand-in on `anchor`'s key, then the proxy.
     pub fn start(work: &Path, anchor: &TrustAnchor, release: &Release<'_>) -> Result<Self, String> {
         let source = work.join("ReleaseHost.java");
