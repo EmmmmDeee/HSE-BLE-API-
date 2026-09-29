@@ -132,8 +132,9 @@ const HCI_TIMEOUT: Duration = Duration::from_secs(10);
 /// how long to wait; it never weakens what the proof then requires — a completed
 /// download, a size + SHA-256 verification, and the installer hand-off.
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(300);
-/// How long the upgrade proof waits for the guest to apply the global proxy.
-const PROXY_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the upgrade proof lets the guest apply the global proxy: one run
+/// that launched about 2 s after the setting fetched with no proxy yet.
+const PROXY_SETTLE: Duration = Duration::from_secs(20);
 /// How long the package installer may take once its button is tapped.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the installer may take to show its confirmation.
@@ -1785,29 +1786,28 @@ fn wait_for_unmetered_network(adb: &Adb) -> Result<updateproof::ActiveNetwork, S
     }
 }
 
-/// Waits until the guest's first connection reaches the stand-in's proxy —
-/// the platform's own traffic follows the global proxy as soon as it is
-/// applied — and says how long that took. The dump of connectivity does not
-/// print a global proxy on API 34, so the proxy's own log is the observable
-/// signal. Should no connection come, the launch still proceeds after
-/// [`PROXY_TIMEOUT`], and the report says the proxy was not observed.
+/// Lets the global proxy setting reach the guest's network stack before the
+/// launch, and says how long that was. Nothing observable marks the moment on
+/// API 34: `dumpsys connectivity` does not print a global proxy (run
+/// 36606105502), and the platform's own traffic reaches the stand-in's proxy
+/// only after the launch (run 36607081595). So this settles for
+/// [`PROXY_SETTLE`], returning early should the proxy already have seen a
+/// guest connection.
 fn wait_for_global_proxy(host: &updateproof::ReleaseHost) -> String {
     let started = Instant::now();
-    loop {
+    while started.elapsed() < PROXY_SETTLE {
         if host.tunnel_count() > 0 {
             return format!(
                 "proxy applied: the guest's first connection reached it {:.1}s after the setting",
                 started.elapsed().as_secs_f64()
             );
         }
-        if started.elapsed() > PROXY_TIMEOUT {
-            return format!(
-                "proxy not observed: no guest connection within {}s of the setting; launching anyway",
-                PROXY_TIMEOUT.as_secs()
-            );
-        }
         thread::sleep(Duration::from_millis(250));
     }
+    format!(
+        "proxy setting given {}s to reach the network stack before the launch (not observable earlier on this platform)",
+        PROXY_SETTLE.as_secs()
+    )
 }
 
 /// The guest side of [`upgrade_phase`], with the stand-in up: trust, proxy,
