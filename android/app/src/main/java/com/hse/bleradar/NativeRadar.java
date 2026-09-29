@@ -109,15 +109,17 @@ public final class NativeRadar {
     /** {@link #remoteManifestDisposition(int, int)} result: assess the bundled manifest; nothing to retry before the next scheduled check. */
     public static final int MANIFEST_SOURCE_FALLBACK_NO_RETRY = 2;
 
-    /** {@link #deviceAddressTrackability(String)} result: a globally-administered (real hardware) address — a followable device. */
+    /** {@link #deviceAddressTrackability(String, int)} result: a globally-administered (real hardware) address — a followable device. */
     public static final int TRACKABILITY_TRACKABLE = 0;
-    /** {@link #deviceAddressTrackability(String)} result: a locally-administered (rotating/privacy) address — a throwaway, never a followable device. */
+    /** {@link #deviceAddressTrackability(String, int)} result: a locally-administered (rotating/privacy) address — a throwaway, never a followable device. */
     public static final int TRACKABILITY_RANDOMIZED = 1;
-    /** {@link #deviceAddressTrackability(String)} result: not a canonicalisable MAC (or null), so trackability is unknown — never assumed followable. */
+    /** {@link #deviceAddressTrackability(String, int)} result: not a canonicalisable MAC (or null), so trackability is unknown — never assumed followable. */
     public static final int TRACKABILITY_UNKNOWN = 2;
+    /** Android's {@code BluetoothDevice.ADDRESS_TYPE_UNKNOWN}: what {@link #deviceAddressTrackability(String, int)} is given when the platform reports no address type. */
+    public static final int ADDRESS_TYPE_UNKNOWN = 0xFFFF;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 17;
+    public static final int EXPECTED_ABI_VERSION = 18;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -497,15 +499,18 @@ public final class NativeRadar {
     public static native int artifactVerifyFile(String path, String manifestText);
 
     /**
-     * Classifies a BLE/Wi-Fi device address as one of the {@code TRACKABILITY_*}
-     * constants above, from the U/L bit of its canonical MAC. A
-     * locally-administered address is a rotating/privacy address — a throwaway
-     * the radar must never plot or track as a followable physical device — while
-     * a globally-administered address is real hardware. A string that is not a
-     * canonicalisable MAC (or null) is {@link #TRACKABILITY_UNKNOWN}, never
-     * assumed followable. Owned by {@code bleradar_core::address_trackability}.
+     * Classifies a BLE device address as one of the {@code TRACKABILITY_*}
+     * constants above, from {@code addressType} — Android's
+     * {@code BluetoothDevice.ADDRESS_TYPE_*} code ({@code getAddressType()}, API
+     * 35+; {@link #ADDRESS_TYPE_UNKNOWN} before that) — and the address. Public
+     * and random static addresses are followable hardware; resolvable and
+     * non-resolvable private addresses rotate, so they are throwaways the radar
+     * never tracks or remembers. With no reported type it falls back to the
+     * U/L bit. A string that is not a canonicalisable MAC (or null) is
+     * {@link #TRACKABILITY_UNKNOWN}, never assumed followable. Owned by
+     * {@code bleradar_core::ble_address_trackability}.
      */
-    public static native int deviceAddressTrackability(String mac);
+    public static native int deviceAddressTrackability(String mac, int addressType);
 
     /**
      * The first manufacturer company identifier in a BLE advertising payload

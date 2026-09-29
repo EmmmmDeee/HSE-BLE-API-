@@ -240,11 +240,11 @@ final class BleScanEngine implements SnapshotSource {
         blip.txPowerDbm = txPowerDbm;
 
         // Classify the address once (it is fixed for the blip's life): a
-        // locally-administered BLE address is a rotating/privacy throwaway, not
-        // a followable physical device. Owned by Rust
-        // (bleradar_core::address_trackability) through the JNI façade.
+        // rotating private address is a throwaway, not a followable physical
+        // device. The platform's address type (API 35+) decides it; owned by
+        // Rust (bleradar_core::ble_address_trackability) through the façade.
         if (NativeRadar.isAvailable() && blip.trackability == NativeRadar.TRACKABILITY_UNKNOWN) {
-            blip.trackability = NativeRadar.deviceAddressTrackability(address);
+            blip.trackability = NativeRadar.deviceAddressTrackability(address, addressType(result));
         }
 
         // Decode the advertising payload in Rust (bleradar_core::adv): who made
@@ -370,6 +370,17 @@ final class BleScanEngine implements SnapshotSource {
         blip.history = blip.trackability == NativeRadar.TRACKABILITY_TRACKABLE
                 ? history.lookup(blip.address.toLowerCase(Locale.ROOT))
                 : null;
+    }
+
+    /**
+     * The scanned device's {@code BluetoothDevice.ADDRESS_TYPE_*} (public or
+     * random), which only API 35+ reports; {@link NativeRadar#ADDRESS_TYPE_UNKNOWN}
+     * before that.
+     */
+    private static int addressType(ScanResult result) {
+        return Build.VERSION.SDK_INT >= 35
+                ? result.getDevice().getAddressType()
+                : NativeRadar.ADDRESS_TYPE_UNKNOWN;
     }
 
     private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();

@@ -234,7 +234,7 @@ public final class ApiSmoke {
         // Real native classification of the device's own address (Java → JNI →
         // Rust bleradar_core::address_trackability), the same call the live
         // BleScanEngine makes.
-        blip.trackability = NativeRadar.deviceAddressTrackability(address);
+        blip.trackability = NativeRadar.deviceAddressTrackability(address, NativeRadar.ADDRESS_TYPE_UNKNOWN);
         // The same Blip.AdvSummary.decode BleScanEngine calls on a live
         // ScanRecord, published as one object exactly as the engine does.
         if (advertisementHex != null) {

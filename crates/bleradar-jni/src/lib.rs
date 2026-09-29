@@ -118,11 +118,15 @@ pub fn proximity_label_ordinal(rssi_dbm: f64) -> i32 {
 /// constants. A MAC that does not canonicalise is `Unknown` (`2`), never
 /// silently treated as a followable device — the BLE-radar failure mode this
 /// classification exists to prevent (a rotating/randomized address is a
-/// throwaway, not a physical device to track).
+/// throwaway, not a physical device to track). `address_type` is Android's
+/// `BluetoothDevice.ADDRESS_TYPE_*` code (see
+/// [`bleradar_core::BleAddressType::from_android`]); the classification is
+/// [`bleradar_core::ble_address_trackability`].
 #[must_use]
-pub fn address_trackability_ordinal(mac: &str) -> i32 {
+pub fn address_trackability_ordinal(mac: &str, address_type: i32) -> i32 {
     use bleradar_core::AddressTrackability::{Randomized, Trackable, Unknown};
-    match bleradar_core::address_trackability(mac) {
+    let address_type = bleradar_core::BleAddressType::from_android(address_type);
+    match bleradar_core::ble_address_trackability(mac, address_type) {
         Trackable => 0,
         Randomized => 1,
         Unknown => 2,
@@ -1407,7 +1411,7 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_artifactVerifyFile(
     artifact_verify_file(&path, &manifest_text)
 }
 
-/// `NativeRadar.deviceAddressTrackability(String): int` — see
+/// `NativeRadar.deviceAddressTrackability(String, int): int` — see
 /// [`address_trackability_ordinal`]. Reads `env` only through [`env`](mod@env);
 /// a null MAC canonicalises to nothing and so is `Unknown` (`2`), never a
 /// followable device.
@@ -1416,9 +1420,10 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceAddressTrackabili
     env: JniEnvPtr,
     _class: JniOpaquePtr,
     mac: JStringRef,
+    address_type: i32,
 ) -> i32 {
     match read_text(env, mac) {
-        Some(mac) => address_trackability_ordinal(&mac),
+        Some(mac) => address_trackability_ordinal(&mac, address_type),
         None => 2,
     }
 }
@@ -1549,11 +1554,12 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_historyLookup(
 /// manufacturer-name lookup (`advertisementManufacturerName`) was added, and to
 /// `16` when the service-name lookup (`advertisementServices`) was added, and
 /// to `17` when the cross-session device history (`historyMerge`,
-/// `historyLookup`) was added.
+/// `historyLookup`) was added, and to `18` when `deviceAddressTrackability`
+/// took the platform's BLE address type.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    17
+    18
 }

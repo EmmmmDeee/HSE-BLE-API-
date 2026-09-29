@@ -396,16 +396,32 @@ fn proximity_ordinals_match_documented_mapping() {
 #[test]
 fn address_trackability_ordinals_match_documented_mapping() {
     use bleradar_jni::address_trackability_ordinal;
-    // Globally-administered (real hardware) → Trackable (0).
-    assert_eq!(address_trackability_ordinal("a4:c1:38:00:11:22"), 0);
-    // Locally-administered (U/L bit set) → Randomized (1): a rotating/privacy
-    // address is never a followable device.
-    assert_eq!(address_trackability_ordinal("02:11:22:33:44:55"), 1);
+    const PUBLIC: i32 = 0;
+    const RANDOM: i32 = 1;
+    const UNKNOWN_TYPE: i32 = 0xFFFF;
+    // No platform type: the U/L rule. Globally administered → Trackable (0);
+    // locally administered → Randomized (1).
+    assert_eq!(
+        address_trackability_ordinal("a4:c1:38:00:11:22", UNKNOWN_TYPE),
+        0
+    );
+    assert_eq!(
+        address_trackability_ordinal("02:11:22:33:44:55", UNKNOWN_TYPE),
+        1
+    );
+    // The platform type decides: a resolvable private address with its U/L bit
+    // clear rotates (1), a random static address is fixed (0), public is (0).
+    assert_eq!(address_trackability_ordinal("4c:11:22:33:44:55", RANDOM), 1);
+    assert_eq!(address_trackability_ordinal("c0:de:be:ac:0d:01", RANDOM), 0);
+    assert_eq!(address_trackability_ordinal("02:11:22:33:44:55", PUBLIC), 0);
     // Not a canonicalisable MAC (or empty) → Unknown (2), never assumed followable.
-    assert_eq!(address_trackability_ordinal("not-a-mac"), 2);
-    assert_eq!(address_trackability_ordinal(""), 2);
+    assert_eq!(address_trackability_ordinal("not-a-mac", PUBLIC), 2);
+    assert_eq!(address_trackability_ordinal("", UNKNOWN_TYPE), 2);
     // Separator-insensitive: a hyphenated hardware address still classifies.
-    assert_eq!(address_trackability_ordinal("A4-C1-38-00-11-22"), 0);
+    assert_eq!(
+        address_trackability_ordinal("A4-C1-38-00-11-22", UNKNOWN_TYPE),
+        0
+    );
 }
 
 #[test]
@@ -415,15 +431,19 @@ fn address_trackability_export_answers_through_the_string_bridge() {
     let env = mock.env();
     let null = core::ptr::null_mut();
     let hardware = mock.string("a4:c1:38:00:11:22");
-    assert_eq!(classify(env, null, hardware), 0);
-    assert_eq!(classify(env, null, mock.string("02:11:22:33:44:55")), 1);
-    assert_eq!(classify(env, null, mock.string("not-a-mac")), 2);
+    assert_eq!(classify(env, null, hardware, 0xFFFF), 0);
+    assert_eq!(
+        classify(env, null, mock.string("02:11:22:33:44:55"), 0xFFFF),
+        1
+    );
+    assert_eq!(classify(env, null, mock.string("4c:11:22:33:44:55"), 1), 1);
+    assert_eq!(classify(env, null, mock.string("not-a-mac"), 0), 2);
     // A null MAC, an unpaired surrogate and a null env are Unknown (2), never
     // Trackable: an address the bridge cannot read is never assumed followable,
     // so it never reaches the device history.
-    assert_eq!(classify(env, null, null), 2);
-    assert_eq!(classify(env, null, mock.string_units(&[0xD800])), 2);
-    assert_eq!(classify(null, null, hardware), 2);
+    assert_eq!(classify(env, null, null, 0), 2);
+    assert_eq!(classify(env, null, mock.string_units(&[0xD800]), 0), 2);
+    assert_eq!(classify(null, null, hardware, 0), 2);
 }
 
 #[test]

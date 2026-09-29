@@ -57,14 +57,80 @@ pub enum AddressTrackability {
     Unknown,
 }
 
-/// Classify how a MAC may be tracked, from its U/L bit. Mirrors the exact
-/// distinction HSE's `signal_radar` and WiGLE paths partition on.
+/// Classify how a MAC may be tracked, from its U/L bit — the rule for Wi-Fi,
+/// whose MAC randomization sets the locally-administered bit. Mirrors the
+/// exact distinction HSE's `signal_radar` and WiGLE paths partition on. A BLE
+/// address is classified by [`ble_address_trackability`] instead: the U/L bit
+/// means nothing in a BLE random address.
 #[must_use]
 pub fn address_trackability(mac: &str) -> AddressTrackability {
     match is_locally_administered(mac) {
         Some(false) => AddressTrackability::Trackable,
         Some(true) => AddressTrackability::Randomized,
         None => AddressTrackability::Unknown,
+    }
+}
+
+/// The type of a BLE device address as the platform reports it (Android
+/// `BluetoothDevice.getAddressType()`, API 35+): the one fact the address
+/// bytes alone cannot give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BleAddressType {
+    /// A public (IEEE-assigned) device address.
+    Public,
+    /// A random address; its subtype is in its two most significant bits.
+    Random,
+    /// Not reported (an older platform, or `ADDRESS_TYPE_UNKNOWN` /
+    /// `ADDRESS_TYPE_ANONYMOUS`).
+    Unknown,
+}
+
+impl BleAddressType {
+    /// From Android's `BluetoothDevice.ADDRESS_TYPE_*` code: `0` public,
+    /// `1` random, anything else (`0xFFFF` unknown, `0xFF` anonymous, a code
+    /// this build does not know) unknown.
+    #[must_use]
+    pub fn from_android(code: i32) -> Self {
+        match code {
+            0 => Self::Public,
+            1 => Self::Random,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Classify how a BLE address may be tracked, from the platform-reported
+/// address type and the address itself (Bluetooth Core Spec, Vol 6, Part B,
+/// §1.3):
+///
+/// * public → [`AddressTrackability::Trackable`];
+/// * random static (top two bits `11`: fixed at least until a power cycle) →
+///   [`AddressTrackability::Trackable`];
+/// * resolvable private (`01`) or non-resolvable private (`00`) — the
+///   rotating privacy addresses → [`AddressTrackability::Randomized`];
+/// * the reserved subtype (`10`) → [`AddressTrackability::Unknown`].
+///
+/// The U/L bit that [`address_trackability`] reads is meaningless here: about
+/// half of all resolvable private addresses have it clear, so reading it would
+/// file a rotating phone as followable hardware and remember it. Only when
+/// the platform reports no type does this fall back to that rule, unchanged
+/// (an older Android). A non-canonicalisable MAC is always `Unknown`.
+#[must_use]
+pub fn ble_address_trackability(mac: &str, address_type: BleAddressType) -> AddressTrackability {
+    let Some(canonical) = canonical_mac(mac) else {
+        return AddressTrackability::Unknown;
+    };
+    match address_type {
+        BleAddressType::Public => AddressTrackability::Trackable,
+        BleAddressType::Unknown => address_trackability(&canonical),
+        BleAddressType::Random => {
+            let msb = u8::from_str_radix(&canonical[..2], 16).unwrap_or(0);
+            match msb >> 6 {
+                0b11 => AddressTrackability::Trackable,
+                0b01 | 0b00 => AddressTrackability::Randomized,
+                _ => AddressTrackability::Unknown,
+            }
+        }
     }
 }
 
@@ -231,6 +297,59 @@ mod tests {
             address_trackability("not-a-mac"),
             AddressTrackability::Unknown
         );
+    }
+
+    #[test]
+    fn ble_address_type_decides_trackability_not_the_ul_bit() {
+        use AddressTrackability::{Randomized, Trackable, Unknown};
+        use BleAddressType::{Public, Random};
+        // A resolvable private address whose U/L bit is clear (0x4c): the
+        // U/L rule calls it hardware; its type and subtype say it rotates.
+        assert_eq!(address_trackability("4c:11:22:33:44:55"), Trackable);
+        assert_eq!(
+            ble_address_trackability("4c:11:22:33:44:55", Random),
+            Randomized
+        );
+        // Random static (11), non-resolvable private (00), reserved (10).
+        assert_eq!(
+            ble_address_trackability("c0:de:be:ac:0d:01", Random),
+            Trackable
+        );
+        assert_eq!(
+            ble_address_trackability("0a:11:22:33:44:55", Random),
+            Randomized
+        );
+        assert_eq!(
+            ble_address_trackability("80:11:22:33:44:55", Random),
+            Unknown
+        );
+        // Public is hardware whatever its bits look like.
+        assert_eq!(
+            ble_address_trackability("02:11:22:33:44:55", Public),
+            Trackable
+        );
+        // No platform type: the U/L rule, unchanged.
+        for mac in [
+            "02:11:22:33:44:55",
+            "a4:c1:38:00:11:22",
+            "4c:11:22:33:44:55",
+        ] {
+            assert_eq!(
+                ble_address_trackability(mac, BleAddressType::Unknown),
+                address_trackability(mac)
+            );
+        }
+        // Not a MAC: unknown under every type.
+        for t in [Public, Random, BleAddressType::Unknown] {
+            assert_eq!(ble_address_trackability("not-a-mac", t), Unknown);
+        }
+        assert_eq!(BleAddressType::from_android(0), Public);
+        assert_eq!(BleAddressType::from_android(1), Random);
+        assert_eq!(
+            BleAddressType::from_android(0xFFFF),
+            BleAddressType::Unknown
+        );
+        assert_eq!(BleAddressType::from_android(0xFF), BleAddressType::Unknown);
     }
 
     #[test]
