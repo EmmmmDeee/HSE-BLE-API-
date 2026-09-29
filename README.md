@@ -2,7 +2,11 @@
 
 Huntsman's Radar (API)
 
-An auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK. It preserves the original executable artifacts as immutable behavioral oracles and makes parity gaps explicit instead of guessing missing source behavior.
+The **HSE BLE Radar**: a standalone Android ARM64 wireless-intelligence app (an installable `HSE-BLE-Radar-arm64-<version>.apk`, published as a GitHub release) and the safe-Rust engine library behind it, `bleradar-core`. The app scans BLE on the device, decodes what it hears, names the manufacturer and services, keeps an identity across address rotation and remembers devices across sessions — all decided in Rust, with Android providing only the platform glue.
+
+It is one of two repositories with distinct purposes. The other is the [Huntsman Search Engine](https://github.com/EmmmmDeee/Huntsman-Search-Engine-HSE-Termux-Android-Aarch64-Rust-) (HSE), an OSINT platform that runs in Termux; it consumes this repository's reading rules through a pinned dependency, and this repository depends on nothing from it. What each owns and the one seam between them: [`docs/REPOSITORY_BOUNDARY.md`](docs/REPOSITORY_BOUNDARY.md).
+
+Origin: an auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK. It preserves the original executable artifacts as immutable behavioral oracles and makes parity gaps explicit instead of guessing missing source behavior.
 
 ## Core Principle: Real Code and Verified Results Only
 

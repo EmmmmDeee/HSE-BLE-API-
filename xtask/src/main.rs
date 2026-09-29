@@ -4089,6 +4089,74 @@ fn cmd_gates() -> Result<(), String> {
     Ok(())
 }
 
+/// Boundary violations in one `Cargo.toml` (docs/REPOSITORY_BOUNDARY.md): a
+/// dependency — in any dependency table, plain, dev, build, workspace or
+/// target-specific, inline or as its own `[dependencies.<name>]` section — that
+/// is named for HSE (its key, its renamed `package`, or its path) or that takes
+/// a git source. Structural rather than textual: whitespace is irrelevant, a
+/// comment is ignored, and a `git =` inside a description string is not a
+/// dependency.
+#[cfg(test)]
+fn manifest_boundary_violations(manifest: &str) -> Vec<String> {
+    fn names_hse(s: &str) -> bool {
+        let s = s.to_ascii_lowercase();
+        s.contains("huntsman") || s.contains("hse-core") || s.contains("hse_core")
+    }
+    let mut violations = Vec::new();
+    // The dependency table the current line sits in: `Some(None)` for a table
+    // of dependencies, `Some(Some(name))` for a `[<table>.<name>]` section
+    // that is one dependency, `None` outside any dependency table.
+    let mut table: Option<Option<String>> = None;
+    for raw in manifest.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            let header = header.trim().trim_matches('[').trim_matches(']');
+            // Split off a trailing `.<name>` after a `dependencies` segment.
+            let parts: Vec<&str> = header.split('.').collect();
+            table = parts
+                .iter()
+                .position(|p| p.trim().ends_with("dependencies"))
+                .map(|at| {
+                    let name = parts[at + 1..].join(".");
+                    (!name.is_empty()).then_some(name)
+                });
+            if let Some(Some(name)) = &table
+                && names_hse(name)
+            {
+                violations.push(format!("dependency section `{header}`"));
+            }
+            continue;
+        }
+        let Some(kind) = &table else { continue };
+        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        match kind {
+            // Inside `[deps.<name>]`: `git = ...`, `package = ...`, `path = ...`.
+            Some(_) => {
+                if compact.starts_with("git=") {
+                    violations.push(format!("git source: `{line}`"));
+                } else if (compact.starts_with("package=") || compact.starts_with("path="))
+                    && names_hse(&compact)
+                {
+                    violations.push(format!("HSE dependency: `{line}`"));
+                }
+            }
+            // Inside `[dependencies]`: `name = "1"` or `name = { ... }`.
+            None => {
+                let (key, value) = compact.split_once('=').unwrap_or((compact.as_str(), ""));
+                if names_hse(key) || names_hse(value) {
+                    violations.push(format!("HSE dependency: `{line}`"));
+                } else if value.contains("git=") {
+                    violations.push(format!("git source: `{line}`"));
+                }
+            }
+        }
+    }
+    violations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4462,6 +4530,90 @@ mod tests {
     fn parse_lockfile_package_names_returns_empty_on_unparsable_lockfile() {
         assert!(parse_lockfile_package_names("this is not a Cargo.lock at all").is_empty());
         assert!(parse_lockfile_package_names("").is_empty());
+    }
+
+    /// The radar never depends on HSE (docs/REPOSITORY_BOUNDARY.md): no
+    /// manifest anywhere in the repository (nested workspaces included, the
+    /// vendored third-party tree and build output excluded) names an HSE crate
+    /// or takes a git source, so knowledge only ever flows to HSE by HSE
+    /// pinning this repository, never the other way.
+    #[test]
+    fn no_workspace_manifest_depends_on_hse() {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).expect("read_dir").flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                if path.is_dir() {
+                    if !matches!(name.to_str(), Some("target" | "vendor" | ".git")) {
+                        walk(&path, out);
+                    }
+                } else if name == "Cargo.toml" {
+                    out.push(path);
+                }
+            }
+        }
+        let root = repo_root().expect("repo root");
+        let mut manifests = Vec::new();
+        walk(&root, &mut manifests);
+        assert!(manifests.len() >= 4, "found {} manifests", manifests.len());
+        for manifest in &manifests {
+            let text = read_to_string(manifest).expect("manifest");
+            let violations = manifest_boundary_violations(&text);
+            assert!(
+                violations.is_empty(),
+                "{} depends on HSE or a git source — the radar depends on nothing from HSE: {violations:?}",
+                manifest.display()
+            );
+        }
+    }
+
+    /// The structural checks behind the boundary, on the shapes a line scan
+    /// misses: an inline table, a renamed `package`, a `[dependencies.<name>]`
+    /// section, `git=` without spaces, a target-specific table, and a
+    /// commented-out line that must not count.
+    #[test]
+    fn the_boundary_check_reads_dependencies_structurally() {
+        let bad = [
+            "[dependencies]\nradar = { package = \"hse-core\", path = \"../hse\" }\n",
+            "[dependencies]\nx = {git=\"https://example.com/r\"}\n",
+            "[dependencies]\nhuntsman-search-engine = \"1\"\n",
+            "[dependencies.hse-core]\npath = \"../hse\"\n",
+            "[dev-dependencies.y]\ngit = \"https://example.com/r\"\n",
+            "[target.'cfg(unix)'.build-dependencies]\nz = { path = \"../Huntsman-Search-Engine\" }\n",
+            "[workspace.dependencies]\nq = { version = \"1\", package = \"huntsman-x\" }\n",
+        ];
+        for text in bad {
+            assert!(
+                !manifest_boundary_violations(text).is_empty(),
+                "missed a bypass: {text}"
+            );
+        }
+        let good = [
+            "[dependencies]\nbleradar-core = { path = \"../bleradar-core\" }\n",
+            "[package]\nname = \"bleradar-jni\"\ndescription = \"a git = tool for HSE\"\n",
+            "[dependencies]\n# hse-core = { path = \"../hse\" }\nserde = \"1\"\n",
+        ];
+        for text in good {
+            assert_eq!(
+                manifest_boundary_violations(text),
+                Vec::<String>::new(),
+                "false positive: {text}"
+            );
+        }
+    }
+
+    /// Both directions of the boundary are written down: the document exists
+    /// and the README points at it.
+    #[test]
+    fn the_boundary_document_exists_and_is_linked() {
+        let root = repo_root().expect("repo root");
+        let doc = read_to_string(&root.join("docs/REPOSITORY_BOUNDARY.md")).expect("boundary doc");
+        assert!(
+            doc.contains("nothing from HSE"),
+            "the dependency direction is stated"
+        );
+        let readme = read_to_string(&root.join("README.md")).expect("README");
+        assert!(readme.contains("docs/REPOSITORY_BOUNDARY.md"));
     }
 
     #[test]
