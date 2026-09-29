@@ -127,6 +127,9 @@ pub const FORBIDDEN_JSON: &str = r#"{"error":"Forbidden"}"#;
 /// `431` as `ApiHttpServer.errorJson` writes it: a request or header line over the
 /// cap, or more headers than the cap.
 pub const HEADER_TOO_LARGE_JSON: &str = r#"{"error":"Request header too large"}"#;
+/// `408` as `ApiHttpServer.errorJson` writes it: a client that stalled, or took
+/// over ten seconds to send its request line and headers.
+pub const REQUEST_TIMEOUT_JSON: &str = r#"{"error":"Request took too long"}"#;
 /// `405` as `ApiHttpServer.errorJson` writes it.
 pub const METHOD_NOT_ALLOWED_JSON: &str = r#"{"error":"Method not allowed"}"#;
 

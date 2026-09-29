@@ -161,7 +161,12 @@ final class WifiScanEngine implements WifiSurveySource {
         // empty survey: a start that failed (no radio, no permission) must not
         // keep reporting its refusal, or its last count, after the scan ends.
         survey = WifiSurvey.empty(STATE_IDLE);
-        history.flush(SystemClock.uptimeMillis());
+        // The final flush (which fsyncs when there is anything unsaved) is queued
+        // on the survey's own thread, not run here: this is called from the main
+        // thread (the activity's stop, the service's onDestroy). On that thread it
+        // runs after any read in progress, and, queued before the quit in close(),
+        // before the thread ends.
+        handler.post(() -> history.flush(SystemClock.uptimeMillis()));
     }
 
     /** Stops the survey and refuses every later {@link #start()}: the service is being destroyed. */

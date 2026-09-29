@@ -9,6 +9,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
@@ -283,6 +284,12 @@ public final class ApiHttpServer {
                 throw new Refusal(408, "Request Timeout", "Request took too long");
             }
             int c = reader.read();
+            // The read can block for up to the socket timeout, so the deadline is
+            // checked again once it returns: a byte (the terminating newline
+            // especially) that arrives after the deadline is not accepted.
+            if (System.nanoTime() > deadlineNanos) {
+                throw new Refusal(408, "Request Timeout", "Request took too long");
+            }
             if (c < 0) {
                 return line.length() == 0 ? null : line.toString();
             }
@@ -391,6 +398,12 @@ public final class ApiHttpServer {
             } catch (Refusal refused) {
                 writeResponse(socket.getOutputStream(), refused.status, refused.reason, JSON,
                         errorJson(refused.message));
+                return;
+            } catch (SocketTimeoutException stalled) {
+                // A client that sent nothing (or stopped) for the socket timeout is
+                // answered like one that took too long overall, not just dropped.
+                writeResponse(socket.getOutputStream(), 408, "Request Timeout", JSON,
+                        errorJson("Request took too long"));
                 return;
             }
             OutputStream out = socket.getOutputStream();

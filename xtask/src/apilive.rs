@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use crate::dashboard::{
     self, DASHBOARD_ASSET_PATH, DEVICES_JSON, FORBIDDEN_JSON, HEADER_TOO_LARGE_JSON,
-    METHOD_NOT_ALLOWED_JSON, NOT_FOUND_JSON, SCAN_STARTED_JSON, SCAN_STOPPED_JSON, STATUS_JSON,
-    Scenario, UPDATES_JSON, WIFI_JSON,
+    METHOD_NOT_ALLOWED_JSON, NOT_FOUND_JSON, REQUEST_TIMEOUT_JSON, SCAN_STARTED_JSON,
+    SCAN_STOPPED_JSON, STATUS_JSON, Scenario, UPDATES_JSON, WIFI_JSON,
 };
 
 /// The Java sources the server needs on a plain JVM: none of them may
@@ -703,7 +703,7 @@ fn expect(
 /// IPv6 loopback, the dashboard's own same-origin POST). Also the caps on request
 /// size. Refused requests never reach the scripted scan control, whose script the
 /// rest of the contract check depends on.
-fn check_access_control(port: u16) -> Result<(), String> {
+fn check_access_control(port: u16) -> Result<usize, String> {
     let json = "application/json";
     let request = |label: &str, head: &str, status: u16, body: &str| -> Result<(), String> {
         expect(
@@ -796,8 +796,21 @@ fn check_access_control(port: u16) -> Result<(), String> {
         431,
         HEADER_TOO_LARGE_JSON,
     )?;
-    Ok(())
+    // A client that starts a request and never finishes it (no blank line ends
+    // the headers) is answered 408 when the socket read times out, not dropped:
+    // the helper sends this and waits for the server's answer (about five seconds).
+    request(
+        "GET /api/wifi, a request that never finishes",
+        "GET /api/wifi HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        408,
+        REQUEST_TIMEOUT_JSON,
+    )?;
+    Ok(ACCESS_CONTROL_REQUESTS)
 }
+
+/// How many requests [`check_access_control`] sends: 7 attacks, 4 allowed hosts,
+/// 1 same-origin read, 2 size caps and 1 stalled request.
+const ACCESS_CONTROL_REQUESTS: usize = 15;
 
 /// Every HTTP contract the server documents, against the live port.
 pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String> {
@@ -849,7 +862,7 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         json,
         UPDATES_JSON.as_bytes(),
     )?;
-    check_access_control(port)?;
+    let access_control = check_access_control(port)?;
     expect(
         "GET /nope",
         &get(port, "/nope")?,
@@ -1007,7 +1020,7 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         json,
         NOT_FOUND_JSON.as_bytes(),
     )?;
-    Ok(27)
+    Ok(27 + access_control)
 }
 
 /// The whole command.
