@@ -4464,6 +4464,51 @@ mod tests {
         assert!(parse_lockfile_package_names("").is_empty());
     }
 
+    /// The radar never depends on HSE (docs/REPOSITORY_BOUNDARY.md): no
+    /// workspace manifest names an HSE crate or takes a git or path-outside
+    /// dependency, so knowledge only ever flows to HSE by HSE pinning this
+    /// repository, never the other way.
+    #[test]
+    fn no_workspace_manifest_depends_on_hse() {
+        let root = repo_root().expect("repo root");
+        let mut manifests = vec![root.join("Cargo.toml"), root.join("xtask/Cargo.toml")];
+        for entry in fs::read_dir(root.join("crates")).expect("crates/") {
+            let path = entry.expect("entry").path().join("Cargo.toml");
+            if path.is_file() {
+                manifests.push(path);
+            }
+        }
+        assert!(manifests.len() >= 4, "found {} manifests", manifests.len());
+        for manifest in &manifests {
+            let text = read_to_string(manifest).expect("manifest");
+            for line in text.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
+                let names_hse = line.starts_with("huntsman")
+                    || line.starts_with("hse-core")
+                    || line.starts_with("hse ")
+                    || line.contains("Huntsman-Search-Engine");
+                assert!(
+                    !names_hse && !line.contains("git = "),
+                    "{} depends on HSE or a git source: `{line}` — the radar depends on nothing from HSE",
+                    manifest.display()
+                );
+            }
+        }
+    }
+
+    /// Both directions of the boundary are written down: the document exists
+    /// and the README points at it.
+    #[test]
+    fn the_boundary_document_exists_and_is_linked() {
+        let root = repo_root().expect("repo root");
+        let doc = read_to_string(&root.join("docs/REPOSITORY_BOUNDARY.md")).expect("boundary doc");
+        assert!(
+            doc.contains("nothing from HSE"),
+            "the dependency direction is stated"
+        );
+        let readme = read_to_string(&root.join("README.md")).expect("README");
+        assert!(readme.contains("docs/REPOSITORY_BOUNDARY.md"));
+    }
+
     #[test]
     fn evaluate_dependency_policy_reports_empty_lockfile() {
         let names: Vec<String> = Vec::new();
