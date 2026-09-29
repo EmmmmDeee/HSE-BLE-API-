@@ -132,6 +132,8 @@ const HCI_TIMEOUT: Duration = Duration::from_secs(10);
 /// how long to wait; it never weakens what the proof then requires — a completed
 /// download, a size + SHA-256 verification, and the installer hand-off.
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long the upgrade proof waits for the guest to apply the global proxy.
+const PROXY_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the package installer may take once its button is tapped.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the installer may take to show its confirmation.
@@ -1783,6 +1785,34 @@ fn wait_for_unmetered_network(adb: &Adb) -> Result<updateproof::ActiveNetwork, S
     }
 }
 
+/// Waits until `dumpsys connectivity` names the global proxy
+/// `GUEST_HOST_ALIAS:port`, and says how long that took. Should a platform's
+/// dump never print it, the launch still proceeds after [`PROXY_TIMEOUT`], and
+/// the report says the proxy was not observed.
+fn wait_for_global_proxy(adb: &Adb, port: u16) -> Result<String, String> {
+    let started = Instant::now();
+    let port = port.to_string();
+    loop {
+        let dump = adb.shell("dumpsys connectivity")?;
+        if dump
+            .lines()
+            .any(|line| line.contains(GUEST_HOST_ALIAS) && line.contains(&port))
+        {
+            return Ok(format!(
+                "proxy applied: connectivity reported {GUEST_HOST_ALIAS}:{port} {:.1}s after the setting",
+                started.elapsed().as_secs_f64()
+            ));
+        }
+        if started.elapsed() > PROXY_TIMEOUT {
+            return Ok(format!(
+                "proxy not observed in `dumpsys connectivity` within {}s; launching anyway",
+                PROXY_TIMEOUT.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// The guest side of [`upgrade_phase`], with the stand-in up: trust, proxy,
 /// launch, the pathway's milestones from the service's log, the installer.
 fn upgrade_through(
@@ -1845,6 +1875,11 @@ fn upgrade_through(
         "global http proxy {GUEST_HOST_ALIAS}:{} (a CONNECT relay to the stand-in on the host, {RELEASE_HOST}:443 only)",
         host.proxy_port
     ));
+    // The setting is applied to the network asynchronously: a launch right
+    // after it once resolved github.com directly and fell back to the bundled
+    // manifest (UnknownHostException, no proxy yet). Wait until connectivity
+    // reports the proxy before launching.
+    report.push(wait_for_global_proxy(adb, host.proxy_port)?);
 
     println!("== am start -W {ACTIVITY}: the fresh install's first check, against the stand-in ==");
     // Only this launch's lines: logcat since the guest's clock now.
