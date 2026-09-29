@@ -1785,31 +1785,28 @@ fn wait_for_unmetered_network(adb: &Adb) -> Result<updateproof::ActiveNetwork, S
     }
 }
 
-/// Waits until `dumpsys connectivity` names the global proxy
-/// `GUEST_HOST_ALIAS:port`, and says how long that took. Should a platform's
-/// dump never print it, the launch still proceeds after [`PROXY_TIMEOUT`], and
-/// the report says the proxy was not observed.
-fn wait_for_global_proxy(adb: &Adb, port: u16) -> Result<String, String> {
+/// Waits until the guest's first connection reaches the stand-in's proxy —
+/// the platform's own traffic follows the global proxy as soon as it is
+/// applied — and says how long that took. The dump of connectivity does not
+/// print a global proxy on API 34, so the proxy's own log is the observable
+/// signal. Should no connection come, the launch still proceeds after
+/// [`PROXY_TIMEOUT`], and the report says the proxy was not observed.
+fn wait_for_global_proxy(host: &updateproof::ReleaseHost) -> String {
     let started = Instant::now();
-    let port = port.to_string();
     loop {
-        let dump = adb.shell("dumpsys connectivity")?;
-        if dump
-            .lines()
-            .any(|line| line.contains(GUEST_HOST_ALIAS) && line.contains(&port))
-        {
-            return Ok(format!(
-                "proxy applied: connectivity reported {GUEST_HOST_ALIAS}:{port} {:.1}s after the setting",
+        if host.tunnel_count() > 0 {
+            return format!(
+                "proxy applied: the guest's first connection reached it {:.1}s after the setting",
                 started.elapsed().as_secs_f64()
-            ));
+            );
         }
         if started.elapsed() > PROXY_TIMEOUT {
-            return Ok(format!(
-                "proxy not observed in `dumpsys connectivity` within {}s; launching anyway",
+            return format!(
+                "proxy not observed: no guest connection within {}s of the setting; launching anyway",
                 PROXY_TIMEOUT.as_secs()
-            ));
+            );
         }
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -1877,9 +1874,9 @@ fn upgrade_through(
     ));
     // The setting is applied to the network asynchronously: a launch right
     // after it once resolved github.com directly and fell back to the bundled
-    // manifest (UnknownHostException, no proxy yet). Wait until connectivity
-    // reports the proxy before launching.
-    report.push(wait_for_global_proxy(adb, host.proxy_port)?);
+    // manifest (UnknownHostException, no proxy yet). Wait until the proxy
+    // sees the guest's first connection before launching.
+    report.push(wait_for_global_proxy(host));
 
     println!("== am start -W {ACTIVITY}: the fresh install's first check, against the stand-in ==");
     // Only this launch's lines: logcat since the guest's clock now.
