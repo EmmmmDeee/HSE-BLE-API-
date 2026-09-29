@@ -110,6 +110,22 @@ final class WifiAp {
     };
 
     /**
+     * The epoch time the platform saw an access point, from its scan timestamp
+     * ({@code ScanResult.timestamp}: microseconds on the elapsed-realtime clock).
+     * A missing or non-positive timestamp is not "seen at boot": it is read as
+     * seen now, so a driver that reports 0 cannot date a first sighting to the
+     * device's boot. A timestamp in the future, or older than the epoch itself,
+     * is clamped rather than producing a negative or future time.
+     */
+    static long seenEpochMillis(long nowEpochMillis, long nowElapsedMillis, long scanTimestampMicros) {
+        if (scanTimestampMicros <= 0L) {
+            return nowEpochMillis;
+        }
+        long agoMillis = Math.max(0L, nowElapsedMillis - scanTimestampMicros / 1000L);
+        return Math.max(0L, nowEpochMillis - agoMillis);
+    }
+
+    /**
      * One platform scan result through the Rust core
      * ({@link NativeRadar#wifiObservation}) into an access point, or {@code null}
      * when it names none. The single path the live engine and the API harness share.

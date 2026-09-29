@@ -140,6 +140,26 @@ public class WifiApTest {
     }
 
     @Test
+    public void a_scan_timestamp_becomes_the_epoch_time_the_platform_saw_the_access_point() {
+        long now = 1_757_700_000_000L;
+        long elapsed = 500_000L;
+        // Seen 3.2 s ago on the elapsed clock (timestamp is in microseconds).
+        assertEquals("seen a moment ago", now - 3_200L,
+                WifiAp.seenEpochMillis(now, elapsed, (elapsed - 3_200L) * 1000L));
+        assertEquals("a timestamp in the future is not later than now", now,
+                WifiAp.seenEpochMillis(now, elapsed, (elapsed + 9_000L) * 1000L));
+        assertEquals("a sighting older than the epoch is clamped, never negative", 0L,
+                WifiAp.seenEpochMillis(1_000L, 900_000L, 1_000L));
+    }
+
+    @Test
+    public void a_bogus_scan_timestamp_is_seen_now_not_at_boot() {
+        long now = 1_757_700_000_000L;
+        assertEquals("zero", now, WifiAp.seenEpochMillis(now, 500_000L, 0L));
+        assertEquals("negative", now, WifiAp.seenEpochMillis(now, 500_000L, -5L));
+    }
+
+    @Test
     public void the_survey_ranks_usable_readings_strongest_first_and_a_corrupt_one_last() {
         List<WifiAp> rows = new ArrayList<>();
         rows.add(observe("3c:5a:b4:11:22:05", "corrupt", "[WEP][ESS]", 5, 2412));

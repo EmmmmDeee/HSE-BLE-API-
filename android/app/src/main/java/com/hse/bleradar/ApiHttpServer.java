@@ -11,6 +11,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -101,8 +102,20 @@ import java.util.logging.Logger;
  * {@link #MAX_REQUEST_BODY_BYTES} answers {@code 413} at once instead of
  * tying a handler thread to a client that may never send it.
  *
- * <p>Binding to {@code 127.0.0.1} is the whole access-control model: nothing
- * off-device can reach the port, and remote use goes through an SSH tunnel.
+ * <p>Access control is two things and no more. Binding to {@code 127.0.0.1}
+ * keeps the network out (remote use goes through an SSH tunnel). Every route
+ * then answers only a request whose {@code Host} is this loopback server
+ * ({@link #hostAllowed}) and whose {@code Origin}, if it has one, is the same
+ * ({@link #sameOrigin}) with {@code 403}, which is what keeps a web page in the
+ * user's browser out: DNS rebinding and a cross-site POST both fail. A request
+ * line or header longer than {@link #MAX_HEADER_LINE_CHARS}, more than
+ * {@link #MAX_HEADERS} headers, or a request that takes more than ten seconds
+ * to arrive is refused ({@code 431}, {@code 408}). What is <em>not</em> stopped
+ * is another app installed on the same device: any app with the {@code INTERNET}
+ * permission can connect to loopback and read every route, including the Wi-Fi
+ * survey's SSIDs and BSSIDs. That is the design (the dashboard is for a browser
+ * or Termux on the same device, which cannot be told apart from another app),
+ * and it is stated in {@code docs/ANDROID_APP.md}.
  */
 public final class ApiHttpServer {
 
@@ -121,6 +134,16 @@ public final class ApiHttpServer {
      * handler thread would wait on it.
      */
     static final long MAX_REQUEST_BODY_BYTES = 64 * 1024;
+    /** The longest request or header line read; a longer one is refused ({@code 431}) rather than buffered. */
+    static final int MAX_HEADER_LINE_CHARS = 8 * 1024;
+    /** The most header lines read; more is refused ({@code 431}). */
+    static final int MAX_HEADERS = 64;
+    /**
+     * The most time a client gets to send its request line and headers. The socket
+     * timeout is per read, so on its own a client that sends one byte every few
+     * seconds could hold a handler thread (there are two) indefinitely.
+     */
+    private static final long REQUEST_DEADLINE_NANOS = 10_000_000_000L;
     private static final String JSON = "application/json";
     private static final String HTML = "text/html; charset=utf-8";
 
@@ -233,28 +256,142 @@ public final class ApiHttpServer {
         }
     }
 
+    /** A request refused before any route ran, with the status it is answered with. */
+    private static final class Refusal extends IOException {
+        final int status;
+        final String reason;
+        final String message;
+
+        Refusal(int status, String reason, String message) {
+            super(message);
+            this.status = status;
+            this.reason = reason;
+            this.message = message;
+        }
+    }
+
+    /**
+     * One line, at most {@link #MAX_HEADER_LINE_CHARS} long ({@code \r\n} or
+     * {@code \n} ended), or {@code null} at the end of the stream. Unlike
+     * {@code BufferedReader.readLine} it never buffers more than the cap, so a
+     * client cannot make a handler allocate without limit.
+     */
+    private static String readBoundedLine(BufferedReader reader, long deadlineNanos) throws IOException {
+        StringBuilder line = new StringBuilder();
+        for (;;) {
+            if (System.nanoTime() > deadlineNanos) {
+                throw new Refusal(408, "Request Timeout", "Request took too long");
+            }
+            int c = reader.read();
+            if (c < 0) {
+                return line.length() == 0 ? null : line.toString();
+            }
+            if (c == '\n') {
+                int end = line.length();
+                if (end > 0 && line.charAt(end - 1) == '\r') {
+                    line.setLength(end - 1);
+                }
+                return line.toString();
+            }
+            if (line.length() >= MAX_HEADER_LINE_CHARS) {
+                throw new Refusal(431, "Request Header Fields Too Large", "Request header too large");
+            }
+            line.append((char) c);
+        }
+    }
+
+    /**
+     * Whether a {@code Host} header names this loopback server: {@code 127.0.0.1},
+     * {@code localhost} or {@code [::1]}, each with an optional numeric port. A page
+     * whose name an attacker points at 127.0.0.1 (DNS rebinding) is served as
+     * its own name, not one of these, so it is refused; the port is not compared
+     * because a forwarded or tunnelled port legitimately differs from the bound one.
+     */
+    static boolean hostAllowed(String hostHeader) {
+        if (hostHeader == null) {
+            return false;
+        }
+        String host = hostHeader.trim().toLowerCase(Locale.ROOT);
+        String name;
+        String port;
+        if (host.startsWith("[")) {
+            int close = host.indexOf(']');
+            if (close < 0) {
+                return false;
+            }
+            name = host.substring(0, close + 1);
+            port = host.substring(close + 1);
+        } else {
+            int colon = host.indexOf(':');
+            name = colon < 0 ? host : host.substring(0, colon);
+            port = colon < 0 ? "" : host.substring(colon);
+        }
+        if (!port.isEmpty() && !port.matches(":[0-9]{1,5}")) {
+            return false;
+        }
+        return name.equals("127.0.0.1") || name.equals("localhost") || name.equals("[::1]");
+    }
+
+    /**
+     * Whether an {@code Origin} header is this server's own: the page it came from
+     * was served by the same {@code Host}. A browser sends {@code Origin} on a
+     * cross-site request (and on a same-site POST), so a page on another site,
+     * or a sandboxed one ({@code null}), is refused, while the dashboard's own
+     * Start and Stop buttons, whose origin is {@code http://<Host>}, are not.
+     */
+    static boolean sameOrigin(String originHeader, String hostHeader) {
+        return originHeader != null
+                && hostHeader != null
+                && originHeader.trim().equalsIgnoreCase("http://" + hostHeader.trim());
+    }
+
     private void handle(Socket connection) {
         try (Socket socket = connection) {
             socket.setSoTimeout(REQUEST_TIMEOUT_MS);
             BufferedReader reader = new BufferedReader(
                     new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
-            String requestLine = reader.readLine();
-            if (requestLine == null) {
-                return;
-            }
-            // No route reads a body: drain the headers to reach the end of the
-            // request, then consume and discard a declared body so a client
-            // that sent one is answered rather than reset.
+            long deadline = System.nanoTime() + REQUEST_DEADLINE_NANOS;
+            String requestLine;
             long bodyLength = 0;
-            for (String header = reader.readLine(); header != null && !header.isEmpty(); header = reader.readLine()) {
-                int colon = header.indexOf(':');
-                if (colon > 0 && "content-length".equalsIgnoreCase(header.substring(0, colon).trim())) {
-                    try {
-                        bodyLength = Long.parseLong(header.substring(colon + 1).trim());
-                    } catch (NumberFormatException malformed) {
-                        bodyLength = 0;
+            String host = null;
+            String origin = null;
+            try {
+                requestLine = readBoundedLine(reader, deadline);
+                if (requestLine == null) {
+                    return;
+                }
+                // No route reads a body: drain the headers to reach the end of the
+                // request, then consume and discard a declared body so a client
+                // that sent one is answered rather than reset.
+                int headers = 0;
+                for (String header = readBoundedLine(reader, deadline);
+                        header != null && !header.isEmpty();
+                        header = readBoundedLine(reader, deadline)) {
+                    if (++headers > MAX_HEADERS) {
+                        throw new Refusal(431, "Request Header Fields Too Large", "Request header too large");
+                    }
+                    int colon = header.indexOf(':');
+                    if (colon <= 0) {
+                        continue;
+                    }
+                    String name = header.substring(0, colon).trim();
+                    String value = header.substring(colon + 1).trim();
+                    if ("content-length".equalsIgnoreCase(name)) {
+                        try {
+                            bodyLength = Long.parseLong(value);
+                        } catch (NumberFormatException malformed) {
+                            bodyLength = 0;
+                        }
+                    } else if ("host".equalsIgnoreCase(name)) {
+                        host = value;
+                    } else if ("origin".equalsIgnoreCase(name)) {
+                        origin = value;
                     }
                 }
+            } catch (Refusal refused) {
+                writeResponse(socket.getOutputStream(), refused.status, refused.reason, JSON,
+                        errorJson(refused.message));
+                return;
             }
             OutputStream out = socket.getOutputStream();
             if (bodyLength > MAX_REQUEST_BODY_BYTES) {
@@ -269,6 +406,15 @@ public final class ApiHttpServer {
             String[] parts = requestLine.split(" ");
             if (parts.length != 3) {
                 writeResponse(out, 400, "Bad Request", JSON, errorJson("Bad request"));
+                return;
+            }
+            // Every route, the page included, answers only a request that names this
+            // server as its Host and, when it carries an Origin, is same-origin.
+            // The socket is bound to loopback, which keeps the network out but not a
+            // web page in the user's browser: DNS rebinding makes such a page reach
+            // 127.0.0.1 under its own name, and a cross-site form can POST here.
+            if (!hostAllowed(host) || (origin != null && !sameOrigin(origin, host))) {
+                writeResponse(out, 403, "Forbidden", JSON, errorJson("Forbidden"));
                 return;
             }
             String path = parts[1];

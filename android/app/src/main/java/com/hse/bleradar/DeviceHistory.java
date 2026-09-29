@@ -94,6 +94,12 @@ final class DeviceHistory {
     private String state;
     /** Whether {@link #pending} holds a device not yet known this session. */
     private boolean pendingHasNewDevice;
+    /**
+     * Whether {@link #state} holds a merge that is not on disk (a save failed):
+     * the next flush retries it even when nothing new is pending, so a failed
+     * write is not lost for a device that is never seen again.
+     */
+    private boolean dirty;
     /** So the very first sighting merges at once. */
     private long lastFlushUptimeMillis = -FLUSH_INTERVAL_MILLIS;
 
@@ -134,7 +140,9 @@ final class DeviceHistory {
      * The sighting is merged at the time it was <em>seen</em>, not the time it is
      * read, so re-reading a result the platform cached (an access point last
      * scanned minutes ago) merges the same instant again and never counts a new
-     * visit; the Rust store ignores a sighting that is not later than the last.
+     * visit: the Rust store adds a visit only for a sighting later than the last
+     * (and past the visit gap). An older true sighting can still lower
+     * {@code first_seen} to when the device was really first seen.
      */
     synchronized void record(String key, long seenEpochMillis) {
         if (key == null || seenEpochMillis < 0 || !NativeRadar.isAvailable()) {
@@ -151,7 +159,13 @@ final class DeviceHistory {
     /** Merges every pending sighting and persists the result. */
     synchronized void flush(long nowUptimeMillis) {
         lastFlushUptimeMillis = nowUptimeMillis;
-        if (pending.isEmpty() || !NativeRadar.isAvailable()) {
+        if (!NativeRadar.isAvailable()) {
+            return;
+        }
+        if (pending.isEmpty()) {
+            if (dirty) {
+                dirty = !save(file, state);
+            }
             return;
         }
         // Merge each distinct sighting time once, oldest first, so one write
@@ -185,7 +199,7 @@ final class DeviceHistory {
         }
         pending.clear();
         pendingHasNewDevice = false;
-        save(file, state);
+        dirty = !save(file, state);
     }
 
     /** {@code first_seen_ms\tvisits} → a record; an empty or malformed row → {@code null}. */
@@ -216,17 +230,20 @@ final class DeviceHistory {
         }
     }
 
-    private static void save(File file, String text) {
+    /** Writes {@code text} atomically (a temporary file renamed over the old one); whether it did. */
+    private static boolean save(File file, String text) {
         File temporary = new File(file.getPath() + ".tmp");
         try (FileOutputStream out = new FileOutputStream(temporary)) {
             out.write(text.getBytes(StandardCharsets.UTF_8));
             out.getFD().sync();
         } catch (IOException failed) {
             LOG.log(Level.WARNING, "Device history not saved", failed);
-            return;
+            return false;
         }
         if (!temporary.renameTo(file)) {
             LOG.warning("Device history not saved: rename failed");
+            return false;
         }
+        return true;
     }
 }

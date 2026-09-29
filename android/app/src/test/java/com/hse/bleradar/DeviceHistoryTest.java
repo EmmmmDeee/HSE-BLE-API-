@@ -146,6 +146,24 @@ public class DeviceHistoryTest {
     }
 
     @Test
+    public void a_failed_save_is_retried_by_the_next_flush() throws IOException {
+        File dir = freshDirectory();
+        File target = new File(dir, DeviceHistory.FILE_NAME);
+        // A directory where the history goes: the rename over it fails, so the
+        // merge is in memory only.
+        assertTrue("obstruction in place", target.mkdir());
+        DeviceHistory history = new DeviceHistory(dir);
+        history.record(PUBLIC_KEY, 1_757_000_000_000L);
+        history.flush(0L);
+        assertNotNull("merged in memory", history.lookup(PUBLIC_KEY));
+        assertTrue("but not on disk", target.isDirectory());
+        assertTrue("obstruction removed", target.delete());
+        history.flush(1L);
+        assertTrue("nothing new was pending, yet the unsaved merge is retried", target.isFile());
+        assertTrue("and holds the device", persisted(dir).contains(PUBLIC_KEY));
+    }
+
+    @Test
     public void a_save_leaves_no_temporary_file_behind() throws IOException {
         File dir = freshDirectory();
         new DeviceHistory(dir).observe(PUBLIC_KEY, 0L);

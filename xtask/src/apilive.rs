@@ -29,8 +29,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::dashboard::{
-    self, DASHBOARD_ASSET_PATH, DEVICES_JSON, METHOD_NOT_ALLOWED_JSON, NOT_FOUND_JSON,
-    SCAN_STARTED_JSON, SCAN_STOPPED_JSON, STATUS_JSON, Scenario, UPDATES_JSON, WIFI_JSON,
+    self, DASHBOARD_ASSET_PATH, DEVICES_JSON, FORBIDDEN_JSON, HEADER_TOO_LARGE_JSON,
+    METHOD_NOT_ALLOWED_JSON, NOT_FOUND_JSON, SCAN_STARTED_JSON, SCAN_STOPPED_JSON, STATUS_JSON,
+    Scenario, UPDATES_JSON, WIFI_JSON,
 };
 
 /// The Java sources the server needs on a plain JVM: none of them may
@@ -693,6 +694,111 @@ fn expect(
     Ok(())
 }
 
+/// The access rules every route applies, over a real socket: a request must name
+/// this loopback server as its `Host`, and one that carries an `Origin` must be
+/// same-origin. What they keep out is a web page in the user's browser, so each
+/// attack is one such a page can make (DNS rebinding sets a foreign `Host`; a
+/// cross-site POST carries a foreign `Origin`), and each allowed form is one a
+/// real client sends (a bare loopback host, a forwarded port, `localhost`, the
+/// IPv6 loopback, the dashboard's own same-origin POST). Also the caps on request
+/// size. Refused requests never reach the scripted scan control, whose script the
+/// rest of the contract check depends on.
+fn check_access_control(port: u16) -> Result<(), String> {
+    let json = "application/json";
+    let request = |label: &str, head: &str, status: u16, body: &str| -> Result<(), String> {
+        expect(
+            label,
+            &http_request(port, head.as_bytes())?,
+            status,
+            json,
+            body.as_bytes(),
+        )
+    };
+    // Attacks: a rebound name, a look-alike, a missing Host, a foreign Origin (on a
+    // read and on the scan-control POST a cross-site form would send).
+    request(
+        "GET /api/wifi, Host: evil.example (DNS rebinding)",
+        "GET /api/wifi HTTP/1.1\r\nHost: evil.example:8080\r\nConnection: close\r\n\r\n",
+        403,
+        FORBIDDEN_JSON,
+    )?;
+    request(
+        "GET /api/devices, Host: 127.0.0.1.evil.example (look-alike)",
+        "GET /api/devices HTTP/1.1\r\nHost: 127.0.0.1.evil.example\r\nConnection: close\r\n\r\n",
+        403,
+        FORBIDDEN_JSON,
+    )?;
+    request(
+        "GET /api/wifi, no Host",
+        "GET /api/wifi HTTP/1.1\r\nConnection: close\r\n\r\n",
+        403,
+        FORBIDDEN_JSON,
+    )?;
+    request(
+        "GET / , Host: evil.example (the page too)",
+        "GET / HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+        403,
+        FORBIDDEN_JSON,
+    )?;
+    request(
+        "GET /api/wifi, foreign Origin",
+        "GET /api/wifi HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://evil.example\r\nConnection: close\r\n\r\n",
+        403,
+        FORBIDDEN_JSON,
+    )?;
+    request(
+        "POST /api/scan/start, foreign Origin (cross-site form)",
+        "POST /api/scan/start HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://evil.example\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        403,
+        FORBIDDEN_JSON,
+    )?;
+    request(
+        "POST /api/scan/stop, sandboxed Origin: null",
+        "POST /api/scan/stop HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: null\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        403,
+        FORBIDDEN_JSON,
+    )?;
+    // Allowed: what real clients send.
+    for host in [
+        "localhost:8080".to_string(),
+        "[::1]:8080".to_string(),
+        format!("127.0.0.1:{port}"),
+        "LocalHost".to_string(),
+    ] {
+        request(
+            &format!("GET /api/wifi, Host: {host}"),
+            &format!("GET /api/wifi HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"),
+            200,
+            WIFI_JSON,
+        )?;
+    }
+    let own = format!("127.0.0.1:{port}");
+    request(
+        "GET /api/wifi, same Origin",
+        &format!(
+            "GET /api/wifi HTTP/1.1\r\nHost: {own}\r\nOrigin: http://{own}\r\nConnection: close\r\n\r\n"
+        ),
+        200,
+        WIFI_JSON,
+    )?;
+    // Caps: a line over the cap, and more headers than the cap.
+    let long = "a".repeat(9 * 1024);
+    request(
+        "GET /api/wifi, a 9 KiB header line",
+        &format!("GET /api/wifi HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Long: {long}\r\n\r\n"),
+        431,
+        HEADER_TOO_LARGE_JSON,
+    )?;
+    let many: String = (0..70).map(|i| format!("X-H{i}: v\r\n")).collect();
+    request(
+        "GET /api/wifi, 70 headers",
+        &format!("GET /api/wifi HTTP/1.1\r\nHost: 127.0.0.1\r\n{many}\r\n"),
+        431,
+        HEADER_TOO_LARGE_JSON,
+    )?;
+    Ok(())
+}
+
 /// Every HTTP contract the server documents, against the live port.
 pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String> {
     let json = "application/json";
@@ -743,6 +849,7 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         json,
         UPDATES_JSON.as_bytes(),
     )?;
+    check_access_control(port)?;
     expect(
         "GET /nope",
         &get(port, "/nope")?,
