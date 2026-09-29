@@ -17,7 +17,6 @@ import android.provider.Settings;
 import android.util.Log;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,9 +48,8 @@ final class WifiScanEngine implements WifiSurveySource {
 
     private final Context appContext;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private volatile List<WifiAp> accessPoints = Collections.emptyList();
-    private volatile String state = STATE_IDLE;
-    private volatile int dropped;
+    /** The one published generation; replaced whole, never edited in place. */
+    private volatile WifiSurvey survey = WifiSurvey.empty(STATE_IDLE);
     private volatile boolean running;
     private boolean closed;
     private BroadcastReceiver receiver;
@@ -87,17 +85,16 @@ final class WifiScanEngine implements WifiSurveySource {
         if (closed || running) {
             return;
         }
-        dropped = 0;
         if (!hasPermission(appContext)) {
-            state = STATE_PERMISSION_DENIED;
+            survey = WifiSurvey.empty(STATE_PERMISSION_DENIED);
             return;
         }
         if (!NativeRadar.isAvailable() || appContext.getSystemService(WifiManager.class) == null) {
-            state = STATE_UNAVAILABLE;
+            survey = WifiSurvey.empty(STATE_UNAVAILABLE);
             return;
         }
         running = true;
-        state = STATE_ACTIVE;
+        survey = WifiSurvey.empty(STATE_ACTIVE);
         receiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -114,19 +111,20 @@ final class WifiScanEngine implements WifiSurveySource {
     }
 
     synchronized void stop() {
-        if (!running) {
-            return;
+        if (running) {
+            running = false;
+            handler.removeCallbacks(tick);
+            try {
+                appContext.unregisterReceiver(receiver);
+            } catch (IllegalArgumentException alreadyGone) {
+                // The receiver is no longer registered; nothing further to release.
+            }
+            receiver = null;
         }
-        running = false;
-        handler.removeCallbacks(tick);
-        try {
-            appContext.unregisterReceiver(receiver);
-        } catch (IllegalArgumentException alreadyGone) {
-            // The receiver is no longer registered; nothing further to release.
-        }
-        receiver = null;
-        accessPoints = Collections.emptyList();
-        state = STATE_IDLE;
+        // Whether or not the survey ever ran, a stopped scan leaves an idle,
+        // empty survey: a start that failed (no radio, no permission) must not
+        // keep reporting its refusal, or its last count, after the scan ends.
+        survey = WifiSurvey.empty(STATE_IDLE);
     }
 
     /** Stops the survey and refuses every later {@link #start()}: the service is being destroyed. */
@@ -136,18 +134,8 @@ final class WifiScanEngine implements WifiSurveySource {
     }
 
     @Override
-    public List<WifiAp> accessPoints() {
-        return accessPoints;
-    }
-
-    @Override
-    public String state() {
-        return state;
-    }
-
-    @Override
-    public int dropped() {
-        return dropped;
+    public WifiSurvey survey() {
+        return survey;
     }
 
     /** Reads the platform's cached results, first asking for a fresh scan when {@code requestScan}. */
@@ -158,35 +146,40 @@ final class WifiScanEngine implements WifiSurveySource {
             return;
         }
         if (!hasPermission(appContext)) {
-            publish(Collections.emptyList(), STATE_PERMISSION_DENIED);
+            publish(WifiSurvey.empty(STATE_PERMISSION_DENIED));
             return;
         }
         if (!wifi.isWifiEnabled()) {
-            publish(Collections.emptyList(), STATE_WIFI_OFF);
+            publish(WifiSurvey.empty(STATE_WIFI_OFF));
             return;
         }
         if (!locationEnabled()) {
-            publish(Collections.emptyList(), STATE_LOCATION_OFF);
+            publish(WifiSurvey.empty(STATE_LOCATION_OFF));
             return;
         }
         try {
             if (requestScan && !wifi.startScan()) {
                 Log.d(TAG, "Platform throttled the scan request; reading cached results");
             }
-            publish(decode(wifi.getScanResults()), STATE_ACTIVE);
+            publish(decode(wifi.getScanResults()));
         } catch (SecurityException error) {
             Log.w(TAG, "Wi-Fi scan permission revoked at call time", error);
-            publish(Collections.emptyList(), STATE_PERMISSION_DENIED);
+            publish(WifiSurvey.empty(STATE_PERMISSION_DENIED));
         }
     }
 
-    private void publish(List<WifiAp> rows, String newState) {
-        accessPoints = rows;
-        state = newState;
+    /**
+     * Publishes a generation, unless the survey was stopped while it was being
+     * read: a late read must not resurrect a stopped survey.
+     */
+    private synchronized void publish(WifiSurvey next) {
+        if (running) {
+            survey = next;
+        }
     }
 
     @SuppressWarnings("deprecation")
-    private List<WifiAp> decode(List<ScanResult> results) {
+    private WifiSurvey decode(List<ScanResult> results) {
         long nowEpochMillis = System.currentTimeMillis();
         long nowElapsedMillis = SystemClock.elapsedRealtime();
         Map<String, WifiAp> byBssid = new LinkedHashMap<>();
@@ -203,10 +196,9 @@ final class WifiScanEngine implements WifiSurveySource {
                 byBssid.put(ap.bssid, ap);
             }
         }
-        dropped = refused;
         List<WifiAp> rows = new ArrayList<>(byBssid.values());
         rows.sort(WifiAp.STRONGEST_FIRST);
-        return Collections.unmodifiableList(rows);
+        return new WifiSurvey(rows, STATE_ACTIVE, refused);
     }
 
     @SuppressWarnings("deprecation")

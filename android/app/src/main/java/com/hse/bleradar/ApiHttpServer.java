@@ -417,10 +417,12 @@ public final class ApiHttpServer {
     }
 
     private String wifiJson() {
+        // One generation: the list, its state and its dropped count are read together.
+        WifiSurvey survey = wifi.survey();
         Json json = new Json();
         json.beginObject();
         json.name("access_points").beginArray();
-        for (WifiAp ap : wifi.accessPoints()) {
+        for (WifiAp ap : survey.accessPoints) {
             json.beginObject();
             json.name("bssid").value(ap.bssid);
             json.name("ssid").value(ap.ssid);
@@ -440,8 +442,8 @@ public final class ApiHttpServer {
             json.endObject();
         }
         json.endArray();
-        json.name("state").value(wifi.state());
-        json.name("dropped").value((long) wifi.dropped());
+        json.name("state").value(survey.state);
+        json.name("dropped").value((long) survey.dropped);
         json.name("native_available").value(NativeRadar.isAvailable());
         json.name("timestamp_ms").value(epochMillis.getAsLong());
         json.endObject();

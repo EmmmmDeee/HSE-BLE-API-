@@ -33,6 +33,7 @@ pub const HOST_TEST_CLASSES: &[(&str, usize)] = &[
     ("DeviceHistoryTest.java", 6),
     ("ReleaseManifestTest.java", 50),
     ("WifiApTest.java", 9),
+    ("WifiSurveyTest.java", 4),
 ];
 
 /// The generated runner's class.

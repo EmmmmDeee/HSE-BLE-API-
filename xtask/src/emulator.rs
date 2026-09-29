@@ -1418,6 +1418,15 @@ fn exercise(
         report.push(format!(
             "paused: POST /api/scan/stop {stop_text}; the service stays in the foreground with \"{IDLE_TEXT}\""
         ));
+        // The survey stops with the scan: idle and empty again, not the last
+        // access points nor a stale count.
+        let idle_wifi = body_text(&get(port, "/api/wifi")?);
+        if !idle_wifi.starts_with(r#"{"access_points":[],"state":"idle","dropped":0"#) {
+            return Err(format!(
+                "the Wi-Fi survey is not idle and empty after the scan stopped: {idle_wifi}"
+            ));
+        }
+        report.push("paused: GET /api/wifi is idle and empty again".to_string());
 
         let resumed = post(port, "/api/scan/start")?;
         if resumed.status != 200 {

@@ -49,6 +49,7 @@ pub(crate) const HOST_JAVA_SOURCES: &[&str] = &[
     "Streams.java",
     "UpdateStatusSource.java",
     "WifiAp.java",
+    "WifiSurvey.java",
     "WifiSurveySource.java",
 ];
 
@@ -171,18 +172,8 @@ public final class ApiSmoke {
         final int dropped = droppedScanResults;
         WifiSurveySource wifi = new WifiSurveySource() {
             @Override
-            public List<WifiAp> accessPoints() {
-                return new ArrayList<>(accessPoints);
-            }
-
-            @Override
-            public String state() {
-                return STATE_ACTIVE;
-            }
-
-            @Override
-            public int dropped() {
-                return dropped;
+            public WifiSurvey survey() {
+                return new WifiSurvey(accessPoints, STATE_ACTIVE, dropped);
             }
         };
 

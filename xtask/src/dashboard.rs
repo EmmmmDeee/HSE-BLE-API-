@@ -98,6 +98,12 @@ pub const WIFI_JSON: &str = concat!(
     r#"{"bssid":"3c:5a:b4:11:22:05","ssid":"Corrupt","frequency_mhz":2412,"channel":1,"rssi_dbm":5,"reliability":"LOW_MEDIUM","proximity":null,"security":"WEP","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699999200}"#,
     r#"],"state":"active","dropped":2,"native_available":true,"timestamp_ms":1757700000000}"#,
 );
+/// A `/api/wifi` answer whose first row has `"enterprise":"yes"` where the
+/// contract has a boolean: the page must reject it, not render it.
+pub const WIFI_MALFORMED_ENTERPRISE_JSON: &str = concat!(
+    r#"{"access_points":[{"bssid":"3c:5a:b4:11:22:01","ssid":"x","frequency_mhz":2437,"channel":6,"rssi_dbm":-48,"reliability":"VERY_HIGH","proximity":"NEAR","security":"WPA2","enterprise":"yes","trackability":"TRACKABLE","last_seen_ms":1}"#,
+    r#"],"state":"active","dropped":0,"native_available":true,"timestamp_ms":2}"#,
+);
 /// `/api/status` as `ApiHttpServer.statusJson` writes it (uptime 1:02:03).
 pub const STATUS_JSON: &str =
     r#"{"scanning":true,"device_count":4,"native_available":true,"uptime_ms":3723000}"#;
@@ -133,17 +139,22 @@ pub enum Scenario {
     /// `/api/wifi` answers `500`; devices and status keep rendering, the
     /// banner must still be raised on every poll.
     WifiError,
+    /// `/api/wifi` answers `200` with a row whose `enterprise` is a string: a
+    /// field the page consumes is malformed, so the banner must rise rather
+    /// than the row rendering with fallback values.
+    WifiWrongShape,
 }
 
 impl Scenario {
     /// Every scenario, in the order the command runs them.
-    pub const ALL: [Scenario; 6] = [
+    pub const ALL: [Scenario; 7] = [
         Scenario::Healthy,
         Scenario::ServerError,
         Scenario::WrongShape,
         Scenario::StatusWrongShape,
         Scenario::UpdatesError,
         Scenario::WifiError,
+        Scenario::WifiWrongShape,
     ];
 
     /// The scenario's name in output paths and messages.
@@ -155,6 +166,7 @@ impl Scenario {
             Scenario::StatusWrongShape => "status-wrong-shape",
             Scenario::UpdatesError => "updates-error",
             Scenario::WifiError => "wifi-error",
+            Scenario::WifiWrongShape => "wifi-wrong-shape",
         }
     }
 
@@ -175,6 +187,9 @@ impl Scenario {
             )),
             Scenario::UpdatesError => Some(("API unreachable: HTTP 500 from /api/updates", true)),
             Scenario::WifiError => Some(("API unreachable: HTTP 500 from /api/wifi", true)),
+            Scenario::WifiWrongShape => {
+                Some(("API unreachable: /api/wifi entry 0 is malformed", true))
+            }
         }
     }
 }
@@ -218,6 +233,7 @@ pub fn route(scenario: Scenario, method: &str, path: &str, dashboard: &[u8]) -> 
         },
         "/api/wifi" => match scenario {
             Scenario::WifiError => json(500, "Internal Server Error", r#"{"error":"boom"}"#),
+            Scenario::WifiWrongShape => json(200, "OK", WIFI_MALFORMED_ENTERPRISE_JSON),
             _ => json(200, "OK", WIFI_JSON),
         },
         "/api/status" => match scenario {

@@ -424,15 +424,31 @@ footer a { color: var(--info); }
     return !!value && typeof value === 'object' && !Array.isArray(value);
   }
 
+  function isNumberOrNull(value) {
+    return value === null || isNumber(value);
+  }
+
+  function isStringOrNull(value) {
+    return value === null || typeof value === 'string';
+  }
+
+  // Every field renderWifi consumes is checked here, so a malformed answer
+  // raises the banner instead of rendering fallback values as if it were real.
   function validateWifi(wifiDoc) {
     if (!isPlainObject(wifiDoc) || !Array.isArray(wifiDoc.access_points)
-        || typeof wifiDoc.state !== 'string') {
+        || typeof wifiDoc.state !== 'string' || !isNumber(wifiDoc.dropped)
+        || !isNumber(wifiDoc.timestamp_ms)) {
       throw new Error('/api/wifi did not return the documented survey object');
     }
     for (var i = 0; i < wifiDoc.access_points.length; i++) {
       var wifiAp = wifiDoc.access_points[i];
-      if (!isPlainObject(wifiAp) || typeof wifiAp.bssid !== 'string') {
-        throw new Error('/api/wifi entry ' + i + ' has no bssid');
+      if (!isPlainObject(wifiAp) || typeof wifiAp.bssid !== 'string'
+          || typeof wifiAp.ssid !== 'string' || !isNumber(wifiAp.frequency_mhz)
+          || !isNumberOrNull(wifiAp.channel) || !isNumber(wifiAp.rssi_dbm)
+          || typeof wifiAp.reliability !== 'string' || !isStringOrNull(wifiAp.proximity)
+          || typeof wifiAp.security !== 'string' || typeof wifiAp.enterprise !== 'boolean'
+          || typeof wifiAp.trackability !== 'string' || !isNumber(wifiAp.last_seen_ms)) {
+        throw new Error('/api/wifi entry ' + i + ' is malformed');
       }
     }
     return wifiDoc;

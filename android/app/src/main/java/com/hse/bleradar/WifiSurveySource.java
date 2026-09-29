@@ -1,11 +1,10 @@
 package com.hse.bleradar;
 
-import java.util.List;
-
 /**
- * What {@link ApiHttpServer} reads to answer {@code /api/wifi}: the surveyed
- * access points and why the list may be empty. Free of {@code android.*}, like
- * {@link SnapshotSource}, so the host JVM can serve the route against fixtures.
+ * What {@link ApiHttpServer} reads to answer {@code /api/wifi}: the current
+ * survey, as one immutable {@link WifiSurvey} so a response comes from a single
+ * generation. Free of {@code android.*}, like {@link SnapshotSource}, so the host
+ * JVM can serve the route against fixtures.
  */
 interface WifiSurveySource {
 
@@ -17,17 +16,11 @@ interface WifiSurveySource {
     String STATE_PERMISSION_DENIED = "permission_denied";
     /** Wi-Fi is switched off, so there is nothing to scan. */
     String STATE_WIFI_OFF = "wifi_off";
-    /** Below Android 13 only: location services are off, which hides scan results. */
+    /** Location services are off, which makes Android hide scan results. */
     String STATE_LOCATION_OFF = "location_off";
     /** No Wi-Fi radio, the platform refused the service, or the Rust core is not loaded to classify results. */
     String STATE_UNAVAILABLE = "unavailable";
 
-    /** The latest survey, one row per BSSID (a defensive copy). */
-    List<WifiAp> accessPoints();
-
-    /** One of the {@code STATE_*} constants. */
-    String state();
-
-    /** Scan results in the latest read that named no access point: a placeholder BSSID or an undecodable answer. */
-    int dropped();
+    /** The latest survey (one generation: list, state and dropped count together). */
+    WifiSurvey survey();
 }

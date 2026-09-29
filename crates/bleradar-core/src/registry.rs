@@ -180,7 +180,7 @@ pub const CAPABILITIES: &[Capability] = &[
         strongest_reference: "WiGLE",
         rust_module: "bleradar_core::sweep::wifi_observation",
         runtime_entrypoint: "NativeRadar.wifiObservation -> WifiScanEngine -> GET /api/wifi",
-        tests: "sweep wifi_observation unit tests; jni_bridge wifi_observation 3; WifiApTest 9; verify-api-live /api/wifi golden; verify-dashboard-live survey table; verify-android-emulator survey",
+        tests: "sweep wifi_observation unit tests; jni_bridge wifi_observation 3; WifiApTest 9; WifiSurveyTest 4; verify-api-live /api/wifi golden; verify-dashboard-live survey table; verify-android-emulator survey",
         status: Status::Partial,
         residual_gap: "A passive snapshot of the platform's scan results only: no location fix per sighting, no persisted history, no map; Android throttles scans (about four per two minutes) and hides results while location is off",
     },
