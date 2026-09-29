@@ -203,15 +203,16 @@ final class WifiScanEngine implements WifiSurveySource {
                 byBssid.put(ap.bssid, ap);
             }
         }
-        // One merge and one write per read: every trackable BSSID is noted, the
-        // Rust store decides what is remembered, and each row then carries it.
-        long nowUptimeMillis = SystemClock.uptimeMillis();
+        // One write per read: every trackable BSSID is recorded at the time the
+        // platform actually saw it (not the time it was read, so a cached result
+        // is not a new sighting), then the batch is flushed once, the Rust store
+        // decides what is remembered, and each row carries it.
         for (WifiAp ap : byBssid.values()) {
             if ("TRACKABLE".equals(ap.trackability)) {
-                history.observe(ap.bssid, nowUptimeMillis);
+                history.record(ap.bssid, ap.lastSeenEpochMillis);
             }
         }
-        history.flush(nowUptimeMillis);
+        history.flush(SystemClock.uptimeMillis());
         List<WifiAp> rows = new ArrayList<>(byBssid.size());
         for (WifiAp ap : byBssid.values()) {
             rows.add(ap.withHistory(history.lookup(ap.bssid)));

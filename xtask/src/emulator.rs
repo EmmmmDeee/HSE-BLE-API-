@@ -1682,8 +1682,6 @@ fn exercise(
         revoked.elapsed().as_secs_f64()
     ));
 
-    backup_phase(adb, report)?;
-
     upgrade_phase(adb, config, port, report)?;
 
     println!("== crash log ==");
@@ -1711,19 +1709,25 @@ fn exercise(
     report.push(format!(
         "logcat: no Java or native crash of {PACKAGE}, no leaked ServiceConnection"
     ));
+
+    // Last on purpose: `pm clear` wipes the app's data and revokes its runtime
+    // permissions, so no later step may depend on the app's state, and the crash
+    // log above has already been read.
+    backup_phase(adb, report)?;
     Ok(())
 }
 
-/// The app updating itself on the runtime: the successor package served by a
-/// stand-in `github.com` the guest trusts, the app's production pathway
-/// unchanged — the release URL fetched, the remote manifest taken by the
-/// core, `Available` decided, the artifact downloaded by `DownloadManager`
-/// and verified by the core, handed to the package installer, installed.
-/// The restore-set token in `bmgr list sets` output (`  <token> : <description>`).
-pub fn restore_token(sets: &str) -> Option<u64> {
+/// The restore-set token in `bmgr list sets` output (`  <token> : <description>`),
+/// as the text `bmgr restore` takes back. Android prints and reads these
+/// hexadecimal, so the token is validated as hex and passed through unchanged,
+/// never converted to a number and formatted again (which would change a token
+/// made only of decimal digits, or reject one with `a`-`f`).
+pub fn restore_token(sets: &str) -> Option<String> {
     sets.lines()
         .filter_map(|line| line.trim().split_once(':'))
-        .find_map(|(token, _)| token.trim().parse().ok())
+        .map(|(token, _)| token.trim())
+        .find(|token| !token.is_empty() && token.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_string)
 }
 
 /// Auto Backup, proven on the runtime through the OS's own on-device transport
@@ -1783,6 +1787,11 @@ fn backup_phase(adb: &Adb, report: &mut Report) -> Result<(), String> {
     Ok(())
 }
 
+/// The app updating itself on the runtime: the successor package served by a
+/// stand-in `github.com` the guest trusts, the app's production pathway
+/// unchanged — the release URL fetched, the remote manifest taken by the
+/// core, `Available` decided, the artifact downloaded by `DownloadManager`
+/// and verified by the core, handed to the package installer, installed.
 fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> Result<(), String> {
     let proof = config.upgrade;
     proof.check_files()?;
@@ -2318,17 +2327,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_restore_token_is_read_from_bmgr_list_sets() {
+    fn the_restore_token_is_the_hex_text_bmgr_list_sets_prints() {
+        let token = |sets: &str| restore_token(sets);
         assert_eq!(
-            restore_token("Available restore sets:\n  1 : Local disk image\n"),
-            Some(1)
+            token("Available restore sets:\n  1 : Local disk image\n").as_deref(),
+            Some("1")
+        );
+        // Android's tokens are hexadecimal: a letter is a digit, and a token of
+        // decimal-looking digits must come back unchanged (not reformatted).
+        assert_eq!(
+            token("Available restore sets:\n  4a1f : x\n").as_deref(),
+            Some("4a1f")
         );
         assert_eq!(
-            restore_token("Available restore sets:\n  4a : x\n  1234567890 : cloud set\n"),
-            Some(1_234_567_890)
+            token("Available restore sets:\n  1234567890 : cloud set\n").as_deref(),
+            Some("1234567890")
         );
-        assert_eq!(restore_token("Available restore sets:\n"), None);
-        assert_eq!(restore_token(""), None);
+        assert_eq!(token("Available restore sets:\n  zz : not hex\n"), None);
+        assert_eq!(token("Available restore sets:\n"), None);
+        assert_eq!(token(""), None);
     }
 
     #[test]

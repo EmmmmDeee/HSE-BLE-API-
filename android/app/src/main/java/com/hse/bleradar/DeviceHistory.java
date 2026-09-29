@@ -6,10 +6,11 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.TreeMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -82,7 +83,14 @@ final class DeviceHistory {
             return size() > MAX_KNOWN;
         }
     };
-    private final Set<String> pending = new LinkedHashSet<>();
+    /**
+     * The sightings awaiting a merge, in arrival order: each key with the epoch
+     * time it was seen, or {@link #AT_MERGE} for a sighting that is stamped with
+     * the time of the merge (the BLE path, which sees a device as it arrives).
+     */
+    private final Map<String, Long> pending = new LinkedHashMap<>();
+    /** A pending sighting with no time of its own: it is merged at the moment of the flush. */
+    private static final long AT_MERGE = -1L;
     private String state;
     /** Whether {@link #pending} holds a device not yet known this session. */
     private boolean pendingHasNewDevice;
@@ -108,7 +116,7 @@ final class DeviceHistory {
         if (key == null || !NativeRadar.isAvailable()) {
             return;
         }
-        pending.add(key);
+        pending.putIfAbsent(key, AT_MERGE);
         if (!known.containsKey(key)) {
             pendingHasNewDevice = true;
         }
@@ -117,6 +125,22 @@ final class DeviceHistory {
                 || (pendingHasNewDevice && sinceFlush >= NEW_DEVICE_FLUSH_INTERVAL_MILLIS)) {
             flush(nowUptimeMillis);
         }
+    }
+
+    /**
+     * Notes that {@code key} was seen at {@code seenEpochMillis}, without merging
+     * or writing anything: the caller records a whole batch and then calls
+     * {@link #flush} once, so a batch is one write however many devices it holds.
+     * The sighting is merged at the time it was <em>seen</em>, not the time it is
+     * read, so re-reading a result the platform cached (an access point last
+     * scanned minutes ago) merges the same instant again and never counts a new
+     * visit; the Rust store ignores a sighting that is not later than the last.
+     */
+    synchronized void record(String key, long seenEpochMillis) {
+        if (key == null || seenEpochMillis < 0 || !NativeRadar.isAvailable()) {
+            return;
+        }
+        pending.merge(key, seenEpochMillis, (old, seen) -> old == AT_MERGE ? seen : Math.max(old, seen));
     }
 
     /** What is remembered about {@code key}, or {@code null}. */
@@ -130,17 +154,28 @@ final class DeviceHistory {
         if (pending.isEmpty() || !NativeRadar.isAvailable()) {
             return;
         }
-        String keys = String.join("\n", pending);
-        String merged = NativeRadar.historyMerge(state, keys, System.currentTimeMillis());
-        if (merged == null) {
-            return;
+        // Merge each distinct sighting time once, oldest first, so one write
+        // covers the whole batch however many instants it spans.
+        long nowEpochMillis = System.currentTimeMillis();
+        Map<Long, List<String>> byTime = new TreeMap<>();
+        for (Map.Entry<String, Long> sighting : pending.entrySet()) {
+            long at = sighting.getValue() == AT_MERGE ? nowEpochMillis : sighting.getValue();
+            byTime.computeIfAbsent(at, time -> new ArrayList<>()).add(sighting.getKey());
+        }
+        String merged = state;
+        for (Map.Entry<Long, List<String>> group : byTime.entrySet()) {
+            merged = NativeRadar.historyMerge(merged, String.join("\n", group.getValue()), group.getKey());
+            if (merged == null) {
+                return;
+            }
         }
         state = merged;
-        String lines = NativeRadar.historyLookup(state, keys);
+        List<String> keyList = new ArrayList<>(pending.keySet());
+        String lines = NativeRadar.historyLookup(state, String.join("\n", keyList));
         if (lines != null) {
             String[] rows = lines.split("\n", -1);
             int i = 0;
-            for (String key : pending) {
+            for (String key : keyList) {
                 Record record = i < rows.length ? parseRow(rows[i]) : null;
                 if (record != null) {
                     known.put(key, record);

@@ -4602,8 +4602,6 @@ mod tests {
         }
     }
 
-    /// Both directions of the boundary are written down: the document exists
-    /// and the README points at it.
     /// The `path` of every `<include domain="file" …/>` in `xml`.
     fn backup_included_files(xml: &str) -> std::collections::BTreeSet<String> {
         let mut files = std::collections::BTreeSet::new();
@@ -4652,6 +4650,12 @@ mod tests {
         // Backup is on, and points at both rule files (Android 6-11 and 12+).
         let manifest = read_to_string(&app.join("AndroidManifest.xml")).expect("manifest");
         assert!(manifest.contains(r#"android:allowBackup="true""#));
+        // Android skips Auto Backup while the app has a foreground service unless
+        // this is set, and the radar's service is in the foreground whenever it
+        // scans, so without it the advertised automatic backup would never run.
+        // The history writes are atomic (a temporary file renamed over the old
+        // one), so a backup never sees a half-written document.
+        assert!(manifest.contains(r#"android:backupInForeground="true""#));
         assert!(manifest.contains(r#"android:fullBackupContent="@xml/backup_rules""#));
         assert!(manifest.contains(r#"android:dataExtractionRules="@xml/data_extraction_rules""#));
 
@@ -4676,6 +4680,8 @@ mod tests {
         }
     }
 
+    /// Both directions of the boundary are written down: the document exists
+    /// and the README points at it.
     #[test]
     fn the_boundary_document_exists_and_is_linked() {
         let root = repo_root().expect("repo root");
