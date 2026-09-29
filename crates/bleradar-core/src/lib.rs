@@ -104,9 +104,9 @@ pub use signal::{
 };
 pub use sweep::{
     ANDROID_UNAVAILABLE, AddressTrackability, BleAddressType, CellRadio, RssiReliability,
-    address_trackability, ble_address_trackability, is_numeric_segment, is_real_device_address,
-    sighting_key, tower_id, usable_cell_identity, usable_dbm, wifi_channel, wifi_proximity,
-    wifi_rssi_reliability,
+    WifiObservation, address_trackability, ble_address_trackability, is_numeric_segment,
+    is_real_device_address, sighting_key, tower_id, usable_cell_identity, usable_dbm, wifi_channel,
+    wifi_observation, wifi_proximity, wifi_rssi_reliability,
 };
 pub use tracking::{
     Confidence, DeviceObservation, DeviceTrack, EstimateKind, FreshnessClass, MapPoint,

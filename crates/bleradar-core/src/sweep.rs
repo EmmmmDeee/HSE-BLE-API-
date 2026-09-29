@@ -17,8 +17,8 @@
 //!   treated as unavailable.
 
 use crate::{
-    ProximityBand, canonical_mac, is_locally_administered, proximity_label,
-    wifi_frequency_to_channel,
+    ProximityBand, WifiSecurity, canonical_mac, is_locally_administered, proximity_label,
+    wifi_frequency_to_channel, wifi_is_enterprise, wifi_security,
 };
 
 /// Android's `Integer.MAX_VALUE` "value unavailable" sentinel.
@@ -183,6 +183,56 @@ pub fn wifi_proximity(rssi_dbm: Option<i64>) -> Option<ProximityBand> {
         .and_then(|r| proximity_label(r as f64))
 }
 
+/// Everything the radar's rules say about one Wi-Fi scan result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WifiObservation {
+    /// Whether the BSSID is followable hardware or a randomized address (the
+    /// U/L rule, which is the Wi-Fi authority).
+    pub trackability: AddressTrackability,
+    /// How far the RSSI reading can be trusted.
+    pub reliability: RssiReliability,
+    /// The 802.11 channel, when the frequency is in the plan.
+    pub channel: Option<u16>,
+    /// The coarse signal-strength band, never a distance.
+    pub proximity: Option<ProximityBand>,
+    /// The advertised security, by the oracle-locked [`wifi_security`] (the one
+    /// authority; this layer only decides when there is nothing to classify).
+    pub security: WifiSecurity,
+    /// Whether the AP uses 802.1X/EAP authentication ([`wifi_is_enterprise`]).
+    pub enterprise: bool,
+}
+
+/// Apply every Wi-Fi reading rule to one scan result. `None` when `bssid` is not
+/// a real device address (all-zero, Android's permission-masked
+/// `02:00:00:00:00:00`, or not a MAC at all): such a result names no access
+/// point and must not be surveyed or counted as one.
+///
+/// An absent or blank `capabilities` string is passed on as absent, so the
+/// security is [`WifiSecurity::Unknown`], never [`WifiSecurity::Open`]: the
+/// oracle-locked [`wifi_security`] reads a string with no security token as
+/// open, which is right for a real capabilities string (`[ESS]`) and wrong for
+/// silence.
+#[must_use]
+pub fn wifi_observation(
+    bssid: &str,
+    capabilities: Option<&str>,
+    rssi_dbm: Option<i64>,
+    frequency_mhz: Option<i64>,
+) -> Option<WifiObservation> {
+    if !is_real_device_address(bssid) {
+        return None;
+    }
+    let capabilities = capabilities.filter(|c| !c.trim().is_empty());
+    Some(WifiObservation {
+        trackability: address_trackability(bssid),
+        reliability: wifi_rssi_reliability(rssi_dbm),
+        channel: wifi_channel(frequency_mhz),
+        proximity: wifi_proximity(rssi_dbm),
+        security: wifi_security(capabilities),
+        enterprise: wifi_is_enterprise(capabilities),
+    })
+}
+
 /// The radio a cell record was seen on, which decides the key its identity lives
 /// under and the name of its area code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +317,79 @@ pub fn sighting_key(mac: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silence_about_security_is_unknown_never_open() {
+        for caps in [None, Some(""), Some("   ")] {
+            let seen = wifi_observation("3c:5a:b4:11:22:01", caps, Some(-60), Some(2412)).unwrap();
+            assert_eq!(seen.security, WifiSecurity::Unknown, "{caps:?}");
+            assert!(!seen.enterprise);
+        }
+        // A real capabilities string with no security token is open, by the oracle.
+        let open = wifi_observation("3c:5a:b4:11:22:01", Some("[ESS]"), None, None).unwrap();
+        assert_eq!(open.security, WifiSecurity::Open);
+    }
+
+    #[test]
+    fn an_observation_reads_security_and_enterprise_from_the_one_classifier() {
+        for caps in [
+            "[WPA2-EAP-CCMP][ESS]",
+            "[RSN-SAE-CCMP][ESS]",
+            "[WEP][ESS]",
+            "[OWE][ESS]",
+        ] {
+            let seen = wifi_observation("3c:5a:b4:11:22:01", Some(caps), None, None).unwrap();
+            assert_eq!(seen.security, wifi_security(Some(caps)), "{caps}");
+            assert_eq!(seen.enterprise, wifi_is_enterprise(Some(caps)), "{caps}");
+        }
+    }
+
+    #[test]
+    fn a_wifi_observation_applies_every_reading_rule() {
+        let seen = wifi_observation(
+            "3c:5a:b4:11:22:01",
+            Some("[WPA2-PSK-CCMP][ESS]"),
+            Some(-48),
+            Some(2437),
+        )
+        .expect("a real BSSID is an access point");
+        assert_eq!(seen.trackability, AddressTrackability::Trackable);
+        assert_eq!(seen.reliability, RssiReliability::VeryHighPlus);
+        assert_eq!(seen.channel, Some(6));
+        assert!(seen.proximity.is_some());
+        assert_eq!(seen.security, WifiSecurity::Wpa2);
+
+        let random = wifi_observation("aa:bb:cc:dd:ee:01", None, None, None).unwrap();
+        assert_eq!(random.trackability, AddressTrackability::Randomized);
+        assert_eq!(random.channel, None);
+        assert_eq!(random.proximity, None);
+        assert_eq!(random.reliability, RssiReliability::LowMedium);
+        assert_eq!(random.security, WifiSecurity::Unknown);
+    }
+
+    #[test]
+    fn a_placeholder_or_malformed_bssid_is_not_an_access_point() {
+        for bssid in [
+            "",
+            "00:00:00:00:00:00",
+            "02:00:00:00:00:00",
+            "02-00-00-00-00-00",
+            "nope",
+        ] {
+            assert_eq!(
+                wifi_observation(bssid, Some("[ESS]"), Some(-40), Some(2412)),
+                None,
+                "{bssid}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_corrupt_positive_rssi_never_bands_as_close() {
+        let seen = wifi_observation("3c:5a:b4:11:22:01", None, Some(5), Some(2412)).unwrap();
+        assert_eq!(seen.reliability, RssiReliability::LowMedium);
+        assert_eq!(seen.proximity, None);
+    }
 
     #[test]
     fn placeholder_and_empty_addresses_are_not_devices() {

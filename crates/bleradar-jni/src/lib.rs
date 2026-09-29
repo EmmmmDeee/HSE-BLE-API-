@@ -220,6 +220,58 @@ pub fn device_group_key(mac: &str, address_type: i32, advertisement_hex: &str) -
 }
 
 /// Pure, unit-testable core of
+/// [`Java_com_hse_bleradar_NativeRadar_wifiObservation`]: every Wi-Fi reading
+/// rule applied to one scan result, encoded as six `|`-separated fields
+/// `trackability|reliability|channel|proximity|security|enterprise`, or `None`
+/// when `bssid` is not a real device address (a permission-masked
+/// `02:00:00:00:00:00`, all-zero, or not a MAC: not an access point).
+///
+/// Owned by [`bleradar_core::wifi_observation`]; this function only maps the
+/// platform's sentinels in (`rssi_dbm == i32::MAX` is Android's "unavailable",
+/// a non-positive `frequency_mhz` is no frequency) and the typed answer out:
+/// `trackability` is `trackable`/`randomized`/`unknown`; `reliability` is
+/// `very_high_plus`/`very_high`/`medium_plus`/`low_medium`; `channel` and
+/// `proximity` (`immediate`/`near`/`mid`/`far`) are empty when unknown;
+/// `security` is [`bleradar_core::WifiSecurity::label`]; `enterprise` is `1` or
+/// `0`. Java decodes it once, in `WifiAp.decode`.
+#[must_use]
+pub fn wifi_observation_encoded(
+    bssid: &str,
+    capabilities: Option<&str>,
+    rssi_dbm: i32,
+    frequency_mhz: i32,
+) -> Option<String> {
+    use bleradar_core::{AddressTrackability, ProximityBand, RssiReliability};
+    let rssi = (rssi_dbm != i32::MAX).then_some(i64::from(rssi_dbm));
+    let frequency = (frequency_mhz > 0).then_some(i64::from(frequency_mhz));
+    let seen = bleradar_core::wifi_observation(bssid, capabilities, rssi, frequency)?;
+    let trackability = match seen.trackability {
+        AddressTrackability::Trackable => "trackable",
+        AddressTrackability::Randomized => "randomized",
+        AddressTrackability::Unknown => "unknown",
+    };
+    let reliability = match seen.reliability {
+        RssiReliability::VeryHighPlus => "very_high_plus",
+        RssiReliability::VeryHigh => "very_high",
+        RssiReliability::MediumPlus => "medium_plus",
+        RssiReliability::LowMedium => "low_medium",
+    };
+    let channel = seen.channel.map(|c| c.to_string()).unwrap_or_default();
+    let proximity = match seen.proximity {
+        Some(ProximityBand::Immediate) => "immediate",
+        Some(ProximityBand::Near) => "near",
+        Some(ProximityBand::Mid) => "mid",
+        Some(ProximityBand::Far) => "far",
+        None => "",
+    };
+    Some(format!(
+        "{trackability}|{reliability}|{channel}|{proximity}|{}|{}",
+        seen.security.label(),
+        u8::from(seen.enterprise)
+    ))
+}
+
+/// Pure, unit-testable core of
 /// [`Java_com_hse_bleradar_NativeRadar_signalTrend`].
 ///
 /// Encodes [`SignalTrend`] as a small ordinal (`0` = [`SignalTrend::Stronger`],
@@ -1499,6 +1551,29 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceGroupKey(
     }
 }
 
+/// `NativeRadar.wifiObservation(String, String, int, int): String` — see
+/// [`wifi_observation_encoded`]. Reads `env` only through [`env`](mod@env); a
+/// null or malformed BSSID, or a placeholder one, answers null (not an access
+/// point); a null capabilities string is read as absent.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_wifiObservation(
+    env: JniEnvPtr,
+    _class: JniOpaquePtr,
+    bssid: JStringRef,
+    capabilities: JStringRef,
+    rssi_dbm: i32,
+    frequency_mhz: i32,
+) -> JStringRef {
+    let Some(bssid) = read_text(env, bssid) else {
+        return core::ptr::null_mut();
+    };
+    let capabilities = read_text(env, capabilities);
+    match wifi_observation_encoded(&bssid, capabilities.as_deref(), rssi_dbm, frequency_mhz) {
+        Some(text) => make_text(env, &text),
+        None => core::ptr::null_mut(),
+    }
+}
+
 /// `NativeRadar.historyMerge(String, String, long): String` — see
 /// [`history_merge`]. Reads `env` only through [`env`](mod@env); a null state
 /// or key list is read as empty, and only a null `env` or a VM allocation
@@ -1557,11 +1632,12 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_historyLookup(
 /// `16` when the service-name lookup (`advertisementServices`) was added, and
 /// to `17` when the cross-session device history (`historyMerge`,
 /// `historyLookup`) was added, and to `18` when `deviceAddressTrackability` and
-/// `deviceGroupKey` took the platform's BLE address type.
+/// `deviceGroupKey` took the platform's BLE address type, and to `19` when the
+/// Wi-Fi observation classification (`wifiObservation`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    18
+    19
 }

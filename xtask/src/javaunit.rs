@@ -32,6 +32,7 @@ pub const HOST_TEST_CLASSES: &[(&str, usize)] = &[
     ("BlipTest.java", 14),
     ("DeviceHistoryTest.java", 6),
     ("ReleaseManifestTest.java", 50),
+    ("WifiApTest.java", 9),
 ];
 
 /// The generated runner's class.
@@ -482,20 +483,24 @@ mod tests {
             blip.0, blip.1
         ));
         // The other pinned classes report their pinned count, all passing.
-        let history = HOST_TEST_CLASSES
-            .iter()
-            .find(|(name, _)| *name == "DeviceHistoryTest.java")
-            .map_or(0, |(_, count)| *count);
-        text.push_str(&format!(
-            "class com.hse.bleradar.DeviceHistoryTest tests={history} failed=0\n"
-        ));
+        let mut others = 0;
+        for (name, count) in HOST_TEST_CLASSES {
+            if *name == "BlipTest.java" || *name == "ReleaseManifestTest.java" {
+                continue;
+            }
+            let class = name.trim_end_matches(".java");
+            text.push_str(&format!(
+                "class com.hse.bleradar.{class} tests={count} failed=0\n"
+            ));
+            others += count;
+        }
         text.push_str(&format!(
             "class com.hse.bleradar.ReleaseManifestTest tests={} failed={}\n",
             manifest.0, manifest.1
         ));
         text.push_str(&format!(
             "summary tests={} failed={}\n",
-            blip.0 + history + manifest.0,
+            blip.0 + others + manifest.0,
             blip.1 + manifest.1
         ));
         text
@@ -538,7 +543,7 @@ mod tests {
                 .unwrap()
         };
         let (blip, manifest) = (pinned("BlipTest.java"), pinned("ReleaseManifestTest.java"));
-        let total = blip + pinned("DeviceHistoryTest.java") + manifest;
+        let total: usize = HOST_TEST_CLASSES.iter().map(|(_, count)| count).sum();
         let good = report((blip, 0), (manifest, 0), true);
         assert_eq!(check_runner_report(&good), Ok(total));
         let parsed = parse_runner_report(&good);

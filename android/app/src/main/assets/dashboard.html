@@ -11,10 +11,10 @@
   must render with no connectivity at all (the device may be offline and
   the API is loopback-only), so there are no external scripts, styles or
   fonts. It only consumes the JSON contract documented on ApiHttpServer
-  (/api/devices, /api/status, /api/updates) and never trusts a field: every
-  value is type-checked and rendered through textContent, and any failed
-  fetch, non-2xx status, unparseable JSON or response of the wrong shape
-  from any of the three endpoints raises the error banner while polling
+  (/api/devices, /api/wifi, /api/status, /api/updates) and never trusts a
+  field: every value is type-checked and rendered through textContent, and
+  any failed fetch, non-2xx status, unparseable JSON or response of the wrong
+  shape from any of the four endpoints raises the error banner while polling
   continues. `cargo xtask verify-dashboard-live` renders this exact file in
   headless Chromium against a mock of that contract and checks the DOM it
   produces, including the <body data-state> / data-polls markers below.
@@ -70,6 +70,10 @@ tr[data-freshness="STALE"] td { color: var(--muted); }
 .prox-IMMEDIATE, .prox-NEAR { color: var(--alert); font-weight: 600; }
 .prox-MID { color: var(--info); }
 .prox-FAR, .prox-UNKNOWN { color: var(--muted); }
+.sec-OPEN, .sec-WEP { color: var(--alert); font-weight: 600; }
+.sec-UNKNOWN { color: var(--muted); }
+h2 { font-size: 14px; margin: 0 0 8px; letter-spacing: .04em; }
+#wifi-section { padding: 0 16px 16px; }
 small { color: var(--muted); font-size: 11px; }
 #empty { color: var(--muted); padding: 12px 8px; }
 footer { padding: 12px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--panel); }
@@ -108,8 +112,21 @@ footer a { color: var(--info); }
     <div id="empty" hidden>No devices in range.</div>
   </section>
 </main>
+<section class="wrap" id="wifi-section" data-wifi-state="loading">
+  <h2>Wi-Fi survey <small id="wifi-summary">loading…</small></h2>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>SSID</th><th>BSSID</th><th>Ch</th><th>RSSI</th><th>Proximity</th><th>Security</th><th>Address type</th><th>Seen</th>
+      </tr>
+    </thead>
+    <tbody id="wifi"></tbody>
+  </table>
+  <div id="wifi-empty" hidden>No access points.</div>
+</section>
 <footer>
   JSON: <a href="/api/devices">/api/devices</a> ·
+  <a href="/api/wifi">/api/wifi</a> ·
   <a href="/api/status">/api/status</a> ·
   <a href="/api/updates">/api/updates</a>
   — served on 127.0.0.1:8080 only; reach it remotely through an SSH tunnel.
@@ -120,6 +137,15 @@ footer a { color: var(--info); }
 
   var POLL_MS = 1000;
   var UPDATES_EVERY_POLLS = 15;
+  // The platform scans Wi-Fi about every 35 s, so the survey is read every 5th poll.
+  var WIFI_EVERY_POLLS = 5;
+  var WIFI_STATE_TEXT = {
+    idle: 'survey idle — start the scan',
+    permission_denied: 'off — location permission not granted',
+    wifi_off: 'off — Wi-Fi is switched off',
+    location_off: 'off — Android hides Wi-Fi results while location is off',
+    unavailable: 'unavailable on this device'
+  };
   var RADAR_MIN_M = 0.1;
   var RADAR_MAX_M = 50;
   var RING_METRES = [0.5, 1, 2, 5, 10, 20];
@@ -142,11 +168,16 @@ footer a { color: var(--info); }
     uptime: document.getElementById('uptime'),
     timestamp: document.getElementById('timestamp'),
     updates: document.getElementById('updates'),
-    radar: document.getElementById('radar')
+    radar: document.getElementById('radar'),
+    wifiSection: document.getElementById('wifi-section'),
+    wifiSummary: document.getElementById('wifi-summary'),
+    wifi: document.getElementById('wifi'),
+    wifiEmpty: document.getElementById('wifi-empty')
   };
 
   var polls = 0;
   var updatesLoaded = false;
+  var wifiLoaded = false;
   var latestDevices = [];
   var sweepStartedAt = null;
 
@@ -302,6 +333,47 @@ footer a { color: var(--info); }
     el.empty.hidden = devices.length > 0;
   }
 
+  function renderWifi(wifiDoc) {
+    var rows = document.createDocumentFragment();
+    var accessPoints = wifiDoc.access_points;
+    for (var i = 0; i < accessPoints.length; i++) {
+      var wifiAp = accessPoints[i];
+      var security = text(wifiAp.security, 'UNKNOWN');
+      var trackability = text(wifiAp.trackability, 'UNKNOWN');
+      var proximity = text(wifiAp.proximity, '');
+      var tr = document.createElement('tr');
+      tr.setAttribute('data-bssid', text(wifiAp.bssid, ''));
+      tr.setAttribute('data-security', security);
+      tr.setAttribute('data-trackability', trackability);
+      tr.setAttribute('data-channel', isNumber(wifiAp.channel) ? String(wifiAp.channel) : '');
+      tr.setAttribute('data-frequency', isNumber(wifiAp.frequency_mhz) ? String(wifiAp.frequency_mhz) : '');
+      tr.setAttribute('data-reliability', text(wifiAp.reliability, 'UNKNOWN'));
+      cell(tr, String(i + 1), 'num');
+      cell(tr, text(wifiAp.ssid, '') || '(hidden)');
+      cell(tr, text(wifiAp.bssid, '—'), 'addr');
+      cell(tr, isNumber(wifiAp.channel) ? String(wifiAp.channel) : '—', 'num');
+      cell(tr, fmtRssi(wifiAp.rssi_dbm), 'num');
+      cell(tr, proximity || '—', 'prox-' + (proximity || 'UNKNOWN'));
+      cell(tr, security + (wifiAp.enterprise === true ? ' · 802.1X' : ''), 'sec-' + security);
+      cell(tr, trackability, 'track-' + trackability);
+      cell(tr, fmtAgo(wifiDoc.timestamp_ms - wifiAp.last_seen_ms) + ' ago', 'num');
+      rows.appendChild(tr);
+    }
+    el.wifi.textContent = '';
+    el.wifi.appendChild(rows);
+    el.wifiEmpty.hidden = accessPoints.length > 0;
+    var state = text(wifiDoc.state, 'unavailable');
+    el.wifiSection.setAttribute('data-wifi-state', state);
+    var summary = state === 'active'
+      ? accessPoints.length + (accessPoints.length === 1 ? ' access point' : ' access points')
+      : (WIFI_STATE_TEXT[state] || state);
+    if (isNumber(wifiDoc.dropped) && wifiDoc.dropped > 0) {
+      summary += ' · ' + wifiDoc.dropped + (wifiDoc.dropped === 1 ? ' result' : ' results')
+        + ' ignored (masked or malformed BSSID)';
+    }
+    el.wifiSummary.textContent = summary;
+  }
+
   function renderStatus(snapshot, status) {
     applyScanState(snapshot.scanning === true);
     var nativeAvailable = snapshot.native_available === true;
@@ -352,6 +424,20 @@ footer a { color: var(--info); }
     return !!value && typeof value === 'object' && !Array.isArray(value);
   }
 
+  function validateWifi(wifiDoc) {
+    if (!isPlainObject(wifiDoc) || !Array.isArray(wifiDoc.access_points)
+        || typeof wifiDoc.state !== 'string') {
+      throw new Error('/api/wifi did not return the documented survey object');
+    }
+    for (var i = 0; i < wifiDoc.access_points.length; i++) {
+      var wifiAp = wifiDoc.access_points[i];
+      if (!isPlainObject(wifiAp) || typeof wifiAp.bssid !== 'string') {
+        throw new Error('/api/wifi entry ' + i + ' has no bssid');
+      }
+    }
+    return wifiDoc;
+  }
+
   function validateStatus(status) {
     if (!isPlainObject(status) || typeof status.scanning !== 'boolean'
         || !isNumber(status.device_count) || typeof status.native_available !== 'boolean'
@@ -387,13 +473,20 @@ footer a { color: var(--info); }
       body.setAttribute('data-polls', String(polls));
       body.setAttribute('data-state', 'live');
       el.error.textContent = '';
+      var slower = [];
       if (!updatesLoaded || polls % UPDATES_EVERY_POLLS === 0) {
-        return getJson('/api/updates').then(function (updates) {
+        slower.push(getJson('/api/updates').then(function (updates) {
           renderUpdates(validateUpdates(updates));
           updatesLoaded = true;
-        });
+        }));
       }
-      return undefined;
+      if (!wifiLoaded || polls % WIFI_EVERY_POLLS === 0) {
+        slower.push(getJson('/api/wifi').then(function (wifiDoc) {
+          renderWifi(validateWifi(wifiDoc));
+          wifiLoaded = true;
+        }));
+      }
+      return Promise.all(slower);
     }).catch(function (error) {
       showError('API unreachable: ' + String(error && error.message ? error.message : error));
     }).then(function () {

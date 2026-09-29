@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use crate::dashboard::{
     self, DASHBOARD_ASSET_PATH, DEVICES_JSON, METHOD_NOT_ALLOWED_JSON, NOT_FOUND_JSON,
-    SCAN_STARTED_JSON, SCAN_STOPPED_JSON, STATUS_JSON, Scenario, UPDATES_JSON,
+    SCAN_STARTED_JSON, SCAN_STOPPED_JSON, STATUS_JSON, Scenario, UPDATES_JSON, WIFI_JSON,
 };
 
 /// The Java sources the server needs on a plain JVM: none of them may
@@ -48,6 +48,8 @@ pub(crate) const HOST_JAVA_SOURCES: &[&str] = &[
     "SnapshotSource.java",
     "Streams.java",
     "UpdateStatusSource.java",
+    "WifiAp.java",
+    "WifiSurveySource.java",
 ];
 
 /// `/api/status` while the scripted control has paused the scan: no uptime.
@@ -137,6 +139,53 @@ public final class ApiSmoke {
                 NativeRadar.PROXIMITY_IMMEDIATE, NativeRadar.TREND_STABLE, NativeRadar.FRESHNESS_LIVE, 99, 90,
                 "02010605ff06000102"));
 
+        // Wi-Fi scan results, each through the real native core and the same
+        // WifiAp.observe the live WifiScanEngine calls: a strong open-air AP, a
+        // markup-bearing SSID on a randomized BSSID (WPA3), a hidden open
+        // network, an 802.1X network, a corrupt positive RSSI (WEP), a
+        // frequency outside the plan with no capabilities, and two results that
+        // name no access point (Android's permission-masked BSSID and a
+        // non-MAC), which the survey counts as dropped.
+        Object[][] scan = {
+            {"3c:5a:b4:11:22:01", "HomeNet", "[WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]", -48, 2437, 1200L},
+            {"aa:bb:cc:dd:ee:02", "<b>evil</b> \"Ünïcødé\" \\ 😀", "[RSN-SAE-CCMP][ESS]", -78, 5180, 5000L},
+            {"3c:5a:b4:11:22:03", "", "[ESS]", -90, 2462, 20000L},
+            {"3c:5a:b4:11:22:04", "CorpNet", "[WPA2-EAP-CCMP][ESS]", -60, 5745, 3000L},
+            {"3c:5a:b4:11:22:05", "Corrupt", "[WEP][ESS]", 5, 2412, 800L},
+            {"3c:5a:b4:11:22:07", "OddBand", null, -70, 2400, 30000L},
+            {"02:00:00:00:00:00", "masked", "[ESS]", -40, 2412, 10L},
+            {"nope", "junk", "[ESS]", -40, 2412, 10L},
+        };
+        List<WifiAp> accessPoints = new ArrayList<>();
+        int droppedScanResults = 0;
+        for (Object[] row : scan) {
+            WifiAp ap = WifiAp.observe((String) row[0], (String) row[1], (String) row[2],
+                    (Integer) row[3], (Integer) row[4], NOW_EPOCH_MS - (Long) row[5]);
+            if (ap == null) {
+                droppedScanResults++;
+            } else {
+                accessPoints.add(ap);
+            }
+        }
+        accessPoints.sort(WifiAp.STRONGEST_FIRST);
+        final int dropped = droppedScanResults;
+        WifiSurveySource wifi = new WifiSurveySource() {
+            @Override
+            public List<WifiAp> accessPoints() {
+                return new ArrayList<>(accessPoints);
+            }
+
+            @Override
+            public String state() {
+                return STATE_ACTIVE;
+            }
+
+            @Override
+            public int dropped() {
+                return dropped;
+            }
+        };
+
         SnapshotSource source = new SnapshotSource() {
             @Override
             public List<Blip> snapshot() {
@@ -205,7 +254,7 @@ public final class ApiSmoke {
             return Files.newInputStream(dashboard);
         };
         ApiHttpServer server = new ApiHttpServer(
-                source, updates, assets, () -> NOW_UPTIME_MS, () -> NOW_EPOCH_MS, control, 0);
+                source, wifi, updates, assets, () -> NOW_UPTIME_MS, () -> NOW_EPOCH_MS, control, 0);
         server.start();
         int port = server.boundPort();
         if (port <= 0) {
@@ -661,6 +710,23 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         200,
         json,
         DEVICES_JSON.as_bytes(),
+    )?;
+    expect(
+        "GET /api/wifi",
+        &get(port, "/api/wifi")?,
+        200,
+        json,
+        WIFI_JSON.as_bytes(),
+    )?;
+    expect(
+        "POST /api/wifi",
+        &http_request(
+            port,
+            b"POST /api/wifi HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n",
+        )?,
+        405,
+        json,
+        METHOD_NOT_ALLOWED_JSON.as_bytes(),
     )?;
     expect(
         "GET /api/status",

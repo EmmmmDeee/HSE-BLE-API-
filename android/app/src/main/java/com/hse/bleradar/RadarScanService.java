@@ -56,6 +56,8 @@ public final class RadarScanService extends Service implements ScanControl {
 
     private final IBinder binder = new LocalBinder();
     private BleScanEngine engine;
+    /** The passive Wi-Fi survey riding the BLE scan: started and stopped with it, never able to fail it. */
+    private WifiScanEngine wifi;
     private ApiHttpServer httpServer;
     /** Whether {@link #promoteToForeground} is in effect (so a pause can refresh the notification). */
     private volatile boolean foreground;
@@ -71,6 +73,19 @@ public final class RadarScanService extends Service implements ScanControl {
      */
     private volatile boolean stopOvertookStart;
 
+    /**
+     * Starts the BLE scan and, only once it is running, the Wi-Fi survey that
+     * rides it. The survey's own start never throws and never changes the
+     * answer: a device that cannot read Wi-Fi still scans BLE.
+     */
+    private boolean startEngines() {
+        boolean started = engine.start();
+        if (started) {
+            wifi.start();
+        }
+        return started;
+    }
+
     /** Binder handed to {@link MainActivity} to reach this service's live state. */
     public final class LocalBinder extends Binder {
         RadarScanService getService() {
@@ -82,9 +97,11 @@ public final class RadarScanService extends Service implements ScanControl {
     public void onCreate() {
         super.onCreate();
         engine = new BleScanEngine(this);
+        wifi = new WifiScanEngine(this);
         createNotificationChannel();
         httpServer = new ApiHttpServer(
                 engine,
+                wifi,
                 new UpdateManager(this),
                 getAssets()::open,
                 SystemClock::uptimeMillis,
@@ -112,7 +129,7 @@ public final class RadarScanService extends Service implements ScanControl {
         // leaves the foreground again at once.
         boolean wanted = !stopOvertookStart;
         stopOvertookStart = false;
-        boolean started = wanted && engine.start();
+        boolean started = wanted && startEngines();
         promoteToForeground(started);
         return START_STICKY;
     }
@@ -133,6 +150,9 @@ public final class RadarScanService extends Service implements ScanControl {
             // apart) must not leave a scan running in this dead instance.
             engine.close();
         }
+        if (wifi != null) {
+            wifi.close();
+        }
         super.onDestroy();
     }
 
@@ -146,13 +166,14 @@ public final class RadarScanService extends Service implements ScanControl {
      */
     boolean startScanning() {
         stopOvertookStart = false;
-        return engine.start();
+        return startEngines();
     }
 
     /** Stops scanning, removes the notification, and leaves the started/foreground state. */
     void stopScanning() {
         stopOvertookStart = true;
         engine.stop();
+        wifi.stop();
         foreground = false;
         stopForeground(Service.STOP_FOREGROUND_REMOVE);
         stopSelf();
@@ -190,7 +211,7 @@ public final class RadarScanService extends Service implements ScanControl {
             Log.w(TAG, "Background start refused; open the app once", restricted);
             return ScanControl.START_BACKGROUND_RESTRICTED;
         }
-        return engine.start() ? ScanControl.START_ACCEPTED : ScanControl.START_UNAVAILABLE;
+        return startEngines() ? ScanControl.START_ACCEPTED : ScanControl.START_UNAVAILABLE;
     }
 
     /**
@@ -203,6 +224,7 @@ public final class RadarScanService extends Service implements ScanControl {
     public void requestStop() {
         stopOvertookStart = true;
         engine.stop();
+        wifi.stop();
         if (foreground) {
             promoteToForeground(false, false);
         }
