@@ -455,7 +455,7 @@ the gate — because until decision #98 every file there was dormant: 2,731
 lines of JUnit-style tests that had never run, 2,091 of them asserting
 literals against themselves. `BlipTest` (the RSSI window, the spread, the
 address-derived angle) and `ReleaseManifestTest` (the manifest contract
-through the real core) remain and run: 64 tests. It needs a JDK; CI's
+through the real core) remain and run: 70 tests. It needs a JDK; CI's
 `gates` job runs it after `verify-api-live`.
 
 ```sh
@@ -543,6 +543,7 @@ cargo xtask build-update-proof     # the current version and its successor on on
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
 cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)
 cargo xtask check-app-version      # the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME, no artifact of another version remains (a gates step)
+cargo xtask release-plan           # the release identity (tag, apk, manifest, version) as key=value lines, after checking the committed APK; what the release workflow reads
 cargo xtask release-manifest [--url <artifact url>] [--out <path>]   # the manifest a release publishes: the committed APK's version, exact size and SHA-256
 cargo xtask audit                  # cargo audit, offline, vendored advisory db
 cargo xtask deny                   # cargo deny check, offline, vendored advisory db
@@ -575,20 +576,15 @@ git rm HSE-BLE-Radar-arm64-v<previous>.apk # one artifact is committed: check-ap
 cargo xtask check-app-version              # the bundled manifest, the artifact's name, no stale artifact (also a `gates` step)
 cargo xtask verify-android-live            # the built version read back; the package's entries reproduced by a second build
 git add HSE-BLE-Radar-arm64-v<version name>.apk
-git tag v<version name>                    # the tag `release-manifest`'s default URL assumes
-cargo xtask release-manifest --out release_manifest.txt   # the APK's exact size and SHA-256
-# 2. merge to main — the `release` workflow publishes the GitHub release itself
+# 2. merge to main — the `release` workflow tags v<version name>, generates the
+#    manifest and publishes the GitHub release itself
 ```
 
 Publishing is automated: once the change is on `main` and `gates` passes, the
-`release` workflow (`.github/workflows/release.yml`) reads the identity with
-`cargo xtask release-plan`, regenerates the manifest, and creates or refreshes
-the `v<version name>` release — marked latest — with the committed APK and
-manifest attached, so a user only ever downloads and installs the APK. It
-re-publishes the exact committed bytes (no rebuild, no re-sign), so no signing
-key or other secret is needed; only the default `GITHUB_TOKEN`. A one-off or
-back-fill publish can be triggered manually from the Actions tab
-(`workflow_dispatch`).
+`release` workflow publishes the committed APK and its manifest as the latest
+`v<version name>` release, so a user only ever downloads and installs the APK
+— see "Publishing" in `docs/AUTO_UPDATE.md` for exactly when it runs and what
+it refuses.
 
 `release-manifest` refuses a non-`https` URL, and `verify-api-live` serves
 the manifest it generates to the real core as the accepted-manifest scenario,

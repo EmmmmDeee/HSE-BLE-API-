@@ -223,8 +223,12 @@ against a stand-in release host on every pull request ("Verifying it"
 below). The steps are listed under "Releasing" in the README.
 
 Publishing is automated so a user only ever installs the APK. The `release`
-workflow (`.github/workflows/release.yml`) runs after `gates` succeeds on
-`main`: it reads the authoritative identity with `cargo xtask release-plan`
+workflow (`.github/workflows/release.yml`) runs after `gates` succeeds on a
+push to this repository's `main` (never for a pull request, even a fork's
+branch named `main`), or when dispatched manually from `main` with `gates`
+already passed on that commit; it publishes only the current tip of `main`
+(a re-run of an older gates run publishes nothing), and refreshing an existing
+release moves its tag to the published commit. It it reads the authoritative identity with `cargo xtask release-plan`
 (tag `v<version>`, the committed APK's name, the manifest filename — the same
 values the build and the artifact URL derive from), generates
 `release_manifest.txt` with `cargo xtask release-manifest`, and creates or

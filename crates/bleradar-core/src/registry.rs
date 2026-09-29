@@ -99,7 +99,7 @@ pub const CAPABILITIES: &[Capability] = &[
         objective: "Decode the BLE advertising payload (AD structures, service UUIDs, manufacturer/service data, iBeacon/Eddystone)",
         strongest_reference: "nRF Connect / Beacon Scanner",
         rust_module: "bleradar_core::adv",
-        runtime_entrypoint: "NativeRadar.advertisementCompanyId/advertisementBeacon",
+        runtime_entrypoint: "NativeRadar.advertisementCompanyId/advertisementBeacon/advertisementManufacturerName/advertisementServices",
         tests: "adv 23 unit tests + adv_campaign (200k-input differential); verify-api-live; verify-android-emulator (company_id/beacon on the runtime)",
         status: Status::Partial,
         residual_gap: "No GATT-level detail, not every beacon format, no competitor head-to-head benchmark",
