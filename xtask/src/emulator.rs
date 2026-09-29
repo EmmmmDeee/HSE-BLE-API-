@@ -372,6 +372,13 @@ pub fn device_row<'a>(devices_json: &'a str, key: &str, value: &str) -> Option<&
     Some(&devices_json[start..=end])
 }
 
+/// The virtual advertiser's row in a `/api/devices` document: its address as
+/// the guest reports it, else the name its advertisement carries.
+fn beacon_row(devices_json: &str) -> Option<&str> {
+    device_row(devices_json, "address", BEACON_ADDRESS)
+        .or_else(|| device_row(devices_json, "name", BEACON_NAME))
+}
+
 /// The port `--hci-port`/`--hci_port` names on netsimd's command line
 /// (`=value` or the next word), if the daemon was started with one.
 pub fn hci_port_argument(command_line: &str) -> Option<u16> {
@@ -1197,11 +1204,7 @@ fn exercise(
             // The bound is judged after the answer (a request retries on
             // its own), so a row that arrived late never passes as on time.
             let after = created.elapsed();
-            // The advertiser's address as the guest reports it, else the
-            // name the advertisement carries.
-            if let Some(row) = device_row(&text, "address", BEACON_ADDRESS)
-                .or_else(|| device_row(&text, "name", BEACON_NAME))
-            {
+            if let Some(row) = beacon_row(&text) {
                 if after <= BEACON_TIMEOUT {
                     listed = Some((row.to_string(), after));
                 }
@@ -1275,13 +1278,11 @@ fn exercise(
             }
             thread::sleep(Duration::from_secs(1));
             let text = body_text(&get(port, "/api/devices")?);
-            if let Some(fresh) = device_row(&text, "address", BEACON_ADDRESS)
-                .or_else(|| device_row(&text, "name", BEACON_NAME))
-            {
+            if let Some(fresh) = beacon_row(&text) {
                 history_row = fresh.to_string();
             }
         };
-        if !history_row.contains("\"visits\":1") {
+        if json_integer(&history_row, "visits") != Some(1) {
             return Err(format!(
                 "the beacon's row is not on its first visit (\"visits\":1): {history_row}"
             ));
@@ -1301,10 +1302,7 @@ fn exercise(
             // error answer or an idle engine has an empty list for other
             // reasons than the freshness policy.
             let observed = response.status == 200 && json_has(&text, "scanning", "true");
-            if observed
-                && device_row(&text, "address", BEACON_ADDRESS).is_none()
-                && device_row(&text, "name", BEACON_NAME).is_none()
-            {
+            if observed && beacon_row(&text).is_none() {
                 if after > PRUNE_TIMEOUT {
                     return Err(format!(
                         "the row was gone only {:.1}s after the beacon's removal (bound {}s)",

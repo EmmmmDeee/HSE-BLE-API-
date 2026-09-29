@@ -495,9 +495,8 @@ mod resolve_tests {
             &[0x180F],
         );
         let m = resolve(&a, &b);
-        assert_eq!(m.verdict, MatchVerdict::PossiblySame, "{m:?}");
         // Never claims certainty from a randomized address.
-        assert_ne!(m.verdict, MatchVerdict::LikelySame);
+        assert_eq!(m.verdict, MatchVerdict::PossiblySame, "{m:?}");
         assert!(!m.supporting.is_empty());
         // And they share a correlation id for grouping.
         assert_eq!(a.evidence.correlation_id(), b.evidence.correlation_id());

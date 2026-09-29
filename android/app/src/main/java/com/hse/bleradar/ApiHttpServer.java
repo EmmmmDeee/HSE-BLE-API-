@@ -380,11 +380,10 @@ public final class ApiHttpServer {
             json.name("beacon").value(advertisement == null ? null : advertisement.beacon);
             json.name("services").value(advertisement == null ? null : advertisement.services);
             json.name("identity_key").value(advertisement == null ? null : advertisement.identityKey);
-            long firstSeen = device.firstSeenEpochMillis;
-            int visits = device.visits;
-            if (firstSeen >= 0 && visits > 0) {
-                json.name("first_seen_ms").value(firstSeen);
-                json.name("visits").value((long) visits);
+            DeviceHistory.Record remembered = device.history;
+            if (remembered != null) {
+                json.name("first_seen_ms").value(remembered.firstSeenEpochMillis);
+                json.name("visits").value((long) remembered.visits);
             } else {
                 json.name("first_seen_ms").value((String) null);
                 json.name("visits").value((String) null);

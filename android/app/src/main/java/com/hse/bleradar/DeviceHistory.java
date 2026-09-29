@@ -6,10 +6,10 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -42,6 +42,13 @@ final class DeviceHistory {
     private static final long NEW_DEVICE_FLUSH_INTERVAL_MILLIS = 1_000L;
     /** A history larger than this on disk is not read (the Rust bound keeps it far smaller). */
     private static final int MAX_FILE_BYTES = 1024 * 1024;
+    /**
+     * The most records kept in memory: the Rust store's own bound
+     * ({@code bleradar_core::history::MAX_ENTRIES}), so a scan that runs for
+     * days cannot grow this cache without limit. An evicted device is simply
+     * new again on its next sighting; the Rust document stays authoritative.
+     */
+    static final int MAX_KNOWN = 2048;
 
     /** What the history remembers about one device. */
     static final class Record {
@@ -55,7 +62,13 @@ final class DeviceHistory {
     }
 
     private final File file;
-    private final Map<String, Record> known = new ConcurrentHashMap<>();
+    /** Access-ordered, least recently used evicted; guarded by {@code this}. */
+    private final Map<String, Record> known = new LinkedHashMap<String, Record>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Record> eldest) {
+            return size() > MAX_KNOWN;
+        }
+    };
     private final Set<String> pending = new LinkedHashSet<>();
     private String state;
     /** Whether {@link #pending} holds a device not yet known this session. */
@@ -90,7 +103,7 @@ final class DeviceHistory {
     }
 
     /** What is remembered about {@code key}, or {@code null}. */
-    Record lookup(String key) {
+    synchronized Record lookup(String key) {
         return key == null ? null : known.get(key);
     }
 

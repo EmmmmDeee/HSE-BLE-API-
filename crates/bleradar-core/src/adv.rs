@@ -25,6 +25,9 @@
 //!   data `0x004C`, type `0x02` len `0x15`) and **Eddystone** (service data
 //!   under UUID `0xFEAA`: UID / URL / TLM frames)
 //!
+//! A single-valued AD type (flags, a local name, TX power, appearance) that
+//! appears more than once is last-wins: the later structure's value is kept.
+//!
 //! Everything the parser does not fully decode is still surfaced: an unmodelled
 //! AD type is recorded in `unknown_types`; a modelled AD type whose payload is
 //! too short for its format (so it produced no field) is recorded in
@@ -145,8 +148,8 @@ pub enum Beacon {
 }
 
 impl Beacon {
-    /// A stable short label for the beacon kind, or `None` — used by the live
-    /// summary surface.
+    /// A stable short label for the beacon kind — used by the live summary
+    /// surface. Every recognised beacon has one.
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
@@ -531,7 +534,50 @@ pub fn summary_beacon(report: &AdvReport) -> Option<&'static str> {
 
 /// The version of the bundled company-identifier table below, bumped whenever an
 /// entry changes so a stored name records which ruleset produced it.
-pub const COMPANY_TABLE_VERSION: u32 = 1;
+pub const COMPANY_TABLE_VERSION: u32 = 2;
+
+/// (id, name), strictly ascending by id — a test pins every row and the order,
+/// checked against the Bluetooth SIG `company_identifiers.yaml`.
+const COMPANIES: &[(u16, &str)] = &[
+    (0x0001, "Nokia Mobile Phones"),
+    (0x0002, "Intel"),
+    (0x0006, "Microsoft"),
+    (0x000A, "Qualcomm"),
+    (0x000D, "Texas Instruments"),
+    (0x000F, "Broadcom"),
+    (0x001D, "Qualcomm"),
+    (0x0025, "NXP"),
+    (0x0030, "ST Microelectronics"),
+    (0x0031, "Synopsys"),
+    (0x004C, "Apple"),
+    (0x0056, "Sony Ericsson"),
+    (0x0057, "Harman International"),
+    (0x0059, "Nordic Semiconductor"),
+    (0x0065, "Hewlett-Packard"),
+    (0x0075, "Samsung Electronics"),
+    (0x0078, "Nike"),
+    (0x0087, "Garmin International"),
+    (0x008A, "Jawbone"),
+    (0x009E, "Bose"),
+    (0x00C3, "adidas"),
+    (0x00C4, "LG Electronics"),
+    (0x00D0, "Dexcom"),
+    (0x00D2, "Renesas (Dialog Semiconductor)"),
+    (0x00E0, "Google"),
+    (0x0100, "TomTom"),
+    (0x0103, "Bang & Olufsen"),
+    (0x0118, "Radius Networks"),
+    (0x012D, "Sony"),
+    (0x0131, "Cypress Semiconductor"),
+    (0x0157, "Anhui Huami (Amazfit)"),
+    (0x0171, "Amazon"),
+    (0x01AB, "Meta Platforms"),
+    (0x02E5, "Espressif"),
+    (0x038F, "Xiaomi"),
+    (0x0499, "Ruuvi Innovations"),
+    (0x05A7, "Sonos"),
+    (0x08AA, "DJI"),
+];
 
 /// The Bluetooth SIG assignee name for a 16-bit company identifier, for the
 /// well-known assignees, or `None` — unknown stays unknown (the caller then
@@ -542,50 +588,6 @@ pub const COMPANY_TABLE_VERSION: u32 = 1;
 /// the lookup is a binary search and the table is auditable.
 #[must_use]
 pub fn company_name(company_id: u16) -> Option<&'static str> {
-    // (id, name), ascending by id — keep sorted; a test asserts the ordering.
-    const COMPANIES: &[(u16, &str)] = &[
-        (0x0001, "Nokia Mobile Phones"),
-        (0x0002, "Intel"),
-        (0x0006, "Microsoft"),
-        (0x000A, "Qualcomm"),
-        (0x000D, "Texas Instruments"),
-        (0x000F, "Broadcom"),
-        (0x001D, "Qualcomm"),
-        (0x0025, "NXP"),
-        (0x002D, "Synopsys"),
-        (0x0030, "ST Microelectronics"),
-        (0x004C, "Apple"),
-        (0x0056, "Sony Ericsson"),
-        (0x0057, "Harman International"),
-        (0x0059, "Nordic Semiconductor"),
-        (0x0065, "Hewlett-Packard"),
-        (0x0075, "Samsung Electronics"),
-        (0x0078, "Nike"),
-        (0x0087, "Garmin International"),
-        (0x008A, "Jawbone"),
-        (0x009E, "Bose"),
-        (0x00C4, "LG Electronics"),
-        (0x00D2, "Ericsson Technology Licensing"),
-        (0x00E0, "Google"),
-        (0x0110, "TomTom"),
-        (0x0118, "Xiaomi"),
-        (0x012D, "Sony"),
-        (0x0131, "Cypress Semiconductor"),
-        (0x0157, "Anhui Huami (Amazfit)"),
-        (0x0171, "Amazon"),
-        (0x0180, "Dexcom"),
-        (0x01A9, "Espressif"),
-        (0x01D7, "X(Twitter)"),
-        (0x0201, "Bang & Olufsen"),
-        (0x0244, "Meta Platforms (Facebook)"),
-        (0x02E5, "Espressif"),
-        (0x0349, "Fitbit"),
-        (0x03DA, "Ruuvi Innovations"),
-        (0x0499, "Ruuvi Innovations"),
-        (0x05A7, "Sonos"),
-        (0x0644, "DJI"),
-        (0x0822, "Adidas"),
-    ];
     COMPANIES
         .binary_search_by_key(&company_id, |&(id, _)| id)
         .ok()
@@ -615,42 +617,6 @@ pub fn service_uuid_name(uuid: &Uuid) -> Option<&'static str> {
     let Uuid::U16(id) = uuid else {
         return None;
     };
-    // (id, name), ascending by id — keep sorted; a test asserts the ordering.
-    const SERVICES: &[(u16, &str)] = &[
-        (0x1800, "Generic Access"),
-        (0x1801, "Generic Attribute"),
-        (0x1802, "Immediate Alert"),
-        (0x1803, "Link Loss"),
-        (0x1804, "Tx Power"),
-        (0x1805, "Current Time"),
-        (0x1808, "Glucose"),
-        (0x1809, "Health Thermometer"),
-        (0x180A, "Device Information"),
-        (0x180D, "Heart Rate"),
-        (0x180F, "Battery"),
-        (0x1810, "Blood Pressure"),
-        (0x1811, "Alert Notification"),
-        (0x1812, "Human Interface Device"),
-        (0x1813, "Scan Parameters"),
-        (0x1814, "Running Speed and Cadence"),
-        (0x1816, "Cycling Speed and Cadence"),
-        (0x1818, "Cycling Power"),
-        (0x1819, "Location and Navigation"),
-        (0x181A, "Environmental Sensing"),
-        (0x181B, "Body Composition"),
-        (0x181D, "Weight Scale"),
-        (0x181F, "Continuous Glucose Monitoring"),
-        (0x1826, "Fitness Machine"),
-        (0x1827, "Mesh Provisioning"),
-        (0x1828, "Mesh Proxy"),
-        (0x183A, "Insulin Delivery"),
-        (0xFE9F, "Google"),
-        (0xFEAA, "Eddystone"),
-        (0xFEED, "Tile"),
-        (0xFEF3, "Google"),
-        (0xFD5A, "Samsung Electronics"),
-        (0xFD6F, "Exposure Notification"),
-    ];
     SERVICES
         .binary_search_by_key(id, |&(id, _)| id)
         .ok()
@@ -658,7 +624,45 @@ pub fn service_uuid_name(uuid: &Uuid) -> Option<&'static str> {
 }
 
 /// The version of the bundled service-UUID table, bumped when an entry changes.
-pub const SERVICE_TABLE_VERSION: u32 = 1;
+pub const SERVICE_TABLE_VERSION: u32 = 2;
+
+/// (id, name), strictly ascending by id — a test asserts the ordering and that
+/// every row is reachable through [`service_uuid_name`].
+const SERVICES: &[(u16, &str)] = &[
+    (0x1800, "Generic Access"),
+    (0x1801, "Generic Attribute"),
+    (0x1802, "Immediate Alert"),
+    (0x1803, "Link Loss"),
+    (0x1804, "Tx Power"),
+    (0x1805, "Current Time"),
+    (0x1808, "Glucose"),
+    (0x1809, "Health Thermometer"),
+    (0x180A, "Device Information"),
+    (0x180D, "Heart Rate"),
+    (0x180F, "Battery"),
+    (0x1810, "Blood Pressure"),
+    (0x1811, "Alert Notification"),
+    (0x1812, "Human Interface Device"),
+    (0x1813, "Scan Parameters"),
+    (0x1814, "Running Speed and Cadence"),
+    (0x1816, "Cycling Speed and Cadence"),
+    (0x1818, "Cycling Power"),
+    (0x1819, "Location and Navigation"),
+    (0x181A, "Environmental Sensing"),
+    (0x181B, "Body Composition"),
+    (0x181D, "Weight Scale"),
+    (0x181F, "Continuous Glucose Monitoring"),
+    (0x1826, "Fitness Machine"),
+    (0x1827, "Mesh Provisioning"),
+    (0x1828, "Mesh Proxy"),
+    (0x183A, "Insulin Delivery"),
+    (0xFD5A, "Samsung Electronics"),
+    (0xFD6F, "Exposure Notification"),
+    (0xFE9F, "Google"),
+    (0xFEAA, "Eddystone"),
+    (0xFEED, "Tile"),
+    (0xFEF3, "Google"),
+];
 
 /// The names of the advertisement's well-known services, in the order the UUIDs
 /// appear, without duplicates — the live "what does this device do" summary. An
@@ -1008,16 +1012,63 @@ mod tests {
 
     #[test]
     fn company_table_is_sorted_and_resolves_known_ids() {
-        // The table must stay sorted for the binary search to be correct.
-        let mut prev = None;
-        for id in 0u16..=u16::MAX {
-            if let Some(name) = company_name(id) {
-                assert!(!name.is_empty());
-                if let Some(p) = prev {
-                    assert!(id > p, "company table not strictly ascending at {id:#06x}");
-                }
-                prev = Some(id);
-            }
+        // The table must stay strictly ascending for the binary search, and
+        // every row must be reachable through the lookup.
+        assert!(
+            COMPANIES.windows(2).all(|w| w[0].0 < w[1].0),
+            "company table not strictly ascending"
+        );
+        for &(id, name) in COMPANIES {
+            assert!(!name.is_empty());
+            assert_eq!(company_name(id), Some(name), "{id:#06x} unreachable");
+        }
+        // Every row pinned against the SIG registry (company_identifiers.yaml).
+        let pinned: &[(u16, &str)] = &[
+            (0x0001, "Nokia Mobile Phones"),
+            (0x0002, "Intel"),
+            (0x0006, "Microsoft"),
+            (0x000A, "Qualcomm"),
+            (0x000D, "Texas Instruments"),
+            (0x000F, "Broadcom"),
+            (0x001D, "Qualcomm"),
+            (0x0025, "NXP"),
+            (0x0030, "ST Microelectronics"),
+            (0x0031, "Synopsys"),
+            (0x004C, "Apple"),
+            (0x0056, "Sony Ericsson"),
+            (0x0057, "Harman International"),
+            (0x0059, "Nordic Semiconductor"),
+            (0x0065, "Hewlett-Packard"),
+            (0x0075, "Samsung Electronics"),
+            (0x0078, "Nike"),
+            (0x0087, "Garmin International"),
+            (0x008A, "Jawbone"),
+            (0x009E, "Bose"),
+            (0x00C3, "adidas"),
+            (0x00C4, "LG Electronics"),
+            (0x00D0, "Dexcom"),
+            (0x00D2, "Renesas (Dialog Semiconductor)"),
+            (0x00E0, "Google"),
+            (0x0100, "TomTom"),
+            (0x0103, "Bang & Olufsen"),
+            (0x0118, "Radius Networks"),
+            (0x012D, "Sony"),
+            (0x0131, "Cypress Semiconductor"),
+            (0x0157, "Anhui Huami (Amazfit)"),
+            (0x0171, "Amazon"),
+            (0x01AB, "Meta Platforms"),
+            (0x02E5, "Espressif"),
+            (0x038F, "Xiaomi"),
+            (0x0499, "Ruuvi Innovations"),
+            (0x05A7, "Sonos"),
+            (0x08AA, "DJI"),
+        ];
+        assert_eq!(COMPANIES, pinned);
+        // Ids table version 1 attributed to the wrong assignee now stay unknown.
+        for id in [
+            0x002D, 0x0110, 0x0180, 0x01A9, 0x01D7, 0x0201, 0x0244, 0x0349, 0x03DA, 0x0644, 0x0822,
+        ] {
+            assert_eq!(company_name(id), None, "{id:#06x}");
         }
         assert_eq!(company_name(0x004C), Some("Apple"));
         assert_eq!(company_name(0x0006), Some("Microsoft"));
@@ -1029,16 +1080,27 @@ mod tests {
 
     #[test]
     fn service_table_is_sorted_and_names_known_services() {
-        let mut prev = None;
-        for id in 0u16..=u16::MAX {
-            if let Some(name) = service_uuid_name(&Uuid::U16(id)) {
-                assert!(!name.is_empty());
-                if let Some(p) = prev {
-                    assert!(id > p, "service table not strictly ascending at {id:#06x}");
-                }
-                prev = Some(id);
-            }
+        assert!(
+            SERVICES.windows(2).all(|w| w[0].0 < w[1].0),
+            "service table not strictly ascending"
+        );
+        for &(id, name) in SERVICES {
+            assert!(!name.is_empty());
+            assert_eq!(
+                service_uuid_name(&Uuid::U16(id)),
+                Some(name),
+                "{id:#06x} unreachable"
+            );
         }
+        assert_eq!(
+            service_uuid_name(&Uuid::U16(0xFD6F)),
+            Some("Exposure Notification")
+        );
+        assert_eq!(
+            service_uuid_name(&Uuid::U16(0xFD5A)),
+            Some("Samsung Electronics")
+        );
+        assert_eq!(service_uuid_name(&Uuid::U16(0xFEF3)), Some("Google"));
         assert_eq!(service_uuid_name(&Uuid::U16(0x180D)), Some("Heart Rate"));
         assert_eq!(service_uuid_name(&Uuid::U16(0x180F)), Some("Battery"));
         assert_eq!(service_uuid_name(&Uuid::U16(0xFEAA)), Some("Eddystone"));
@@ -1046,6 +1108,12 @@ mod tests {
         // 32/128-bit UUIDs are not named here.
         assert_eq!(service_uuid_name(&Uuid::U32(0x180D)), None);
         assert_eq!(service_uuid_name(&Uuid::U128([0; 16])), None);
+    }
+
+    #[test]
+    fn repeated_singleton_ad_type_is_last_wins() {
+        let r = decode(&[0x02, 0x01, 0x06, 0x02, 0x01, 0x1A]);
+        assert_eq!(r.flags, Some(0x1A));
     }
 
     #[test]

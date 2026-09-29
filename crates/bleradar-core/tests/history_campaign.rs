@@ -12,9 +12,10 @@
 //! * **record invariants** — `visits ≥ 1` and `first_seen ≤ last_seen`;
 //! * **round trip** — `parse(serialize(h)) == h`, and re-serializing is a
 //!   fixed point;
-//! * **corruption is contained** — parsing a damaged document never panics,
-//!   never yields a record that violates the invariants, and never invents a
-//!   key the original did not hold.
+//! * **corruption is contained** — parsing a damaged document never panics
+//!   and never yields a record that violates the invariants. (The format has
+//!   no checksum: a substituted hex digit is a different, valid public key,
+//!   so the damaged key set is deliberately not compared with the original.)
 //!
 //! `BLERADAR_HISTORY_CAMPAIGN_STEPS` scales the run.
 
@@ -183,8 +184,8 @@ fn the_reference_catches_a_visit_count_mutant() {
     let key = "3c:5a:b4:11:22:01";
     reference_observe(&mut model, key, 0);
     reference_observe(&mut model, key, 1);
-    let mutant_visits = 2; // a mutant counting sightings
-    assert_ne!(model[key].visits, mutant_visits);
+    // One visit, where a mutant counting sightings would say two.
+    assert_eq!(model[key].visits, 1);
     let mut h = History::new();
     h.observe(key, 0);
     h.observe(key, 1);

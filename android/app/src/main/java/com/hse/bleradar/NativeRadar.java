@@ -20,13 +20,14 @@ package com.hse.bleradar;
  * to the OS {@code PackageInstaller} remain the platform boundary — see
  * {@code docs/AUTO_UPDATE.md}.
  *
- * <p>Since ABI 10 the façade also carries the string bridge:
+ * <p>Since ABI 10 the façade also carries the string bridge: first
  * {@link #releaseManifestCanonical}, {@link #releaseManifestError},
- * {@link #releaseManifestField} and {@link #artifactVerifyFile} are the only
- * natives that take or return objects. The Rust side reads them through the
- * audited {@code env} module of {@code crates/bleradar-jni}, so release-manifest
- * validation and artifact integrity are decided by the verified core as well;
- * a {@code null} argument always yields the documented "invalid" answer.
+ * {@link #releaseManifestField} and {@link #artifactVerifyFile}, then (ABI
+ * 12–17) the address, advertisement, group-key and history natives. The Rust
+ * side reads every object argument through the audited {@code env} module of
+ * {@code crates/bleradar-jni}, so those decisions are the verified core's too;
+ * a {@code null} argument never crashes and yields each native's documented
+ * answer.
  */
 public final class NativeRadar {
 
@@ -466,10 +467,10 @@ public final class NativeRadar {
      * The canonical form of a release manifest the Rust update core accepts
      * ({@code bleradar_core::update::ReleaseManifest::parse} then
      * {@code serialize}), or {@code null} when {@code text} is {@code null} or
-     * rejected. The four natives below are the only ones that take or return
-     * objects; they cross the boundary through the audited string bridge in
+     * rejected. It and the three manifest/artifact natives below cross the
+     * boundary through the audited string bridge in
      * {@code crates/bleradar-jni/src/env.rs}, and a {@code null} argument is
-     * always answered with the documented "invalid" sentinel, never a crash.
+     * answered with the documented "invalid" sentinel, never a crash.
      */
     public static native String releaseManifestCanonical(String text);
 

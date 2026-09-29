@@ -409,6 +409,24 @@ fn address_trackability_ordinals_match_documented_mapping() {
 }
 
 #[test]
+fn address_trackability_export_answers_through_the_string_bridge() {
+    use bleradar_jni::Java_com_hse_bleradar_NativeRadar_deviceAddressTrackability as classify;
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let hardware = mock.string("a4:c1:38:00:11:22");
+    assert_eq!(classify(env, null, hardware), 0);
+    assert_eq!(classify(env, null, mock.string("02:11:22:33:44:55")), 1);
+    assert_eq!(classify(env, null, mock.string("not-a-mac")), 2);
+    // A null MAC, an unpaired surrogate and a null env are Unknown (2), never
+    // Trackable: an address the bridge cannot read is never assumed followable,
+    // so it never reaches the device history.
+    assert_eq!(classify(env, null, null), 2);
+    assert_eq!(classify(env, null, mock.string_units(&[0xD800])), 2);
+    assert_eq!(classify(null, null, hardware), 2);
+}
+
+#[test]
 fn signal_trend_ordinals_match_documented_mapping() {
     assert_eq!(signal_trend_ordinal(-80.0, -60.0, 3.0), 0); // Stronger
     assert_eq!(signal_trend_ordinal(-60.0, -80.0, 3.0), 1); // Weaker

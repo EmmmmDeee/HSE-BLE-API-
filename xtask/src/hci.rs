@@ -224,7 +224,7 @@ pub fn advertising_data(name: &str, company_id: u16, payload: &[u8]) -> Result<V
     let mut parameters = Vec::with_capacity(1 + ADVERTISING_DATA_LEN);
     parameters.push(significant as u8); // fits: at most 31
     parameters.extend_from_slice(&[0x02, 0x01, 0x06]); // Flags
-    parameters.push(name.len() as u8 + 1); // fits: at most 22
+    parameters.push(name.len() as u8 + 1); // fits: at most 23
     parameters.push(0x09); // Complete Local Name
     parameters.extend_from_slice(name);
     parameters.push(payload.len() as u8 + 3); // type + company id + payload; fits

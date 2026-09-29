@@ -69,22 +69,36 @@ final class Blip {
          */
         final String identityKey;
 
-        AdvSummary(String companyId, String beacon, String manufacturer, String services, String identityKey) {
+        private AdvSummary(String companyId, String beacon, String manufacturer, String services, String identityKey) {
             this.companyId = companyId;
             this.beacon = beacon;
             this.manufacturer = manufacturer;
             this.services = services;
             this.identityKey = identityKey;
         }
+
+        /**
+         * Decodes one advertising payload of the device at {@code address}
+         * through the Rust natives — the single construction path, shared by
+         * {@link BleScanEngine} and the verify-api-live harness.
+         */
+        static AdvSummary decode(String address, String advertisementHex) {
+            return new AdvSummary(
+                    NativeRadar.advertisementCompanyId(advertisementHex),
+                    NativeRadar.advertisementBeacon(advertisementHex),
+                    NativeRadar.advertisementManufacturerName(advertisementHex),
+                    NativeRadar.advertisementServices(advertisementHex),
+                    NativeRadar.deviceGroupKey(address, advertisementHex));
+        }
     }
     /**
-     * Wall-clock time this device was first seen, across every session the
-     * persistent {@link DeviceHistory} remembers, or {@code -1} when it is not
-     * remembered (a randomized address, or no native core).
+     * What the persistent {@link DeviceHistory} remembers about this device
+     * across sessions (first seen, visits), or {@code null} when it is not
+     * remembered (a randomized address, or no native core). Published as one
+     * immutable record, like {@link #advertisement}, so a reader never sees a
+     * first-seen time from one lookup beside a visit count from another.
      */
-    volatile long firstSeenEpochMillis = -1L;
-    /** Separate visits the history remembers, or {@code 0} when not remembered. */
-    volatile int visits;
+    volatile DeviceHistory.Record history;
     volatile long lastSeenUptimeMillis;
     /**
      * Most recently observed device-advertised TX power in dBm, or

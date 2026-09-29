@@ -30,9 +30,10 @@
 //! Rust's 2024-edition "unsafe attributes" lint classifies the
 //! `#[unsafe(no_mangle)]` attribute itself (needed to export a stable,
 //! unmangled C-ABI symbol name that the JVM's dynamic linker can resolve by
-//! its `Java_...` convention) as unsafe code. The four string-taking exports
-//! of the release-manifest / artifact surface are the one exception: they
-//! read through `env`, and only through the audited [`env`](mod@env) module, which
+//! its `Java_...` convention) as unsafe code. Every export taking or
+//! returning a `String` (the release-manifest / artifact, BLE address /
+//! advertisement / grouping and device-history surfaces) is the one exception:
+//! it reads through `env`, and only through the audited [`env`](mod@env) module, which
 //! calls exactly four specification-fixed slots of the JNI function table to
 //! copy a `jstring` in and a result out. `crates/bleradar-jni/Cargo.toml`
 //! documents this narrowing; see `docs/AUTONOMOUS_DECISIONS.md` (#54, #87)

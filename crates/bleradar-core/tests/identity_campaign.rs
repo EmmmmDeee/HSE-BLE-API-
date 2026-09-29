@@ -8,19 +8,19 @@
 //! * **no panic** on any input;
 //! * **symmetry** — the verdict does not depend on argument order;
 //! * **reflexivity** — an identity never reads as `LikelyDifferent` from itself;
-//! * **verdict/evidence coherence** — a non-empty contradiction set means
-//!   `LikelyDifferent`, and a `PossiblySame`/`LikelySame` verdict carries no
-//!   contradictions;
+//! * **verdict/evidence coherence** — `LikelyDifferent` if and only if the
+//!   contradiction set is non-empty (every "different" verdict records why);
 //! * **never certain from a randomized address** — `LikelySame` requires both
 //!   addresses to be the same public (globally administered) address;
 //! * **correlation implies correlation** — two identities that share a non-`None`
 //!   correlation id are at least `PossiblySame`, never different or insufficient.
 //!
-//! The falsification test at the end shows a mutated resolver (one that returns
-//! `LikelySame` for a matching randomized pair) is caught.
+//! The falsification test at the end forges a mutant's `LikelySame` verdict for
+//! a matching randomized pair and shows the invariant checker rejects it.
 
 use bleradar_core::{
-    AddressKind, DeviceIdentity, IdentityEvidence, MatchVerdict, adv, canonical_mac, resolve,
+    AddressKind, DeviceIdentity, IdentityEvidence, IdentityMatch, MatchVerdict, adv, canonical_mac,
+    resolve,
 };
 
 struct Rng(u64);
@@ -106,33 +106,32 @@ fn make(rng: &mut Rng) -> DeviceIdentity {
 }
 
 fn check_pair(a: &DeviceIdentity, b: &DeviceIdentity) -> Result<(), String> {
-    let ab = resolve(a, b);
-    let ba = resolve(b, a);
+    check_match(a, b, &resolve(a, b), &resolve(b, a), resolve(a, a).verdict)
+}
 
+/// Every invariant over the verdicts `ab`, `ba` and `self_match` a resolver
+/// gave for `a`/`b` — separate from [`resolve`] so a forged (mutant) verdict
+/// can be shown to fail it.
+fn check_match(
+    a: &DeviceIdentity,
+    b: &DeviceIdentity,
+    ab: &IdentityMatch,
+    ba: &IdentityMatch,
+    self_match: MatchVerdict,
+) -> Result<(), String> {
     if ab.verdict != ba.verdict {
         return Err(format!(
             "asymmetric: {:?} vs {:?}\n  a={a:?}\n  b={b:?}",
             ab.verdict, ba.verdict
         ));
     }
-    // Verdict/evidence coherence.
+    // Verdict/evidence coherence, both directions: every LikelyDifferent
+    // records why (a field contradiction or different public addresses).
     if ab.contradictions.is_empty() == (ab.verdict == MatchVerdict::LikelyDifferent) {
-        // LikelyDifferent may also come from two different public addresses with
-        // no field contradictions, so only assert one direction: a non-empty
-        // contradiction set must be LikelyDifferent.
-    }
-    if !ab.contradictions.is_empty() && ab.verdict != MatchVerdict::LikelyDifferent {
         return Err(format!(
-            "contradictions but verdict {:?}: {ab:?}",
+            "verdict {:?} incoherent with contradictions: {ab:?}",
             ab.verdict
         ));
-    }
-    if matches!(
-        ab.verdict,
-        MatchVerdict::PossiblySame | MatchVerdict::LikelySame
-    ) && !ab.contradictions.is_empty()
-    {
-        return Err(format!("match verdict with contradictions: {ab:?}"));
     }
     // Never certain from a randomized address.
     if ab.verdict == MatchVerdict::LikelySame
@@ -163,7 +162,6 @@ fn check_pair(a: &DeviceIdentity, b: &DeviceIdentity) -> Result<(), String> {
         }
     }
     // Reflexivity: an identity is never different from itself.
-    let self_match = resolve(a, a).verdict;
     if self_match == MatchVerdict::LikelyDifferent {
         return Err(format!("identity differs from itself: {a:?}"));
     }
@@ -220,7 +218,19 @@ fn falsification_certainty_from_a_randomized_address_is_caught() {
     let b = DeviceIdentity::new("7e:aa:bb:cc:dd:ee", ev).unwrap();
     assert_eq!(resolve(&a, &b).verdict, MatchVerdict::PossiblySame);
     check_pair(&a, &b).expect("the honest verdict passes the invariants");
-    // The invariant that would catch a mutant: a LikelySame here has no shared
-    // public address, so check_pair would reject it.
-    assert_ne!(resolve(&a, &b).verdict, MatchVerdict::LikelySame);
+    let self_match = resolve(&a, &a).verdict;
+    let forged = IdentityMatch {
+        verdict: MatchVerdict::LikelySame,
+        ..resolve(&a, &b)
+    };
+    let err = check_match(&a, &b, &forged, &forged, self_match)
+        .expect_err("a mutant's LikelySame from randomized addresses is rejected");
+    assert!(
+        err.contains("LikelySame without a shared public address"),
+        "{err}"
+    );
+    // A mutant whose verdict depends on argument order is rejected too.
+    let err = check_match(&a, &b, &resolve(&a, &b), &forged, self_match)
+        .expect_err("an asymmetric mutant is rejected");
+    assert!(err.starts_with("asymmetric"), "{err}");
 }

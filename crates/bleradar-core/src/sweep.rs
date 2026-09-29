@@ -107,10 +107,14 @@ pub fn wifi_channel(frequency_mhz: Option<i64>) -> Option<u16> {
 }
 
 /// The coarse RSSI proximity band for a Wi-Fi reading — an honest signal-strength
-/// bucket, never a fabricated distance. `None` when no RSSI was reported.
+/// bucket, never a fabricated distance. `None` when no RSSI was reported or the
+/// reading is not a received power at all (positive, e.g. Android's
+/// [`ANDROID_UNAVAILABLE`] sentinel), rather than banding it as the closest.
 #[must_use]
 pub fn wifi_proximity(rssi_dbm: Option<i64>) -> Option<ProximityBand> {
-    rssi_dbm.and_then(|r| proximity_label(r as f64))
+    rssi_dbm
+        .filter(|&r| r <= 0)
+        .and_then(|r| proximity_label(r as f64))
 }
 
 /// The radio a cell record was seen on, which decides the key its identity lives
@@ -257,6 +261,9 @@ mod tests {
     fn wifi_proximity_absent_without_rssi() {
         assert!(wifi_proximity(None).is_none());
         assert!(wifi_proximity(Some(-40)).is_some());
+        assert_eq!(wifi_proximity(Some(10)), None);
+        assert_eq!(wifi_proximity(Some(ANDROID_UNAVAILABLE)), None);
+        assert_eq!(wifi_proximity(Some(0)), Some(ProximityBand::Immediate));
     }
 
     #[test]

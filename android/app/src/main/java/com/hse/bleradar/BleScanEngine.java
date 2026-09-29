@@ -255,12 +255,7 @@ final class BleScanEngine implements SnapshotSource {
         if (NativeRadar.isAvailable() && advertisement != null) {
             String advertisementHex = hex(advertisement);
             if (!advertisementHex.equals(blip.lastAdvertisementHex)) {
-                blip.advertisement = new Blip.AdvSummary(
-                        NativeRadar.advertisementCompanyId(advertisementHex),
-                        NativeRadar.advertisementBeacon(advertisementHex),
-                        NativeRadar.advertisementManufacturerName(advertisementHex),
-                        NativeRadar.advertisementServices(advertisementHex),
-                        NativeRadar.deviceGroupKey(address, advertisementHex));
+                blip.advertisement = Blip.AdvSummary.decode(address, advertisementHex);
                 blip.lastAdvertisementHex = advertisementHex;
             }
         }
@@ -372,11 +367,9 @@ final class BleScanEngine implements SnapshotSource {
 
     /** Copies what the persistent history remembers onto {@code blip}. */
     private void applyHistory(Blip blip) {
-        DeviceHistory.Record record = blip.trackability == NativeRadar.TRACKABILITY_TRACKABLE
+        blip.history = blip.trackability == NativeRadar.TRACKABILITY_TRACKABLE
                 ? history.lookup(blip.address.toLowerCase(Locale.ROOT))
                 : null;
-        blip.firstSeenEpochMillis = record == null ? -1L : record.firstSeenEpochMillis;
-        blip.visits = record == null ? 0 : record.visits;
     }
 
     private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();

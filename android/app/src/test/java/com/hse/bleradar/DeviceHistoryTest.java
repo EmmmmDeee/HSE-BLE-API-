@@ -20,9 +20,21 @@ public class DeviceHistoryTest {
     private static final String PUBLIC_KEY = "3c:5a:b4:11:22:01";
     private static final String RANDOMIZED_KEY = "aa:bb:cc:dd:ee:02";
 
+    /**
+     * A fresh directory, removed with the history in it when the JVM exits —
+     * {@code deleteOnExit} alone cannot, as the directory is never empty then.
+     */
     private static File freshDirectory() throws IOException {
         File dir = Files.createTempDirectory("device-history").toFile();
-        dir.deleteOnExit();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            File[] files = dir.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    file.delete();
+                }
+            }
+            dir.delete();
+        }));
         return dir;
     }
 

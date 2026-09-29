@@ -235,15 +235,10 @@ public final class ApiSmoke {
         // Rust bleradar_core::address_trackability), the same call the live
         // BleScanEngine makes.
         blip.trackability = NativeRadar.deviceAddressTrackability(address);
-        // The same two natives BleScanEngine calls on a live ScanRecord,
-        // published as one object exactly as the engine does.
+        // The same Blip.AdvSummary.decode BleScanEngine calls on a live
+        // ScanRecord, published as one object exactly as the engine does.
         if (advertisementHex != null) {
-            blip.advertisement = new Blip.AdvSummary(
-                    NativeRadar.advertisementCompanyId(advertisementHex),
-                    NativeRadar.advertisementBeacon(advertisementHex),
-                    NativeRadar.advertisementManufacturerName(advertisementHex),
-                    NativeRadar.advertisementServices(advertisementHex),
-                    NativeRadar.deviceGroupKey(address, advertisementHex));
+            blip.advertisement = Blip.AdvSummary.decode(address, advertisementHex);
         }
         // The persistent history through the real natives and the app's own
         // row parser: two sessions an hour apart (past the visit gap), so a
@@ -255,8 +250,7 @@ public final class ApiSmoke {
             state = NativeRadar.historyMerge(state, key, HISTORY_FIRST_SEEN_MS + 3_600_000L);
             DeviceHistory.Record record = DeviceHistory.parseRow(
                     NativeRadar.historyLookup(state, key).split("\n", -1)[0]);
-            blip.firstSeenEpochMillis = record.firstSeenEpochMillis;
-            blip.visits = record.visits;
+            blip.history = record;
         }
         blip.trend = trend;
         blip.freshness = freshness;

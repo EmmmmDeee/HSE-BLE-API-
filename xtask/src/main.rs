@@ -2257,7 +2257,10 @@ struct ApkVersion {
 /// Where `build-update-proof` writes and `verify-android-emulator` reads the
 /// upgrade proof's packages; under `target/`, never committed.
 const UPDATE_PROOF_DIR: &str = "target/android-apk/proof";
-/// The successor's release manifest, beside its package.
+/// The filename the release manifest is published under, both as the bundled
+/// asset (`assets/release_manifest.txt`) and as the release asset the app
+/// fetches from `releases/latest/download/`. One name, one authority
+/// (the update proof writes the successor's beside its package).
 const UPDATE_PROOF_MANIFEST_FILE: &str = "release_manifest.txt";
 
 /// The version the upgrade proof offers the installed app: the next code
@@ -3143,18 +3146,13 @@ fn release_manifest_text_for(
     )
 }
 
-/// The filename the release manifest is published under, both as the bundled
-/// asset (`assets/release_manifest.txt`) and as the release asset the app
-/// fetches from `releases/latest/download/`. One name, one authority.
-const RELEASE_MANIFEST_FILENAME: &str = "release_manifest.txt";
-
 /// The authoritative release identity for a version name: the git tag, the
 /// committed APK filename, and the manifest asset filename. Pure, so the
 /// release workflow and its regression test read the same values the build
 /// and the self-update URL are derived from.
 fn release_plan_lines(version_name: &str, version_code: u32) -> String {
     format!(
-        "tag=v{version_name}\napk={}\nmanifest={RELEASE_MANIFEST_FILENAME}\nversion_name={version_name}\nversion_code={version_code}\napk_url={}\n",
+        "tag=v{version_name}\napk={}\nmanifest={UPDATE_PROOF_MANIFEST_FILE}\nversion_name={version_name}\nversion_code={version_code}\napk_url={}\n",
         apk_output_name_for(version_name),
         release_artifact_url_for(version_name),
     )
@@ -3172,26 +3170,7 @@ fn cmd_release_plan(args: &[String]) -> Result<(), String> {
             args[0]
         ));
     }
-    let root = repo_root()?;
-    let apk = root.join(apk_output_name());
-    if !apk.is_file() {
-        return Err(format!(
-            "the committed APK for version {APP_VERSION_NAME} is missing: {} (run build-apk after a version bump and commit its output)",
-            apk.display()
-        ));
-    }
-    let names = fs::read_dir(&root)
-        .map_err(|e| format!("listing {}: {e}", root.display()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned());
-    let stale = stale_artifacts(names);
-    if !stale.is_empty() {
-        return Err(format!(
-            "artifacts of another version are still committed beside {}: {} (one artifact is published; `git rm` the others)",
-            apk_output_name(),
-            stale.join(", ")
-        ));
-    }
+    require_single_committed_apk(&repo_root()?)?;
     print!("{}", release_plan_lines(APP_VERSION_NAME, APP_VERSION_CODE));
     Ok(())
 }
@@ -3236,6 +3215,17 @@ fn cmd_check_app_version() -> Result<(), String> {
     let root = repo_root()?;
     let manifest = read_to_string(&root.join(BUNDLED_RELEASE_MANIFEST_PATH))?;
     check_bundled_manifest_version(&manifest)?;
+    require_single_committed_apk(&root)?;
+    println!(
+        "app version {APP_VERSION_CODE} ({APP_VERSION_NAME}): the bundled release manifest and the committed APK's name agree, no artifact of another version remains"
+    );
+    Ok(())
+}
+
+/// The current version's APK is committed at `root`, and no artifact of another
+/// version is committed beside it — what both `check-app-version` and
+/// `release-plan` require before naming the one published artifact.
+fn require_single_committed_apk(root: &Path) -> Result<(), String> {
     let apk = root.join(apk_output_name());
     if !apk.is_file() {
         return Err(format!(
@@ -3243,21 +3233,18 @@ fn cmd_check_app_version() -> Result<(), String> {
             apk.display()
         ));
     }
-    let names = fs::read_dir(&root)
+    let names = fs::read_dir(root)
         .map_err(|e| format!("listing {}: {e}", root.display()))?
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned());
     let stale = stale_artifacts(names);
     if !stale.is_empty() {
         return Err(format!(
-            "artifacts of another version are still committed beside {}: {} (one artifact is committed; `git rm` the others)",
+            "artifacts of another version are still committed beside {}: {} (one artifact is committed and published; `git rm` the others)",
             apk_output_name(),
             stale.join(", ")
         ));
     }
-    println!(
-        "app version {APP_VERSION_CODE} ({APP_VERSION_NAME}): the bundled release manifest and the committed APK's name agree, no artifact of another version remains"
-    );
     Ok(())
 }
 
@@ -4765,7 +4752,7 @@ mod tests {
             "{plan}"
         );
         assert!(
-            plan.contains(&format!("manifest={RELEASE_MANIFEST_FILENAME}\n")),
+            plan.contains(&format!("manifest={UPDATE_PROOF_MANIFEST_FILE}\n")),
             "{plan}"
         );
         assert!(
@@ -4782,7 +4769,7 @@ mod tests {
         );
         // The bundled asset the app ships and the release asset the app fetches
         // are the same filename, so the update loop's two ends never drift.
-        assert!(BUNDLED_RELEASE_MANIFEST_PATH.ends_with(RELEASE_MANIFEST_FILENAME));
+        assert!(BUNDLED_RELEASE_MANIFEST_PATH.ends_with(UPDATE_PROOF_MANIFEST_FILE));
 
         // The successor's bundled manifest: the committed asset describing
         // the successor, every other line untouched; what the core refuses
