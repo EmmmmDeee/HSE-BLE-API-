@@ -29,10 +29,11 @@ pub const TEST_PACKAGE_DIR: &str = "android/app/src/test/java/com/hse/bleradar";
 /// before decision #98 — so [`run`] refuses it. The count is pinned so a
 /// test method that vanishes is noticed too.
 pub const HOST_TEST_CLASSES: &[(&str, usize)] = &[
+    ("ApiHttpServerGuardTest.java", 4),
     ("BlipTest.java", 14),
-    ("DeviceHistoryTest.java", 9),
+    ("DeviceHistoryTest.java", 10),
     ("ReleaseManifestTest.java", 50),
-    ("WifiApTest.java", 10),
+    ("WifiApTest.java", 12),
     ("WifiSurveyTest.java", 4),
 ];
 
@@ -526,10 +527,11 @@ mod tests {
         );
 
         let missing: Vec<String> = exact[1..].to_vec();
+        let first = HOST_TEST_CLASSES[0].0;
         assert_eq!(
             test_directory_mismatches(&missing),
             vec![format!(
-                "BlipTest.java: listed in HOST_TEST_CLASSES but missing from {TEST_PACKAGE_DIR}"
+                "{first}: listed in HOST_TEST_CLASSES but missing from {TEST_PACKAGE_DIR}"
             )]
         );
     }

@@ -672,13 +672,28 @@ fn body_text(response: &HttpResponse) -> String {
 fn start_scan(port: u16) -> Result<String, String> {
     let mut start = post(port, "/api/scan/start")?;
     let mut start_text = body_text(&start);
+    let mut retries = 0;
     for _ in 0..REQUEST_ATTEMPTS {
-        if !(start.status == 409 && start_text.contains("scanner unavailable")) {
+        // Two transient outcomes on a Bluetooth stack that has only just come up:
+        // the scanner is not there yet (409), or the start is accepted and the
+        // platform then fails the scanner's registration before the answer is
+        // written (200 with `"scanning":false`, the state the engine really is
+        // in). Each is retried a bounded number of times, and reported when it
+        // happens; a start that never takes is still a failure below.
+        let transient = (start.status == 409 && start_text.contains("scanner unavailable"))
+            || (start.status == 200 && start_text == SCAN_STOPPED_JSON);
+        if !transient {
             break;
         }
+        retries += 1;
         thread::sleep(Duration::from_secs(1));
         start = post(port, "/api/scan/start")?;
         start_text = body_text(&start);
+    }
+    if retries > 0 {
+        println!(
+            "scan start needed {retries} retr(y/ies) on a Bluetooth stack that had just come up"
+        );
     }
     if start.status != 200 || start_text != SCAN_STARTED_JSON {
         return Err(format!(

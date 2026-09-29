@@ -121,6 +121,15 @@ pub const SCAN_STOPPED_JSON: &str = r#"{"scanning":false}"#;
 /// `404` as `ApiHttpServer.errorJson` writes it — the shape of every error
 /// body, including a refused start's reason.
 pub const NOT_FOUND_JSON: &str = r#"{"error":"Not found"}"#;
+/// `403` as `ApiHttpServer.errorJson` writes it: a request whose `Host` is not
+/// this loopback server, or whose `Origin` is another site's.
+pub const FORBIDDEN_JSON: &str = r#"{"error":"Forbidden"}"#;
+/// `431` as `ApiHttpServer.errorJson` writes it: a request or header line over the
+/// cap, or more headers than the cap.
+pub const HEADER_TOO_LARGE_JSON: &str = r#"{"error":"Request header too large"}"#;
+/// `408` as `ApiHttpServer.errorJson` writes it: a client that stalled, or took
+/// over ten seconds to send its request line and headers.
+pub const REQUEST_TIMEOUT_JSON: &str = r#"{"error":"Request took too long"}"#;
 /// `405` as `ApiHttpServer.errorJson` writes it.
 pub const METHOD_NOT_ALLOWED_JSON: &str = r#"{"error":"Method not allowed"}"#;
 

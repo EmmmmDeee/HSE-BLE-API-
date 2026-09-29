@@ -11,7 +11,7 @@ import android.net.wifi.ScanResult;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
-import android.os.Looper;
+import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
@@ -32,7 +32,7 @@ import java.util.Map;
  * throttle allows (four per two minutes, so one per 35 s), and reads whatever
  * the platform has cached in between. It rides the BLE scan's lifecycle
  * ({@link RadarScanService} starts and stops both) but never affects it: when
- * Wi-Fi cannot be read, {@link #state()} says why and the BLE scan carries on.
+ * Wi-Fi cannot be read, the survey's {@code state} says why and the BLE scan carries on.
  *
  * <p>Reading scan results needs {@code ACCESS_FINE_LOCATION}, which the BLE scan
  * already holds, so the survey adds no permission prompt; on Android 12 and
@@ -45,6 +45,12 @@ final class WifiScanEngine implements WifiSurveySource {
     private static final String TAG = "WifiScanEngine";
     /** One platform scan request per interval: inside Android's four-per-two-minutes foreground throttle. */
     static final long SCAN_INTERVAL_MILLIS = 35_000L;
+    /**
+     * A results broadcast within this long of the last read is ignored: each
+     * platform scan request we make triggers one, so without it every cycle
+     * would read (and write the history) twice.
+     */
+    private static final long MIN_READ_GAP_MILLIS = 5_000L;
 
     private final Context appContext;
     /**
@@ -52,7 +58,14 @@ final class WifiScanEngine implements WifiSurveySource {
      * BLE device history (only a trackable BSSID is remembered), in its own file.
      */
     private final DeviceHistory history;
-    private final Handler handler = new Handler(Looper.getMainLooper());
+    /**
+     * Everything the survey does (reading results, the JNI classification, the
+     * history merge and its fsync) runs on this thread, never the main thread:
+     * a slow flash write must not cost a frame or risk an ANR.
+     */
+    private final HandlerThread thread = new HandlerThread("WifiScanEngine");
+    private final Handler handler;
+    private long lastReadElapsedMillis = -MIN_READ_GAP_MILLIS;
     /** The one published generation; replaced whole, never edited in place. */
     private volatile WifiSurvey survey = WifiSurvey.empty(STATE_IDLE);
     private volatile boolean running;
@@ -65,8 +78,13 @@ final class WifiScanEngine implements WifiSurveySource {
             if (!running) {
                 return;
             }
-            refresh(true);
-            handler.postDelayed(this, SCAN_INTERVAL_MILLIS);
+            try {
+                refresh(true);
+            } finally {
+                if (running) {
+                    handler.postDelayed(this, SCAN_INTERVAL_MILLIS);
+                }
+            }
         }
     };
 
@@ -75,6 +93,8 @@ final class WifiScanEngine implements WifiSurveySource {
                 ? context
                 : context.getApplicationContext();
         this.history = new DeviceHistory(appContext.getFilesDir(), DeviceHistory.WIFI_FILE_NAME);
+        thread.start();
+        this.handler = new Handler(thread.getLooper());
     }
 
     /** Whether the permission the survey reads scan results under is granted. */
@@ -85,7 +105,7 @@ final class WifiScanEngine implements WifiSurveySource {
 
     /**
      * Starts the survey. Idempotent; never throws and never fails the BLE scan:
-     * a survey that cannot run leaves its reason in {@link #state()}.
+     * a survey that cannot run leaves its reason in {@link #survey()}.
      */
     synchronized void start() {
         if (closed || running) {
@@ -99,20 +119,30 @@ final class WifiScanEngine implements WifiSurveySource {
             survey = WifiSurvey.empty(STATE_UNAVAILABLE);
             return;
         }
-        running = true;
-        survey = WifiSurvey.empty(STATE_ACTIVE);
-        receiver = new BroadcastReceiver() {
+        BroadcastReceiver results = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
                 refresh(false);
             }
         };
         IntentFilter filter = new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            appContext.registerReceiver(receiver, filter);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(
+                        results, filter, null, handler, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                appContext.registerReceiver(results, filter, null, handler);
+            }
+        } catch (RuntimeException refused) {
+            // The survey never fails the BLE scan that started it (see above):
+            // a receiver the platform refuses leaves it unavailable, not thrown.
+            Log.w(TAG, "Wi-Fi results receiver refused; the survey is unavailable", refused);
+            survey = WifiSurvey.empty(STATE_UNAVAILABLE);
+            return;
         }
+        receiver = results;
+        running = true;
+        survey = WifiSurvey.empty(STATE_ACTIVE);
         handler.post(tick);
     }
 
@@ -131,13 +161,19 @@ final class WifiScanEngine implements WifiSurveySource {
         // empty survey: a start that failed (no radio, no permission) must not
         // keep reporting its refusal, or its last count, after the scan ends.
         survey = WifiSurvey.empty(STATE_IDLE);
-        history.flush(SystemClock.uptimeMillis());
+        // The final flush (which fsyncs when there is anything unsaved) is queued
+        // on the survey's own thread, not run here: this is called from the main
+        // thread (the activity's stop, the service's onDestroy). On that thread it
+        // runs after any read in progress, and, queued before the quit in close(),
+        // before the thread ends.
+        handler.post(() -> history.flush(SystemClock.uptimeMillis()));
     }
 
     /** Stops the survey and refuses every later {@link #start()}: the service is being destroyed. */
     synchronized void close() {
         stop();
         closed = true;
+        thread.quitSafely();
     }
 
     @Override
@@ -152,6 +188,11 @@ final class WifiScanEngine implements WifiSurveySource {
         if (!running || wifi == null) {
             return;
         }
+        long nowElapsedMillis = SystemClock.elapsedRealtime();
+        if (!requestScan && nowElapsedMillis - lastReadElapsedMillis < MIN_READ_GAP_MILLIS) {
+            return;
+        }
+        lastReadElapsedMillis = nowElapsedMillis;
         if (!hasPermission(appContext)) {
             publish(WifiSurvey.empty(STATE_PERMISSION_DENIED));
             return;
@@ -172,6 +213,12 @@ final class WifiScanEngine implements WifiSurveySource {
         } catch (SecurityException error) {
             Log.w(TAG, "Wi-Fi scan permission revoked at call time", error);
             publish(WifiSurvey.empty(STATE_PERMISSION_DENIED));
+        } catch (RuntimeException | LinkageError error) {
+            // A survey that cannot be read must never take the app down: an
+            // uncaught exception on any thread ends the whole process, and the
+            // BLE scan is the product. Report it and carry on unavailable.
+            Log.e(TAG, "Wi-Fi survey read failed; unavailable until the next read", error);
+            publish(WifiSurvey.empty(STATE_UNAVAILABLE));
         }
     }
 
@@ -192,11 +239,10 @@ final class WifiScanEngine implements WifiSurveySource {
         Map<String, WifiAp> byBssid = new LinkedHashMap<>();
         int refused = 0;
         for (ScanResult result : results) {
-            // ScanResult.timestamp is microseconds on the elapsed-realtime clock.
-            long seenAgoMillis = Math.max(0L, nowElapsedMillis - result.timestamp / 1000L);
             WifiAp ap = WifiAp.observe(
                     result.BSSID, result.SSID, result.capabilities, result.level,
-                    result.frequency, nowEpochMillis - seenAgoMillis);
+                    result.frequency,
+                    WifiAp.seenEpochMillis(nowEpochMillis, nowElapsedMillis, result.timestamp));
             if (ap == null) {
                 refused++;
             } else {

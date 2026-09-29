@@ -170,7 +170,7 @@ pub const CAPABILITIES: &[Capability] = &[
         strongest_reference: "Huntsman Search Engine signal_radar",
         rust_module: "bleradar_core::sweep",
         runtime_entrypoint: "NativeRadar.deviceAddressTrackability (BLE), NativeRadar.wifiObservation (Wi-Fi)",
-        tests: "sweep 16 unit tests; jni_bridge wifi_observation 3",
+        tests: "sweep 16 unit tests (5 on wifi_observation); jni_bridge wifi_observation 3",
         status: Status::Partial,
         residual_gap: "The app scans BLE and Wi-Fi only, so the cell rules have no in-app caller yet",
     },
@@ -180,9 +180,9 @@ pub const CAPABILITIES: &[Capability] = &[
         strongest_reference: "WiGLE",
         rust_module: "bleradar_core::sweep::wifi_observation",
         runtime_entrypoint: "NativeRadar.wifiObservation -> WifiScanEngine -> GET /api/wifi",
-        tests: "sweep wifi_observation unit tests; jni_bridge wifi_observation 3; WifiApTest 10; WifiSurveyTest 4; verify-api-live /api/wifi golden (with history); verify-dashboard-live survey table; verify-android-emulator survey, its history across kill -9, and backup/restore",
+        tests: "sweep wifi_observation unit tests; jni_bridge wifi_observation 3; WifiApTest 12; WifiSurveyTest 4; verify-api-live /api/wifi golden (with history); verify-dashboard-live survey table; verify-android-emulator survey, its history across kill -9, and backup/restore",
         status: Status::Partial,
-        residual_gap: "A passive survey of the platform's scan results with first-seen and visit history (trackable BSSIDs only): no location fix per sighting, no full sighting timeline, no map; Android throttles scans (about four per two minutes) and hides results while location is off",
+        residual_gap: "A passive survey of the platform's scan results with first-seen and visit history (trackable BSSIDs only): no location fix per sighting, no full sighting timeline, no map; security is the oracle-locked substring classifier, so a WPA2/WPA3 transition network reads WPA3, 192-bit Suite-B enterprise and OWE-in-RSN read WPA2; the loopback API is open to any app on the device; Android throttles scans (about four per two minutes) and hides results while location is off",
     },
 ];
 
