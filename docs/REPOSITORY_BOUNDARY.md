@@ -7,7 +7,7 @@ Two repositories, two purposes. Each stays distinct; each uses the strongest par
 | Purpose | A standalone Android ARM64 wireless-intelligence app (BLE radar today) and the safe-Rust engine library behind it (`bleradar-core`) | All-source OSINT / GEOINT / NETINT reconnaissance: 194 modules, one CLI/Web-UI binary, run in Termux on Android aarch64 |
 | Ships | An installable `HSE-BLE-Radar-arm64-<version>.apk`, published as a GitHub release | A Termux binary (`install.sh`, source build) |
 | Owns | BLE/Wi-Fi reading rules, advertisement decoding, identity across address rotation, device history, signal/proximity math, the self-updater | Modules, scan engine, correlator rules, storage, the HTTP API and UI, the installer |
-| Does not own | Any OSINT module, scan engine, or Termux tooling | Any radio-reading rule the radar owns |
+| Does not own | Any OSINT module, scan engine, or Termux tooling | A copy of any of the four reading rules it takes from the radar |
 
 ## Dependency direction
 
@@ -18,7 +18,7 @@ BLE Radar  ──────────── nothing from HSE, ever ───
 
 - The radar never depends on HSE. `cargo xtask check-dependency-policy` (a `gates` step) fails when `Cargo.lock` holds any crate outside the audited workspace set, and `xtask`'s `no_workspace_manifest_depends_on_hse` fails on any manifest that names an HSE crate or a git source.
 - HSE depends on `bleradar-core` alone, pinned in HSE's `Cargo.toml` to a full commit `rev` (never a branch or tag).
-- A rule has one authority. The radar owns every reading-interpretation rule — real-vs-placeholder address, RSSI reliability tiers, 802.11 channel, proximity band, BLE address type, advertisement decoding, identity across rotation. HSE owns everything else, and calls the radar for those rules rather than copying them.
+- A rule has one authority. The radar owns the reading rules HSE takes through the seam below (real-vs-placeholder address, Wi-Fi RSSI reliability tiers, 802.11 channel, proximity band) and the rules only the app uses (BLE address type, advertisement decoding, identity across rotation, device history). HSE owns everything else, including what it keeps deliberately: its coarse Wi-Fi band, its OUI vendor classification and address trackability tag, and its cell-tower vocabulary, and calls the radar for those rules rather than copying them.
 
 ## What the radar offers HSE (`bleradar_core`, module `sweep`)
 
