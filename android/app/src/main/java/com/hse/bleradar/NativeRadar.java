@@ -119,7 +119,7 @@ public final class NativeRadar {
     public static final int ADDRESS_TYPE_UNKNOWN = 0xFFFF;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 18;
+    public static final int EXPECTED_ABI_VERSION = 19;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -541,6 +541,19 @@ public final class NativeRadar {
      * Owned by {@code bleradar_core::group_key_typed}.
      */
     public static native String deviceGroupKey(String mac, int addressType, String advertisementHex);
+
+    /**
+     * Every Wi-Fi reading rule applied to one scan result: its BSSID, its
+     * {@code ScanResult.capabilities} (may be null) and its {@code level} (dBm)
+     * and {@code frequency} (MHz). Answers six {@code |}-separated fields,
+     * {@code trackability|reliability|channel|proximity|security|enterprise}
+     * (decoded once, by {@link WifiAp#decode}), or {@code null} when the BSSID is
+     * not a real device address — a permission-masked {@code 02:00:00:00:00:00},
+     * all-zero, or not a MAC — because such a result names no access point.
+     * Owned by {@code bleradar_core::wifi_observation}.
+     */
+    public static native String wifiObservation(
+            String bssid, String capabilities, int rssiDbm, int frequencyMhz);
 
     /**
      * The Bluetooth SIG assignee name for the first manufacturer block's company

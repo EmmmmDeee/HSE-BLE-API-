@@ -380,7 +380,8 @@ byte-identical. Design decisions for the app itself are recorded in
 ## Web dashboard (Termux / browser on the device)
 
 While `RadarScanService` runs, the app serves a loopback-only HTTP API on
-`http://127.0.0.1:8080/` — `/api/devices`, `/api/status`, `/api/updates` as
+`http://127.0.0.1:8080/` — `/api/devices`, `/api/wifi` (the passive Wi-Fi
+survey), `/api/status`, `/api/updates` as
 JSON — and, at `/`, a self-contained web dashboard (`android/app/src/main/assets/dashboard.html`)
 that polls them every second and renders the status, a canvas radar and the
 ranked device table. Open it in any browser on the device (from Termux:

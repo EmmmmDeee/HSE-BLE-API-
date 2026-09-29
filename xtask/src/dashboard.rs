@@ -82,6 +82,28 @@ pub const DEVICES_JSON: &str = concat!(
     r#"{"address":"AA:BB:CC:DD:EE:04","name":"Beacon Delta","distance_m":0.4,"distance_lower_m":0.3,"distance_upper_m":0.6,"rssi_dbm":-45.0,"proximity":"IMMEDIATE","trackability":"RANDOMIZED","company_id":"0006","manufacturer":"Microsoft","beacon":null,"services":null,"identity_key":"p[m:0006/2/0102]","first_seen_ms":null,"visits":null,"trend":"STABLE","freshness":"LIVE","confidence_percent":99,"last_seen_ago_ms":90}"#,
     r#"],"scanning":true,"native_available":true,"timestamp_ms":1757700000000}"#,
 );
+/// `/api/wifi` as `ApiHttpServer.wifiJson` writes it for the survey the
+/// harness builds through the real native core: rows with a usable reading
+/// strongest first and the corrupt one (a positive RSSI, no proximity) last, a
+/// hidden network (empty SSID), a name with markup that must be rendered as
+/// text, an 802.1X network, a frequency outside the plan (`channel` null) with
+/// no capabilities (`UNKNOWN`, never `OPEN`), and two dropped scan results.
+pub const WIFI_JSON: &str = concat!(
+    r#"{"access_points":["#,
+    r#"{"bssid":"3c:5a:b4:11:22:01","ssid":"HomeNet","frequency_mhz":2437,"channel":6,"rssi_dbm":-48,"reliability":"VERY_HIGH_PLUS","proximity":"IMMEDIATE","security":"WPA2","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699998800},"#,
+    r#"{"bssid":"3c:5a:b4:11:22:04","ssid":"CorpNet","frequency_mhz":5745,"channel":149,"rssi_dbm":-60,"reliability":"VERY_HIGH","proximity":"NEAR","security":"WPA2","enterprise":true,"trackability":"TRACKABLE","last_seen_ms":1757699997000},"#,
+    r#"{"bssid":"3c:5a:b4:11:22:07","ssid":"OddBand","frequency_mhz":2400,"channel":null,"rssi_dbm":-70,"reliability":"VERY_HIGH","proximity":"MID","security":"UNKNOWN","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699970000},"#,
+    r#"{"bssid":"aa:bb:cc:dd:ee:02","ssid":"<b>evil</b> \"Ünïcødé\" \\ 😀","frequency_mhz":5180,"channel":36,"rssi_dbm":-78,"reliability":"MEDIUM_PLUS","proximity":"MID","security":"WPA3","enterprise":false,"trackability":"RANDOMIZED","last_seen_ms":1757699995000},"#,
+    r#"{"bssid":"3c:5a:b4:11:22:03","ssid":"","frequency_mhz":2462,"channel":11,"rssi_dbm":-90,"reliability":"LOW_MEDIUM","proximity":"FAR","security":"OPEN","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699980000},"#,
+    r#"{"bssid":"3c:5a:b4:11:22:05","ssid":"Corrupt","frequency_mhz":2412,"channel":1,"rssi_dbm":5,"reliability":"LOW_MEDIUM","proximity":null,"security":"WEP","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1757699999200}"#,
+    r#"],"state":"active","dropped":2,"native_available":true,"timestamp_ms":1757700000000}"#,
+);
+/// A `/api/wifi` answer whose first row has `"enterprise":"yes"` where the
+/// contract has a boolean: the page must reject it, not render it.
+pub const WIFI_MALFORMED_ENTERPRISE_JSON: &str = concat!(
+    r#"{"access_points":[{"bssid":"3c:5a:b4:11:22:01","ssid":"x","frequency_mhz":2437,"channel":6,"rssi_dbm":-48,"reliability":"VERY_HIGH","proximity":"NEAR","security":"WPA2","enterprise":"yes","trackability":"TRACKABLE","last_seen_ms":1}"#,
+    r#"],"state":"active","dropped":0,"native_available":true,"timestamp_ms":2}"#,
+);
 /// `/api/status` as `ApiHttpServer.statusJson` writes it (uptime 1:02:03).
 pub const STATUS_JSON: &str =
     r#"{"scanning":true,"device_count":4,"native_available":true,"uptime_ms":3723000}"#;
@@ -114,16 +136,25 @@ pub enum Scenario {
     /// `/api/updates` answers `500`; devices and status keep rendering, the
     /// banner must still be raised on every poll.
     UpdatesError,
+    /// `/api/wifi` answers `500`; devices and status keep rendering, the
+    /// banner must still be raised on every poll.
+    WifiError,
+    /// `/api/wifi` answers `200` with a row whose `enterprise` is a string: a
+    /// field the page consumes is malformed, so the banner must rise rather
+    /// than the row rendering with fallback values.
+    WifiWrongShape,
 }
 
 impl Scenario {
     /// Every scenario, in the order the command runs them.
-    pub const ALL: [Scenario; 5] = [
+    pub const ALL: [Scenario; 7] = [
         Scenario::Healthy,
         Scenario::ServerError,
         Scenario::WrongShape,
         Scenario::StatusWrongShape,
         Scenario::UpdatesError,
+        Scenario::WifiError,
+        Scenario::WifiWrongShape,
     ];
 
     /// The scenario's name in output paths and messages.
@@ -134,6 +165,8 @@ impl Scenario {
             Scenario::WrongShape => "wrong-shape",
             Scenario::StatusWrongShape => "status-wrong-shape",
             Scenario::UpdatesError => "updates-error",
+            Scenario::WifiError => "wifi-error",
+            Scenario::WifiWrongShape => "wifi-wrong-shape",
         }
     }
 
@@ -153,6 +186,10 @@ impl Scenario {
                 false,
             )),
             Scenario::UpdatesError => Some(("API unreachable: HTTP 500 from /api/updates", true)),
+            Scenario::WifiError => Some(("API unreachable: HTTP 500 from /api/wifi", true)),
+            Scenario::WifiWrongShape => {
+                Some(("API unreachable: /api/wifi entry 0 is malformed", true))
+            }
         }
     }
 }
@@ -181,7 +218,7 @@ const HTML: &str = "text/html; charset=utf-8";
 /// are exercised against the real server by `verify-api-live`.
 pub fn route(scenario: Scenario, method: &str, path: &str, dashboard: &[u8]) -> Response {
     let expected_method = match path {
-        "/" | "/api/devices" | "/api/status" | "/api/updates" => "GET",
+        "/" | "/api/devices" | "/api/wifi" | "/api/status" | "/api/updates" => "GET",
         "/api/scan/start" | "/api/scan/stop" => "POST",
         _ => return json(404, "Not Found", NOT_FOUND_JSON),
     };
@@ -193,6 +230,11 @@ pub fn route(scenario: Scenario, method: &str, path: &str, dashboard: &[u8]) -> 
             Scenario::ServerError => json(500, "Internal Server Error", r#"{"error":"boom"}"#),
             Scenario::WrongShape => json(200, "OK", r#"{"nope":1}"#),
             _ => json(200, "OK", DEVICES_JSON),
+        },
+        "/api/wifi" => match scenario {
+            Scenario::WifiError => json(500, "Internal Server Error", r#"{"error":"boom"}"#),
+            Scenario::WifiWrongShape => json(200, "OK", WIFI_MALFORMED_ENTERPRISE_JSON),
+            _ => json(200, "OK", WIFI_JSON),
         },
         "/api/status" => match scenario {
             Scenario::StatusWrongShape => json(200, "OK", "[]"),
@@ -625,8 +667,10 @@ pub const HEALTHY_MARKERS: &[&str] = &[
     // Address trackability, classified by the Rust core: real hardware is
     // TRACKABLE, a locally-administered (rotating) address is RANDOMIZED, a
     // malformed address is UNKNOWN — rendered, never silently dropped.
-    r#"data-trackability="TRACKABLE""#,
-    r#"data-trackability="RANDOMIZED""#,
+    // (The proximity attribute precedes it on a device row, which keeps these
+    // apart from the Wi-Fi rows' own trackability attribute.)
+    r#"data-proximity="NEAR" data-trackability="TRACKABLE""#,
+    r#"data-proximity="MID" data-trackability="RANDOMIZED""#,
     r#"data-trackability="UNKNOWN""#,
     r#"class="track-TRACKABLE">TRACKABLE<"#,
     r#"class="track-RANDOMIZED">RANDOMIZED<"#,
@@ -679,6 +723,37 @@ pub const HEALTHY_MARKERS: &[&str] = &[
     ">12 s ago<",
     ">1m 15s ago<",
     ">0.1 s ago<",
+    // The Wi-Fi survey (Rust bleradar_core::wifi_observation), rows in the
+    // server's order: usable readings strongest first, the corrupt positive
+    // RSSI last with no proximity, never first.
+    r#"data-wifi-state="active""#,
+    "6 access points · 2 results ignored (masked or malformed BSSID)",
+    r#"data-bssid="3c:5a:b4:11:22:01""#,
+    r#"data-bssid="3c:5a:b4:11:22:04""#,
+    r#"data-bssid="3c:5a:b4:11:22:07""#,
+    // A randomized BSSID is classified as such, on the Wi-Fi row too (this
+    // marker also fixes the row's place in the order).
+    r#"data-bssid="aa:bb:cc:dd:ee:02" data-security="WPA3" data-trackability="RANDOMIZED" data-channel="36" data-frequency="5180" data-reliability="MEDIUM_PLUS""#,
+    r#"data-bssid="3c:5a:b4:11:22:03""#,
+    r#"data-bssid="3c:5a:b4:11:22:05""#,
+    // Security from the oracle-locked classifier; an 802.1X network says so; a
+    // network with no capabilities is UNKNOWN, never OPEN.
+    r#"class="sec-WPA2">WPA2<"#,
+    r#"class="sec-WPA2">WPA2 · 802.1X<"#,
+    r#"class="sec-WPA3">WPA3<"#,
+    r#"class="sec-OPEN">OPEN<"#,
+    r#"class="sec-WEP">WEP<"#,
+    r#"class="sec-UNKNOWN">UNKNOWN<"#,
+    // A frequency outside the plan has no channel; the channel is 149 on 5745 MHz.
+    r#"data-security="UNKNOWN" data-trackability="TRACKABLE" data-channel="" data-frequency="2400""#,
+    r#"class="num">149<"#,
+    "(hidden)",
+    // The corrupt reading is shown as reported, without a proximity band.
+    ">5 dBm<",
+    r#"class="prox-UNKNOWN">—<"#,
+    ">-48 dBm<",
+    ">1.2 s ago<",
+    ">30 s ago<",
 ];
 
 /// Text that must never appear: the device name rendered as markup.
@@ -711,13 +786,18 @@ pub fn check_dom(scenario: Scenario, dom: &str) -> Result<u32, String> {
                     "the Stop button is disabled although the server reports scanning".to_string(),
                 );
             }
-            let addresses: Vec<usize> = HEALTHY_MARKERS
-                .iter()
-                .filter(|marker| marker.starts_with("data-address="))
-                .filter_map(|marker| dom.find(marker))
-                .collect();
-            if addresses.windows(2).any(|pair| pair[0] >= pair[1]) {
-                return Err("device rows are not in the server's order".to_string());
+            for (prefix, what) in [
+                ("data-address=", "device rows"),
+                ("data-bssid=", "Wi-Fi rows"),
+            ] {
+                let positions: Vec<usize> = HEALTHY_MARKERS
+                    .iter()
+                    .filter(|marker| marker.starts_with(prefix))
+                    .filter_map(|marker| dom.find(marker))
+                    .collect();
+                if positions.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return Err(format!("{what} are not in the server's order"));
+                }
             }
             if polls < MIN_POLLS {
                 return Err(format!(
@@ -774,13 +854,14 @@ pub const API_HTTP_SERVER_JAVA_PATH: &str =
 
 /// The JSON documents: what answers, the `ApiHttpServer` method that writes
 /// it, the fixture the mock serves, and the page variables that hold it.
-const ENDPOINTS: [(&str, &str, &str, &[&str]); 5] = [
+const ENDPOINTS: [(&str, &str, &str, &[&str]); 6] = [
     (
         "/api/devices",
         "devicesJson",
         DEVICES_JSON,
         &["device", "snapshot"],
     ),
+    ("/api/wifi", "wifiJson", WIFI_JSON, &["wifiAp", "wifiDoc"]),
     ("/api/status", "statusJson", STATUS_JSON, &["status"]),
     ("/api/updates", "updatesJson", UPDATES_JSON, &["updates"]),
     ("/api/scan/*", "scanJson", SCAN_STARTED_JSON, &["scan"]),

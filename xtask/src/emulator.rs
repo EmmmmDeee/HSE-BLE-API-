@@ -113,6 +113,30 @@ const HISTORY_TIMEOUT: Duration = Duration::from_secs(15);
 const BEACON_HISTORY_KEY: &str = "c0:de:be:ac:0d:01";
 /// How long the scan may take to list the beacon after it started.
 const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
+/// The keys `GET /api/wifi` documents, present whether or not the survey runs.
+const WIFI_TOP_KEYS: &[&str] = &[
+    "access_points",
+    "state",
+    "dropped",
+    "native_available",
+    "timestamp_ms",
+];
+/// The keys every surveyed access point carries, each decided by the Rust core.
+const WIFI_ROW_KEYS: &[&str] = &[
+    "\"bssid\":\"",
+    "\"frequency_mhz\":",
+    "\"channel\":",
+    "\"rssi_dbm\":",
+    "\"reliability\":\"",
+    "\"security\":\"",
+    "\"enterprise\":",
+    "\"trackability\":\"",
+    "\"last_seen_ms\":",
+];
+/// How long the survey may take to list an access point once the scan started:
+/// the first platform scan finishes within seconds, and the engine reads the
+/// results at once when it does; the bound covers a slow emulated radio.
+const WIFI_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the row may outlive the beacon: the Standard tracking profile
 /// keeps a device "recent" for 30 s before it is stale and pruned.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(75);
@@ -564,6 +588,28 @@ fn wait_for_status(port: u16, key: &str, literal: &str) -> Result<String, String
     Err(format!(
         "within {}s /api/status never reported \"{key}\":{literal} (last: {last})",
         PROMOTION_TIMEOUT.as_secs()
+    ))
+}
+
+/// Polls `GET /api/wifi` until the survey is `active` and lists an access
+/// point; the body and the elapsed time. The failure names the survey's own
+/// `state` (`wifi_off`, `location_off`, `permission_denied`, `unavailable`),
+/// which says why the list stayed empty.
+fn wait_for_wifi_survey(port: u16) -> Result<(String, Duration), String> {
+    let started = Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < WIFI_TIMEOUT {
+        if let Ok(response) = get(port, "/api/wifi") {
+            last = body_text(&response);
+            if last.contains(r#""state":"active""#) && !last.starts_with(r#"{"access_points":[]"#) {
+                return Ok((last, started.elapsed()));
+            }
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+    Err(format!(
+        "within {}s /api/wifi never listed an access point in the active state (last: {last})",
+        WIFI_TIMEOUT.as_secs()
     ))
 }
 
@@ -1167,6 +1213,17 @@ fn exercise(
         return Err(format!("the device list is not empty: {devices_text}"));
     }
     report.push("GET /api/devices: the documented keys, no device".to_string());
+    // The Wi-Fi survey rides the scan: idle and empty before it starts, with
+    // its documented keys all the same.
+    let wifi = get(port, "/api/wifi")?;
+    require_keys("GET /api/wifi", &wifi.body, WIFI_TOP_KEYS)?;
+    let wifi_text = body_text(&wifi);
+    if !wifi_text.starts_with(r#"{"access_points":[],"state":"idle""#) {
+        return Err(format!(
+            "the Wi-Fi survey is not idle and empty before any scan: {wifi_text}"
+        ));
+    }
+    report.push("GET /api/wifi: the documented keys, idle, no access point".to_string());
     let updates = get(port, "/api/updates")?;
     require_keys(
         "GET /api/updates",
@@ -1190,6 +1247,25 @@ fn exercise(
         report.push(format!(
             "scanning: status {status}; RadarScanService isForeground=true with \"{SCANNING_TEXT}\" {:.1}s after the start",
             promoted.as_secs_f64()
+        ));
+
+        println!("== the Wi-Fi survey: the platform's scan results through the Rust core ==");
+        // Wi-Fi and location are on by default on the emulator image; they are
+        // asserted rather than assumed, best-effort, so a survey that stays
+        // empty fails for the reason its own `state` names, not for a toggle.
+        adb.shell_lenient("svc wifi enable");
+        adb.shell_lenient("cmd location set-location-enabled true");
+        let (survey, waited) = wait_for_wifi_survey(port)?;
+        for key in WIFI_ROW_KEYS {
+            if !survey.contains(key) {
+                return Err(format!(
+                    "a surveyed access point lacks {key} — the Rust wifi_observation never reached the row: {survey}"
+                ));
+            }
+        }
+        report.push(format!(
+            "GET /api/wifi: active with an access point {:.1}s after the scan started, every rule key present: {survey}",
+            waited.as_secs_f64()
         ));
 
         println!("== a virtual advertiser: a second controller on netsimd's HCI socket ==");
@@ -1342,6 +1418,15 @@ fn exercise(
         report.push(format!(
             "paused: POST /api/scan/stop {stop_text}; the service stays in the foreground with \"{IDLE_TEXT}\""
         ));
+        // The survey stops with the scan: idle and empty again, not the last
+        // access points nor a stale count.
+        let idle_wifi = body_text(&get(port, "/api/wifi")?);
+        if !idle_wifi.starts_with(r#"{"access_points":[],"state":"idle","dropped":0"#) {
+            return Err(format!(
+                "the Wi-Fi survey is not idle and empty after the scan stopped: {idle_wifi}"
+            ));
+        }
+        report.push("paused: GET /api/wifi is idle and empty again".to_string());
 
         let resumed = post(port, "/api/scan/start")?;
         if resumed.status != 200 {

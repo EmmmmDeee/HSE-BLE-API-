@@ -66,6 +66,13 @@ import java.util.logging.Logger;
  *       ({@code LIVE|RECENT|STALE|UNKNOWN}), {@code confidence_percent},
  *       {@code last_seen_ago_ms}; plus the top-level {@code scanning},
  *       {@code native_available}, {@code timestamp_ms}.</li>
+ *   <li>{@code /api/wifi} — the passive Wi-Fi survey from
+ *       {@link WifiSurveySource}: {@code access_points} (each with {@code bssid},
+ *       {@code ssid}, {@code frequency_mhz}, {@code channel}, {@code rssi_dbm},
+ *       {@code reliability}, {@code proximity}, {@code security},
+ *       {@code enterprise}, {@code trackability}, {@code last_seen_ms}, every
+ *       reading rule decided by the Rust core), {@code state} (why the list may be
+ *       empty), {@code dropped}, {@code native_available}, {@code timestamp_ms}.</li>
  *   <li>{@code /api/status} — {@code scanning}, {@code device_count},
  *       {@code native_available}, {@code uptime_ms}.</li>
  *   <li>{@code /api/updates} — {@code last_check_ms}, {@code next_check_ms},
@@ -116,6 +123,7 @@ public final class ApiHttpServer {
     private static final String HTML = "text/html; charset=utf-8";
 
     private final SnapshotSource engine;
+    private final WifiSurveySource wifi;
     private final UpdateStatusSource updates;
     private final AssetSource assets;
     private final ScanControl control;
@@ -131,6 +139,7 @@ public final class ApiHttpServer {
 
     public ApiHttpServer(
             SnapshotSource engine,
+            WifiSurveySource wifi,
             UpdateStatusSource updates,
             AssetSource assets,
             LongSupplier uptimeMillis,
@@ -138,6 +147,7 @@ public final class ApiHttpServer {
             ScanControl control,
             int port) {
         this.engine = engine;
+        this.wifi = wifi;
         this.updates = updates;
         this.assets = assets;
         this.uptimeMillis = uptimeMillis;
@@ -291,6 +301,7 @@ public final class ApiHttpServer {
             return;
         }
         boolean routed = "/api/devices".equals(path)
+                || "/api/wifi".equals(path)
                 || "/api/status".equals(path)
                 || "/api/updates".equals(path)
                 || "/".equals(path);
@@ -305,6 +316,9 @@ public final class ApiHttpServer {
         switch (path) {
             case "/api/devices":
                 writeResponse(out, 200, "OK", JSON, devicesJson());
+                break;
+            case "/api/wifi":
+                writeResponse(out, 200, "OK", JSON, wifiJson());
                 break;
             case "/api/status":
                 writeResponse(out, 200, "OK", JSON, statusJson());
@@ -396,6 +410,40 @@ public final class ApiHttpServer {
         }
         json.endArray();
         json.name("scanning").value(engine.isScanning());
+        json.name("native_available").value(NativeRadar.isAvailable());
+        json.name("timestamp_ms").value(epochMillis.getAsLong());
+        json.endObject();
+        return json.toString();
+    }
+
+    private String wifiJson() {
+        // One generation: the list, its state and its dropped count are read together.
+        WifiSurvey survey = wifi.survey();
+        Json json = new Json();
+        json.beginObject();
+        json.name("access_points").beginArray();
+        for (WifiAp ap : survey.accessPoints) {
+            json.beginObject();
+            json.name("bssid").value(ap.bssid);
+            json.name("ssid").value(ap.ssid);
+            json.name("frequency_mhz").value((long) ap.frequencyMhz);
+            if (ap.channel > 0) {
+                json.name("channel").value((long) ap.channel);
+            } else {
+                json.name("channel").value((String) null);
+            }
+            json.name("rssi_dbm").value((long) ap.rssiDbm);
+            json.name("reliability").value(ap.reliability);
+            json.name("proximity").value(ap.proximity);
+            json.name("security").value(ap.security);
+            json.name("enterprise").value(ap.enterprise);
+            json.name("trackability").value(ap.trackability);
+            json.name("last_seen_ms").value(ap.lastSeenEpochMillis);
+            json.endObject();
+        }
+        json.endArray();
+        json.name("state").value(survey.state);
+        json.name("dropped").value((long) survey.dropped);
         json.name("native_available").value(NativeRadar.isAvailable());
         json.name("timestamp_ms").value(epochMillis.getAsLong());
         json.endObject();

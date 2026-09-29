@@ -1282,3 +1282,46 @@ fn history_exports_answer_through_the_string_bridge() {
     assert!(merge(null, null, state_ref, key, 1).is_null());
     assert!(lookup(null, null, state_ref, key).is_null());
 }
+
+#[test]
+fn wifi_observation_encodes_every_reading_rule() {
+    use bleradar_jni::wifi_observation_encoded;
+    let seen =
+        wifi_observation_encoded("3c:5a:b4:11:22:01", Some("[WPA2-EAP-CCMP][ESS]"), -48, 2437)
+            .expect("a real BSSID is an access point");
+    let fields: Vec<&str> = seen.split('|').collect();
+    assert_eq!(fields.len(), 6, "{seen}");
+    assert_eq!(fields[0], "trackable");
+    assert_eq!(fields[1], "very_high_plus");
+    assert_eq!(fields[2], "6");
+    assert!(
+        ["immediate", "near", "mid", "far"].contains(&fields[3]),
+        "{seen}"
+    );
+    assert_eq!(fields[4], "WPA2");
+    assert_eq!(fields[5], "1");
+}
+
+#[test]
+fn wifi_observation_maps_the_platform_sentinels_to_unknown() {
+    use bleradar_jni::wifi_observation_encoded;
+    // Android's Integer.MAX_VALUE RSSI and a zero frequency are "unavailable",
+    // never a reading: no channel, no proximity, the worst reliability tier.
+    let seen = wifi_observation_encoded("aa:bb:cc:dd:ee:01", None, i32::MAX, 0).unwrap();
+    assert_eq!(seen, "randomized|low_medium|||?|0");
+    // A corrupt positive RSSI never bands as close either.
+    let seen = wifi_observation_encoded("3c:5a:b4:11:22:01", Some(""), 5, 2412).unwrap();
+    assert_eq!(seen, "trackable|low_medium|1||?|0");
+}
+
+#[test]
+fn wifi_observation_drops_a_placeholder_or_malformed_bssid() {
+    use bleradar_jni::wifi_observation_encoded;
+    for bssid in ["", "00:00:00:00:00:00", "02:00:00:00:00:00", "nope"] {
+        assert_eq!(
+            wifi_observation_encoded(bssid, Some("[ESS]"), -40, 2412),
+            None,
+            "{bssid}"
+        );
+    }
+}
