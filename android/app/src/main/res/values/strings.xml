@@ -5,10 +5,14 @@
     <string name="notif_channel_description">Shows an ongoing notification while HSE BLE Radar is actively scanning for nearby Bluetooth Low Energy devices.</string>
     <string name="notif_title">BLE Radar is scanning</string>
     <string name="notif_title_idle">BLE Radar is idle</string>
+    <string name="notif_title_recovering_fmt">Recovering: %1$s</string>
+    <string name="notif_title_failed_fmt">Scan failed: %1$s</string>
     <string name="action_start">Start scan</string>
     <string name="action_stop">Stop scan</string>
     <string name="status_idle">Idle — press Start scan</string>
     <string name="status_scanning_fmt">Scanning… %1$d device(s) in range</string>
+    <string name="status_recovering_fmt">Scan interrupted — resuming automatically. %1$s</string>
+    <string name="status_failed_fmt">Scan stopped. %1$s</string>
     <string name="status_permission_required">Bluetooth and location permission are required to scan</string>
     <string name="status_bluetooth_off">Turn on Bluetooth to start scanning</string>
     <string name="status_web_ui_fmt">Web UI: %1$s</string>

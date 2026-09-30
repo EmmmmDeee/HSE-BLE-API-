@@ -231,7 +231,9 @@ public final class MainActivity extends android.app.Activity {
         if (boundService == null) {
             return;
         }
-        if (boundService.isScanning()) {
+        // A scan that is recovering is still wanted: the button withdraws it.
+        String wanted = boundService.scanStatus().state;
+        if (ScanStatus.SCANNING.equals(wanted) || ScanStatus.RECOVERING.equals(wanted)) {
             boundService.stopScanning();
             toggleButton.setText(R.string.action_start);
             applyIdleStatus();
@@ -294,12 +296,20 @@ public final class MainActivity extends android.app.Activity {
             List<Blip> blips = boundService.snapshot();
             radarView.setBlips(blips);
             deviceListAdapter.replaceAll(blips);
-            if (boundService.isScanning()) {
+            ScanStatus scan = boundService.scanStatus();
+            if (scan.isScanning()) {
                 setStatus(getString(R.string.status_scanning_fmt, blips.size()));
                 toggleButton.setText(R.string.action_stop);
+            } else if (ScanStatus.RECOVERING.equals(scan.state)) {
+                // Wanted but not running: the scan resumes by itself, and Stop withdraws it.
+                setStatus(getString(R.string.status_recovering_fmt, scan.error));
+                toggleButton.setText(R.string.action_stop);
+            } else if (ScanStatus.FAILED.equals(scan.state)) {
+                setStatus(getString(R.string.status_failed_fmt, scan.error));
+                toggleButton.setText(R.string.action_start);
             } else if (getString(R.string.action_stop).contentEquals(toggleButton.getText())) {
-                // The scan ended without a toggle (scan failure, or the sticky
-                // service could not resume): reflect the real state.
+                // The scan ended without a toggle (the sticky service could not
+                // resume): reflect the real state.
                 toggleButton.setText(R.string.action_start);
                 applyIdleStatus();
             }

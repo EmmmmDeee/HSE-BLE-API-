@@ -18,6 +18,9 @@
 //!   scan with the idle notification and keeps the service, and a `kill -9`
 //!   of the app process is followed by the `START_STICKY` restart that
 //!   resumes the scan;
+//! * with the beacon still advertising, turning Bluetooth off and back on:
+//!   the API must stop claiming a scan while the adapter is gone, and the
+//!   scan must sight the beacon again on its own once it is back;
 //! * the update check the first launch starts fetched the repository's
 //!   release manifest — or fell back to the bundled one, the outcome
 //!   reported — ran to its decision and its `dataSync` service finished (no
@@ -118,6 +121,11 @@ const HISTORY_TIMEOUT: Duration = Duration::from_secs(15);
 const BEACON_HISTORY_KEY: &str = "c0:de:be:ac:0d:01";
 /// How long the scan may take to list the beacon after it started.
 const BEACON_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the API may go on claiming a scan after the adapter went off.
+const ADAPTER_OFF_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the scan gets, once the adapter is back, to sight the beacon
+/// (still advertising, every 100 ms) again with nobody pressing Start.
+const ADAPTER_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 /// The keys `GET /api/wifi` documents, present whether or not the survey runs.
 const WIFI_TOP_KEYS: &[&str] = &[
     "access_points",
@@ -579,11 +587,26 @@ fn post(port: u16, target: &str) -> Result<HttpResponse, String> {
 
 /// Polls `GET /api/status` until it carries `"key":<literal>`.
 fn wait_for_status(port: u16, key: &str, literal: &str) -> Result<String, String> {
+    wait_for_status_within(port, key, literal, PROMOTION_TIMEOUT)
+}
+
+/// [`wait_for_status`] with its own bound.
+fn wait_for_status_within(
+    port: u16,
+    key: &str,
+    literal: &str,
+    timeout: Duration,
+) -> Result<String, String> {
     let started = Instant::now();
     let mut last = String::new();
-    while started.elapsed() < PROMOTION_TIMEOUT {
+    while started.elapsed() < timeout {
         if let Ok(response) = get(port, "/api/status") {
             last = body_text(&response);
+            // The bound is judged after the answer (a request retries on its
+            // own for seconds), so a match that arrived late never passes.
+            if started.elapsed() >= timeout {
+                break;
+            }
             if json_has(&last, key, literal) {
                 return Ok(last);
             }
@@ -592,7 +615,7 @@ fn wait_for_status(port: u16, key: &str, literal: &str) -> Result<String, String
     }
     Err(format!(
         "within {}s /api/status never reported \"{key}\":{literal} (last: {last})",
-        PROMOTION_TIMEOUT.as_secs()
+        timeout.as_secs()
     ))
 }
 
@@ -665,24 +688,25 @@ fn body_text(response: &HttpResponse) -> String {
     String::from_utf8_lossy(&response.body).into_owned()
 }
 
-/// `POST /api/scan/start`, which must be accepted: a service instance the
-/// activity's relaunch is destroying refuses a start (its engine is closed)
-/// and the instance the relaunch creates takes the next one, so an
-/// "unavailable" refusal is retried briefly. The `200` body.
+/// `POST /api/scan/start`, which must be accepted. A `409` of "scanner
+/// unavailable" is retried briefly: it can mean a service instance the
+/// activity's relaunch is destroying (its engine is closed, and the instance
+/// the relaunch creates takes the next request) or a platform scanner that is
+/// not ready yet (`startScanner()` returned `false`) — this function does not
+/// know which, so it names neither.
+///
+/// The `200` body is returned exactly as observed: a start the platform then
+/// refuses (a Bluetooth stack that has only just come up failing the
+/// scanner's registration) is accepted with `"scanning":false` — the app is
+/// recovering, not yet scanning — and the caller's own wait for
+/// `"scanning":true` is what must prove it heals. Fabricating a `true` body
+/// here would let that wait pass without ever having observed the real one.
 fn start_scan(port: u16) -> Result<String, String> {
     let mut start = post(port, "/api/scan/start")?;
     let mut start_text = body_text(&start);
     let mut retries = 0;
     for _ in 0..REQUEST_ATTEMPTS {
-        // Two transient outcomes on a Bluetooth stack that has only just come up:
-        // the scanner is not there yet (409), or the start is accepted and the
-        // platform then fails the scanner's registration before the answer is
-        // written (200 with `"scanning":false`, the state the engine really is
-        // in). Each is retried a bounded number of times, and reported when it
-        // happens; a start that never takes is still a failure below.
-        let transient = (start.status == 409 && start_text.contains("scanner unavailable"))
-            || (start.status == 200 && start_text == SCAN_STOPPED_JSON);
-        if !transient {
+        if !(start.status == 409 && start_text.contains("scanner unavailable")) {
             break;
         }
         retries += 1;
@@ -692,14 +716,19 @@ fn start_scan(port: u16) -> Result<String, String> {
     }
     if retries > 0 {
         println!(
-            "scan start needed {retries} retr(y/ies) on a Bluetooth stack that had just come up"
+            "scan start needed {retries} retr(y/ies) on a transient \"scanner unavailable\" refusal"
         );
     }
-    if start.status != 200 || start_text != SCAN_STARTED_JSON {
+    if start.status != 200 || (start_text != SCAN_STARTED_JSON && start_text != SCAN_STOPPED_JSON) {
         return Err(format!(
             "POST /api/scan/start answered {} {start_text}; expected 200 {SCAN_STARTED_JSON} (the adapter was enabled above, so a refusal is a regression)",
             start.status
         ));
+    }
+    if start_text == SCAN_STOPPED_JSON {
+        println!(
+            "scan start was accepted while the platform refused the registration: the app is recovering by itself"
+        );
     }
     Ok(start_text)
 }
@@ -1097,6 +1126,61 @@ fn wait_for_bluetooth(adb: &Adb) -> Result<Duration, String> {
     ))
 }
 
+/// Waits for `bluetooth_on` to read `expected` (`"0"` or `"1"`) after a
+/// `svc bluetooth disable`/`enable`; the time it took.
+fn wait_for_adapter(adb: &Adb, expected: &str) -> Result<Duration, String> {
+    let started = Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < BLUETOOTH_TIMEOUT {
+        last = adb
+            .shell_lenient("settings get global bluetooth_on")
+            .trim()
+            .to_string();
+        if last == expected {
+            return Ok(started.elapsed());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!(
+        "bluetooth_on stayed `{last}`, not `{expected}`, for {}s after `svc bluetooth`",
+        BLUETOOTH_TIMEOUT.as_secs()
+    ))
+}
+
+/// The Bluetooth manager's own account of the adapter (`ON`, `OFF`,
+/// `TURNING_ON`, ...), from `dumpsys bluetooth_manager`. The `bluetooth_on`
+/// setting flips when a change is *requested*, before the adapter has made
+/// it, so it cannot say when the adapter is really gone or really back.
+fn adapter_state(adb: &Adb) -> Option<String> {
+    adb.shell_lenient("dumpsys bluetooth_manager")
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.trim().split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("state")
+                .then(|| value.trim().to_ascii_uppercase())
+        })
+}
+
+/// Waits until [`adapter_state`] reads `expected`; the time it took.
+fn wait_for_adapter_state(adb: &Adb, expected: &str) -> Result<Duration, String> {
+    let started = Instant::now();
+    let mut last = None;
+    while started.elapsed() < BLUETOOTH_TIMEOUT {
+        last = adapter_state(adb);
+        if last.as_deref() == Some(expected) {
+            return Ok(started.elapsed());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!(
+        "the Bluetooth manager's state stayed {last:?}, not {expected}, for {}s\n{}",
+        BLUETOOTH_TIMEOUT.as_secs(),
+        adb.shell_lenient("dumpsys bluetooth_manager | head -n 25")
+            .trim()
+    ))
+}
+
 fn shutdown(adb: &Adb, emulator: &mut Child) {
     let _ = adb.run(&["emu", "kill"]);
     let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
@@ -1114,6 +1198,106 @@ fn shutdown(adb: &Adb, emulator: &mut Child) {
 
 /// The report of one run: one line per verified fact.
 pub type Report = Vec<String>;
+
+/// Bluetooth turned off and back on while a scan is running and the virtual
+/// beacon keeps advertising (its controller is a separate connection to the
+/// daemon, so the guest's adapter cycling does not touch it): what the API
+/// claims while the adapter is gone, and whether the scan sights the beacon
+/// again once the adapter is back, with nobody pressing Start. Both claims are
+/// judged before the phase fails, so one run shows both.
+fn adapter_phase(adb: &Adb, port: u16, report: &mut Report) -> Result<(), String> {
+    let mut failures: Vec<String> = Vec::new();
+
+    println!("== Bluetooth turned off while scanning: the API must not claim a scan ==");
+    let _ = adb.shell_lenient("svc bluetooth disable");
+    let off_after = wait_for_adapter(adb, "0")?;
+    wait_for_adapter_state(adb, "OFF")?;
+    let off = Instant::now();
+    match wait_for_status_within(port, "scan_state", "\"recovering\"", ADAPTER_OFF_STATUS_TIMEOUT)
+        .and_then(|status| {
+            if json_has(&status, "scanning", "false")
+                && json_has(&status, "scan_error", "\"Bluetooth is off\"")
+            {
+                Ok(status)
+            } else {
+                Err(format!("the status is recovering without saying why or still scanning: {status}"))
+            }
+        }) {
+        Ok(status) => report.push(format!(
+            "adapter off: bluetooth_on=0 {:.1}s after `svc bluetooth disable`; /api/status reported {status} {:.1}s later",
+            off_after.as_secs_f64(),
+            off.elapsed().as_secs_f64()
+        )),
+        Err(error) => failures.push(format!(
+            "the adapter was off and {error}: the API must report a wanted scan that is not running as recovering, with its reason"
+        )),
+    }
+
+    println!("== Bluetooth turned back on: the scan must resume by itself ==");
+    let _ = adb.shell_lenient("svc bluetooth enable");
+    let on_after = wait_for_adapter(adb, "1")?;
+    wait_for_adapter_state(adb, "ON")?;
+    let on = Instant::now();
+    let mut last = String::new();
+    let sighted = loop {
+        let text = body_text(&get(port, "/api/devices")?);
+        let sampled = Instant::now();
+        // A row that outlived the adapter's cycle (rows are pruned after 30 s)
+        // proves nothing: only a sighting made after the adapter came back does.
+        if let Some(row) = beacon_row(&text)
+            && let Some(ago) =
+                json_integer(row, "last_seen_ago_ms").and_then(|ago| u64::try_from(ago).ok())
+            && let Some(seen) = sampled.checked_sub(Duration::from_millis(ago))
+            && seen >= on
+            && sampled.duration_since(on) <= ADAPTER_RESUME_TIMEOUT
+        {
+            break Some((row.to_string(), seen.duration_since(on)));
+        }
+        last = text;
+        if on.elapsed() >= ADAPTER_RESUME_TIMEOUT {
+            break None;
+        }
+        thread::sleep(Duration::from_secs(1));
+    };
+    if sighted.is_some() {
+        match wait_for_status_within(
+            port,
+            "scan_state",
+            "\"scanning\"",
+            ADAPTER_OFF_STATUS_TIMEOUT,
+        ) {
+            Ok(status) if json_has(&status, "scan_error", "null") => {}
+            Ok(status) => failures.push(format!(
+                "the scan is back but still carries an error: {status}"
+            )),
+            Err(error) => failures.push(format!(
+                "the beacon was sighted again but {error}\n-- bluetooth_on: {} --\n-- the app's log --\n{}\n-- the Bluetooth manager --\n{}",
+                adb.shell_lenient("settings get global bluetooth_on").trim(),
+                adb.shell_lenient("logcat -d -s BleScanEngine:* RadarScanService:* | tail -n 60").trim(),
+                adb.shell_lenient("dumpsys bluetooth_manager | grep -iE 'state|enabled|ble' | head -n 20").trim()
+            )),
+        }
+    }
+    match sighted {
+        Some((row, after)) => report.push(format!(
+            "adapter back: bluetooth_on=1 {:.1}s after `svc bluetooth enable`; the scan resumed with no request and sighted the beacon {:.1}s after the adapter returned: {row}",
+            on_after.as_secs_f64(),
+            after.as_secs_f64()
+        )),
+        None => failures.push(format!(
+            "within {}s of the adapter's return /api/devices held no sighting of {BEACON_ADDRESS} made after it (last: {last})\n-- the app's scan log --\n{}",
+            ADAPTER_RESUME_TIMEOUT.as_secs(),
+            adb.shell_lenient("logcat -d -s BleScanEngine:* RadarScanService:* | tail -n 40")
+                .trim()
+        )),
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
+}
 
 fn exercise(
     adb: &Adb,
@@ -1203,9 +1387,23 @@ fn exercise(
     require_keys(
         "GET /api/status",
         &status.body,
-        &["scanning", "device_count", "native_available", "uptime_ms"],
+        &[
+            "scanning",
+            "device_count",
+            "native_available",
+            "uptime_ms",
+            "scan_state",
+            "scan_error",
+        ],
     )?;
     let status_text = body_text(&status);
+    if !json_has(&status_text, "scan_state", "\"idle\"")
+        || !json_has(&status_text, "scan_error", "null")
+    {
+        return Err(format!(
+            "before any scan the status must be idle with no error: {status_text}"
+        ));
+    }
     if !json_has(&status_text, "native_available", "true") {
         return Err(format!(
             "native_available is not true on the device (the library did not load): {status_text}"
@@ -1397,6 +1595,8 @@ fn exercise(
             "beacon: listed {:.1}s after its start: {row}",
             after.as_secs_f64()
         ));
+
+        adapter_phase(adb, port, report)?;
 
         beacon.remove()?;
         let removed = Instant::now();

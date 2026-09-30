@@ -33,6 +33,7 @@ pub const HOST_TEST_CLASSES: &[(&str, usize)] = &[
     ("BlipTest.java", 14),
     ("DeviceHistoryTest.java", 10),
     ("ReleaseManifestTest.java", 50),
+    ("ScanSupervisorTest.java", 21),
     ("WifiApTest.java", 12),
     ("WifiSurveyTest.java", 4),
 ];

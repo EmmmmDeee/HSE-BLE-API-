@@ -77,8 +77,12 @@ import java.util.logging.Logger;
  *       {@code null} for an access point that is not remembered (only a
  *       trackable BSSID is); every reading rule decided by the Rust core), {@code state} (why the list may be
  *       empty), {@code dropped}, {@code native_available}, {@code timestamp_ms}.</li>
- *   <li>{@code /api/status} — {@code scanning}, {@code device_count},
- *       {@code native_available}, {@code uptime_ms}.</li>
+ *   <li>{@code /api/status} — {@code scanning} (the platform scan is running),
+ *       {@code device_count}, {@code native_available}, {@code uptime_ms},
+ *       {@code scan_state} ({@code idle|scanning|recovering|failed}: a scan
+ *       that was asked for and is not running is {@code recovering} while the
+ *       adapter is off or a retry is pending, {@code failed} once the platform
+ *       will not run it) and {@code scan_error} (why, {@code null} otherwise).</li>
  *   <li>{@code /api/updates} — {@code last_check_ms}, {@code next_check_ms},
  *       {@code retry_count}.</li>
  *   <li>{@code /} — the web dashboard ({@code text/html}): the packaged
@@ -622,10 +626,14 @@ public final class ApiHttpServer {
     private String statusJson() {
         Json json = new Json();
         json.beginObject();
-        json.name("scanning").value(engine.isScanning());
+        // One read: the flag, the state and the reason belong to the same moment.
+        ScanStatus scan = engine.scanStatus();
+        json.name("scanning").value(scan.isScanning());
         json.name("device_count").value(engine.snapshot().size());
         json.name("native_available").value(NativeRadar.isAvailable());
         json.name("uptime_ms").value(engine.getUptimeMillis());
+        json.name("scan_state").value(scan.state);
+        json.name("scan_error").value(scan.error);
         json.endObject();
         return json.toString();
     }

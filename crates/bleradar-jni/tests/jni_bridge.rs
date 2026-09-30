@@ -13,17 +13,19 @@ use bleradar_jni::{
     ARTIFACT_VERIFIED, Java_com_hse_bleradar_NativeRadar_artifactVerifyFile,
     Java_com_hse_bleradar_NativeRadar_releaseManifestCanonical,
     Java_com_hse_bleradar_NativeRadar_releaseManifestError,
-    Java_com_hse_bleradar_NativeRadar_releaseManifestField, MANIFEST_FIELD_MANDATORY,
+    Java_com_hse_bleradar_NativeRadar_releaseManifestField,
+    Java_com_hse_bleradar_NativeRadar_scanFailureAction, MANIFEST_FIELD_MANDATORY,
     MANIFEST_FIELD_MIN_SDK, MANIFEST_FIELD_NOTES, MANIFEST_FIELD_SHA256, MANIFEST_FIELD_SIZE_BYTES,
     MANIFEST_FIELD_URL, MANIFEST_FIELD_VERSION_CODE, MANIFEST_FIELD_VERSION_NAME,
-    TrackingSnapshotJniInput, artifact_verify_file, artifact_verify_reader, ble_distance_m_or_nan,
+    SCAN_FAILURE_ALREADY_RUNNING, SCAN_FAILURE_GIVE_UP, TrackingSnapshotJniInput,
+    artifact_verify_file, artifact_verify_reader, ble_distance_m_or_nan,
     calibration_profile_path_loss_exponent_or_nan, calibration_profile_rssi_at_1m_dbm_or_nan,
     default_calibration_profile_ordinal, default_tracking_profile_ordinal, device_rank_key,
     device_should_prune, distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan,
     download_readiness_ordinal, filtered_rssi_or_nan, manifest_source_decision_ordinal,
     proximity_label_ordinal, release_manifest_canonical, release_manifest_error,
-    release_manifest_field, retry_backoff_delay_secs, should_check_for_update_flag,
-    signal_confidence_percent_or_negative, signal_trend_ordinal,
+    release_manifest_field, retry_backoff_delay_secs, scan_failure_action_code,
+    should_check_for_update_flag, signal_confidence_percent_or_negative, signal_trend_ordinal,
     tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
     tracking_distance_m_or_nan, tracking_distance_proximity_ordinal,
     tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
@@ -1323,5 +1325,48 @@ fn wifi_observation_drops_a_placeholder_or_malformed_bssid() {
             None,
             "{bssid}"
         );
+    }
+}
+
+#[test]
+fn scan_failure_action_encodes_give_up_already_running_and_a_retry_delay() {
+    // The platform's six codes, first failure of an incident.
+    assert_eq!(scan_failure_action_code(1, 0), SCAN_FAILURE_ALREADY_RUNNING);
+    assert_eq!(scan_failure_action_code(2, 0), 1_000);
+    assert_eq!(scan_failure_action_code(3, 0), 1_000);
+    assert_eq!(scan_failure_action_code(4, 0), SCAN_FAILURE_GIVE_UP);
+    assert_eq!(scan_failure_action_code(5, 0), 1_000);
+    assert_eq!(scan_failure_action_code(6, 0), 31_000);
+    // Backoff, the cap and the end of the incident.
+    let delays: Vec<i64> = (0..=5).map(|n| scan_failure_action_code(2, n)).collect();
+    assert_eq!(
+        delays,
+        [1_000, 2_000, 4_000, 8_000, 16_000, SCAN_FAILURE_GIVE_UP]
+    );
+    // The sentinels can never be mistaken for a delay.
+    const { assert!(SCAN_FAILURE_GIVE_UP < SCAN_FAILURE_ALREADY_RUNNING) };
+    assert_eq!(SCAN_FAILURE_ALREADY_RUNNING, 0);
+    // A negative count (a caller's bug) reads as none; the extremes are answered.
+    assert_eq!(scan_failure_action_code(2, -1), 1_000);
+    assert_eq!(scan_failure_action_code(2, i32::MIN), 1_000);
+    assert_eq!(scan_failure_action_code(2, i32::MAX), SCAN_FAILURE_GIVE_UP);
+    assert_eq!(scan_failure_action_code(i32::MIN, 0), 1_000);
+}
+
+#[test]
+fn scan_failure_action_export_answers_what_its_core_answers() {
+    for error_code in [i32::MIN, -1, 0, 1, 2, 3, 4, 5, 6, 7, 255, i32::MAX] {
+        for retries in [i32::MIN, -1, 0, 1, 2, 4, 5, 6, i32::MAX] {
+            assert_eq!(
+                Java_com_hse_bleradar_NativeRadar_scanFailureAction(
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    error_code,
+                    retries
+                ),
+                scan_failure_action_code(error_code, retries),
+                "code {error_code}, retries {retries}"
+            );
+        }
     }
 }
