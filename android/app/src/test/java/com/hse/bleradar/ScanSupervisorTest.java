@@ -275,4 +275,118 @@ public class ScanSupervisorTest {
         assertFalse("refused", scan.request());
         assertEquals("one start only", 1, platform.starts);
     }
+
+    @Test
+    public void a_duplicate_request_that_itself_fails_leaves_the_pending_retry_alone() {
+        FakePlatform platform = new FakePlatform();
+        ScanSupervisor scan = supervisor(platform);
+        assertTrue("accepted", scan.request());
+        scan.onScanFailed(REGISTRATION_FAILED);
+        assertEquals("recovering with a retry pending", 1000L, platform.pendingDelay);
+        Runnable theRealRetry = platform.pending;
+        // A second, unrelated accepted start reaches the platform (e.g. the
+        // activity's own Start button pressed while the API already asked)
+        // and this one fails synchronously.
+        platform.startWorks = false;
+        assertFalse("this duplicate start itself fails", scan.request());
+        assertEquals("still recovering", ScanStatus.RECOVERING, scan.status().state);
+        assertEquals("the original retry was not cancelled", theRealRetry, platform.pending);
+        assertEquals("its delay is unchanged", 1000L, platform.pendingDelay);
+        // The pre-existing retry still heals the scan.
+        platform.startWorks = true;
+        platform.runPending();
+        assertEquals("scanning", ScanStatus.SCANNING, scan.status().state);
+    }
+
+    @Test
+    public void a_duplicate_request_that_succeeds_cancels_the_pending_retry() {
+        FakePlatform platform = new FakePlatform();
+        ScanSupervisor scan = supervisor(platform);
+        assertTrue("accepted", scan.request());
+        scan.onScanFailed(REGISTRATION_FAILED);
+        assertNotNull("a retry is pending", platform.pending);
+        assertTrue("this duplicate start succeeds", scan.request());
+        assertEquals("scanning", ScanStatus.SCANNING, scan.status().state);
+        assertNull("the superseded retry was cancelled", platform.pending);
+    }
+
+    @Test
+    public void stop_releases_the_platform_scan_even_when_registered_was_already_believed_false() {
+        FakePlatform platform = new FakePlatform();
+        ScanSupervisor scan = supervisor(platform);
+        assertTrue("accepted", scan.request());
+        // A stale OFF (or a stale failure) can set the supervisor's belief to
+        // false while the platform's registration is, in fact, still live —
+        // onAdapter(false) never itself calls stopScanner().
+        scan.onAdapter(false);
+        assertEquals("recovering, believed unregistered", 0, platform.stops);
+        scan.cancel();
+        assertEquals("idle", ScanStatus.IDLE, scan.status().state);
+        assertEquals(
+                "stopScanner is called unconditionally, so a stale live registration is not leaked",
+                1, platform.stops);
+    }
+
+    @Test
+    public void two_scan_failed_callbacks_for_one_attempt_count_as_a_single_retry() {
+        FakePlatform platform = new FakePlatform();
+        ScanSupervisor scan = supervisor(platform);
+        assertTrue("accepted", scan.request());
+        // AOSP's BluetoothLeScanner.startRegistration can post two distinct
+        // SCAN_FAILED_* codes for one failed registerScanner call (observed:
+        // INTERNAL_ERROR then APPLICATION_REGISTRATION_FAILED) before any new
+        // attempt is made.
+        scan.onScanFailed(3);
+        assertEquals("first delay", 1000L, platform.pendingDelay);
+        scan.onScanFailed(REGISTRATION_FAILED);
+        assertEquals(
+                "the duplicate callback for the same attempt did not advance the backoff",
+                1000L, platform.pendingDelay);
+        platform.runPending();
+        assertEquals("scanning again", ScanStatus.SCANNING, scan.status().state);
+        // A genuinely new attempt's failure is not suppressed.
+        scan.onScanFailed(REGISTRATION_FAILED);
+        assertEquals("second delay", 2000L, platform.pendingDelay);
+    }
+
+    @Test
+    public void the_fallback_rule_used_without_natives_treats_already_started_as_running() {
+        // BleScanEngine's constructor wires exactly this rule when
+        // NativeRadar.isAvailable() is false; verified directly since that
+        // class itself cannot be compiled on the host JVM (it references
+        // android.*).
+        assertEquals("code 1, no retries yet", NativeRadar.SCAN_FAILURE_ALREADY_RUNNING,
+                ScanSupervisor.fallbackFailureAction(ALREADY_STARTED, 0));
+        assertEquals("code 1, regardless of retry count", NativeRadar.SCAN_FAILURE_ALREADY_RUNNING,
+                ScanSupervisor.fallbackFailureAction(ALREADY_STARTED, 99));
+        for (int code : new int[] {0, 2, 3, 4, 5, 6, -1}) {
+            assertEquals("code " + code + " is permanent without the core",
+                    NativeRadar.SCAN_FAILURE_GIVE_UP, ScanSupervisor.fallbackFailureAction(code, 0));
+        }
+
+        FakePlatform platform = new FakePlatform();
+        ScanSupervisor scan = new ScanSupervisor(platform, ScanSupervisor::fallbackFailureAction);
+        assertTrue("accepted", scan.request());
+        scan.onScanFailed(ALREADY_STARTED);
+        assertEquals("stays scanning, not failed", ScanStatus.SCANNING, scan.status().state);
+        scan.cancel();
+        assertEquals("Stop still releases the live registration", 1, platform.stops);
+    }
+
+    @Test
+    public void a_status_listener_is_notified_of_every_published_change_but_not_of_a_refused_request() {
+        FakePlatform platform = new FakePlatform();
+        int[] calls = {0};
+        ScanSupervisor scan = new ScanSupervisor(platform, NativeRadar::scanFailureAction, () -> calls[0]++);
+        platform.adapterOn = false;
+        assertFalse("refused, no state change", scan.request());
+        assertEquals("not notified of a no-op", 0, calls[0]);
+        platform.adapterOn = true;
+        assertTrue("accepted", scan.request());
+        assertEquals("notified once, for SCANNING", 1, calls[0]);
+        scan.onAdapter(false);
+        assertEquals("notified again, for RECOVERING", 2, calls[0]);
+        scan.cancel();
+        assertEquals("notified again, for IDLE", 3, calls[0]);
+    }
 }

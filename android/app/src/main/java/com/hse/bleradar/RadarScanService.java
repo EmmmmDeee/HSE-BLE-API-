@@ -96,7 +96,7 @@ public final class RadarScanService extends Service implements ScanControl {
     @Override
     public void onCreate() {
         super.onCreate();
-        engine = new BleScanEngine(this);
+        engine = new BleScanEngine(this, this::refreshNotification);
         wifi = new WifiScanEngine(this);
         createNotificationChannel();
         httpServer = new ApiHttpServer(
@@ -259,7 +259,7 @@ public final class RadarScanService extends Service implements ScanControl {
      * leaves the foreground again; an API pause passes {@code false} to stay.
      */
     private void promoteToForeground(boolean scanning, boolean stopWhenIdle) {
-        Notification notification = buildNotification(scanning);
+        Notification notification = buildNotification(getString(scanning ? R.string.notif_title : R.string.notif_title_idle));
         if (Build.VERSION.SDK_INT >= MIN_ANDROID_VERSION_FOR_FOREGROUND_SERVICE_TYPE) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
         } else {
@@ -277,6 +277,41 @@ public final class RadarScanService extends Service implements ScanControl {
         }
     }
 
+    /**
+     * Keeps a shown notification's text in sync with {@link ScanSupervisor}
+     * state changes that do not go through {@link #onStartCommand} or
+     * {@link #requestStop} — the adapter cycling, a retry, a give-up. Without
+     * this, the notification (the only UI visible while the app is in the
+     * background) kept saying "scanning" through a {@code recovering} or
+     * {@code failed} state, and a {@code failed} one is a persistent,
+     * non-dismissable claim of a scan the app itself gave up on.
+     *
+     * <p>Never promotes or demotes the foreground state itself — only start
+     * and stop own that (see {@link #promoteToForeground}) — so it is a no-op
+     * before the service is first promoted; that promotion reads the correct
+     * text on its own.
+     */
+    private void refreshNotification() {
+        if (!foreground || engine == null) {
+            return;
+        }
+        ScanStatus status = engine.scanStatus();
+        String text;
+        if (ScanStatus.SCANNING.equals(status.state)) {
+            text = getString(R.string.notif_title);
+        } else if (ScanStatus.RECOVERING.equals(status.state)) {
+            text = getString(R.string.notif_title_recovering_fmt, status.error);
+        } else if (ScanStatus.FAILED.equals(status.state)) {
+            text = getString(R.string.notif_title_failed_fmt, status.error);
+        } else {
+            text = getString(R.string.notif_title_idle);
+        }
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.notify(NOTIFICATION_ID, buildNotification(text));
+        }
+    }
+
     private void createNotificationChannel() {
         NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
@@ -291,12 +326,11 @@ public final class RadarScanService extends Service implements ScanControl {
         }
     }
 
-    private Notification buildNotification(boolean scanning) {
+    private Notification buildNotification(String text) {
         Intent launchIntent = new Intent(this, MainActivity.class);
         PendingIntent contentIntent = PendingIntent.getActivity(
                 this, 0, launchIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        String text = getString(scanning ? R.string.notif_title : R.string.notif_title_idle);
         return new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle(getString(R.string.app_name))
                 .setContentText(text)

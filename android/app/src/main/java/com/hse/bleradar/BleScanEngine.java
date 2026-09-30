@@ -76,7 +76,14 @@ final class BleScanEngine implements SnapshotSource {
         }
     };
 
-    BleScanEngine(Context context) {
+    /**
+     * @param onScanStatusChanged notified after every published
+     *     {@link ScanSupervisor} state change (an adapter cycle, a retry, a
+     *     give-up — not only a start/stop this caller made itself), so the
+     *     owning service can keep a shown notification's text in sync. May be
+     *     {@code null}.
+     */
+    BleScanEngine(Context context, Runnable onScanStatusChanged) {
         this.appContext = context.getApplicationContext();
         this.calibrationProfile = NativeRadar.isAvailable()
                 ? NativeRadar.defaultCalibrationProfile()
@@ -89,7 +96,8 @@ final class BleScanEngine implements SnapshotSource {
                 new AndroidPlatform(),
                 NativeRadar.isAvailable()
                         ? NativeRadar::scanFailureAction
-                        : (code, retries) -> NativeRadar.SCAN_FAILURE_GIVE_UP);
+                        : ScanSupervisor::fallbackFailureAction,
+                onScanStatusChanged);
     }
 
     static boolean hasRequiredPermissions(Context context) {

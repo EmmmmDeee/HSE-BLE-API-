@@ -55,23 +55,67 @@ final class ScanSupervisor {
 
     /** {@code ScanCallback.SCAN_FAILED_INTERNAL_ERROR}: what a scanner that cannot be started counts as. */
     static final int INTERNAL_ERROR = 3;
+    /** {@code ScanCallback.SCAN_FAILED_ALREADY_STARTED}: the registration is live; restart nothing. */
+    static final int SCAN_FAILED_ALREADY_STARTED = 1;
+
+    /**
+     * The failure rule used when the native core failed to load: every code is
+     * permanent ({@link NativeRadar#SCAN_FAILURE_GIVE_UP}) except
+     * {@link #SCAN_FAILED_ALREADY_STARTED}, whose meaning — the registration is
+     * live, restart nothing — does not depend on the Rust rule's backoff policy
+     * and must hold even without it. Package-private (not private) so
+     * {@link ScanSupervisorTest} can hold it to that contract directly: the
+     * class that would otherwise carry this lambda (`BleScanEngine`) cannot be
+     * compiled on the host JVM (it references {@code android.*}).
+     */
+    static long fallbackFailureAction(int errorCode, int retriesSoFar) {
+        return errorCode == SCAN_FAILED_ALREADY_STARTED
+                ? NativeRadar.SCAN_FAILURE_ALREADY_RUNNING
+                : NativeRadar.SCAN_FAILURE_GIVE_UP;
+    }
 
     private final Platform platform;
     private final FailureRule rule;
+    /** Notified after every published state change; {@code null} when nobody needs to know (tests). */
+    private final Runnable onStatusChanged;
     private volatile ScanStatus status = ScanStatus.IDLE_STATUS;
     private boolean requested;
     private boolean closed;
     private boolean registered;
     /** Failures of the current incident that were retried; reset by a result, a request or the adapter's return. */
     private volatile int retries;
+    /**
+     * Bumped every time {@link #platform}'s scanner is (successfully) started:
+     * one physical registration attempt. AOSP can post two distinct
+     * {@code SCAN_FAILED_*} codes for a single failed {@code registerScanner}
+     * call (observed: {@code INTERNAL_ERROR} then
+     * {@code APPLICATION_REGISTRATION_FAILED}); {@link #failedAttemptGeneration}
+     * records which attempt the last processed failure belonged to, so a
+     * second callback for the same attempt cannot double the backoff.
+     */
+    private int attemptGeneration;
+    private int failedAttemptGeneration = -1;
 
     ScanSupervisor(Platform platform, FailureRule rule) {
+        this(platform, rule, null);
+    }
+
+    ScanSupervisor(Platform platform, FailureRule rule, Runnable onStatusChanged) {
         this.platform = platform;
         this.rule = rule;
+        this.onStatusChanged = onStatusChanged;
     }
 
     ScanStatus status() {
         return status;
+    }
+
+    /** Publishes {@code next} and tells whoever is watching (a foreground notification, typically). */
+    private void setStatus(ScanStatus next) {
+        status = next;
+        if (onStatusChanged != null) {
+            onStatusChanged.run();
+        }
     }
 
     /**
@@ -90,18 +134,28 @@ final class ScanSupervisor {
         if (!platform.adapterOn()) {
             return false;
         }
-        platform.cancelScheduled();
         if (registered) {
             platform.stopScanner();
             registered = false;
         }
+        // Every real call to the platform, whether it succeeds or not, is its
+        // own attempt: bumping first (not only on success) means a fail() this
+        // call itself triggers is never mistaken for a duplicate of an
+        // earlier one.
+        attemptGeneration++;
         if (!platform.startScanner()) {
+            // Leaving the state as it was means exactly that: a retry this
+            // failed duplicate request did not itself make must not be
+            // cancelled, or nothing is left to bring the scan back.
             return false;
         }
+        // Only now, with the new registration live, is a retry scheduled for
+        // an earlier failed attempt of this same incident superseded.
+        platform.cancelScheduled();
         requested = true;
         registered = true;
         retries = 0;
-        status = ScanStatus.SCANNING_STATUS;
+        setStatus(ScanStatus.SCANNING_STATUS);
         return true;
     }
 
@@ -110,11 +164,16 @@ final class ScanSupervisor {
         requested = false;
         retries = 0;
         platform.cancelScheduled();
-        if (registered) {
-            platform.stopScanner();
-            registered = false;
-        }
-        status = ScanStatus.IDLE_STATUS;
+        // Unconditional: registered is this class's belief and can be stale
+        // (a failure or an adapter-off delivered against a registration that
+        // is, in fact, still live) — stopScanner() is idempotent and already
+        // swallows its own exceptions, so calling it on nothing costs one
+        // no-op, while skipping it on something leaks a running scan no
+        // later start can free (the platform then answers ALREADY_STARTED
+        // forever).
+        platform.stopScanner();
+        registered = false;
+        setStatus(ScanStatus.IDLE_STATUS);
     }
 
     /** {@link #cancel()}, and every later {@link #request()} is refused. */
@@ -132,7 +191,7 @@ final class ScanSupervisor {
         if (!on) {
             // The platform's scanner went with the adapter: nothing to stop.
             registered = false;
-            status = new ScanStatus(ScanStatus.RECOVERING, "Bluetooth is off");
+            setStatus(new ScanStatus(ScanStatus.RECOVERING, "Bluetooth is off"));
             return;
         }
         // Always register afresh: a missed off event must not leave a dead
@@ -164,9 +223,10 @@ final class ScanSupervisor {
 
     /** Starts the platform scan; a scanner that cannot be started counts as an internal error. */
     private void attempt() {
+        attemptGeneration++;
         if (platform.startScanner()) {
             registered = true;
-            status = ScanStatus.SCANNING_STATUS;
+            setStatus(ScanStatus.SCANNING_STATUS);
         } else {
             fail(INTERNAL_ERROR);
         }
@@ -178,18 +238,27 @@ final class ScanSupervisor {
             // The platform says it is scanning: the registration stands.
             return;
         }
+        if (failedAttemptGeneration == attemptGeneration) {
+            // A second SCAN_FAILED_* callback for the very same registration
+            // attempt (AOSP's startRegistration can post INTERNAL_ERROR then
+            // APPLICATION_REGISTRATION_FAILED for one failed call): the first
+            // already counted this incident's retry and scheduled or gave up;
+            // counting the duplicate too would halve the documented backoff.
+            return;
+        }
+        failedAttemptGeneration = attemptGeneration;
         registered = false;
         platform.cancelScheduled();
         String cause = describe(errorCode);
         if (action == NativeRadar.SCAN_FAILURE_GIVE_UP || action < 0) {
-            status = new ScanStatus(ScanStatus.FAILED,
+            setStatus(new ScanStatus(ScanStatus.FAILED,
                     "The Bluetooth scan failed: " + cause + "; not retrying"
-                            + (retries > 0 ? " after " + retries + " retries" : ""));
+                            + (retries > 0 ? " after " + retries + " retries" : "")));
             return;
         }
         retries++;
-        status = new ScanStatus(ScanStatus.RECOVERING,
-                "The Bluetooth scan failed: " + cause + "; retrying in " + seconds(action));
+        setStatus(new ScanStatus(ScanStatus.RECOVERING,
+                "The Bluetooth scan failed: " + cause + "; retrying in " + seconds(action)));
         platform.schedule(action, this::retry);
     }
 
@@ -200,7 +269,7 @@ final class ScanSupervisor {
         }
         if (!platform.adapterOn()) {
             // The adapter's return will resume the scan.
-            status = new ScanStatus(ScanStatus.RECOVERING, "Bluetooth is off");
+            setStatus(new ScanStatus(ScanStatus.RECOVERING, "Bluetooth is off"));
             return;
         }
         attempt();

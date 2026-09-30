@@ -431,7 +431,7 @@ cargo xtask verify-api-live
 
 This runs the app's real `ApiHttpServer` — the class the APK ships, which
 references nothing in `android.*` — on the host JVM with fixture sources, a
-scripted `ScanControl` and the host `bleradar-jni` library, answers 27 real
+scripted `ScanControl` and the host `bleradar-jni` library, answers 48 real
 HTTP requests over loopback (the dashboard bytes, the three JSON documents
 byte-identical to the browser fixtures, `404`/`405`/`400`, `no-store`, exact
 `Content-Length`; scan control paused and resumed with every document
@@ -489,7 +489,10 @@ are simulated there), advertising as `bleradar-beacon` — listed by
 30 s and pruned by the core's freshness policy within 75 s of its removal,
 `POST /api/scan/stop` keeping the foreground with "BLE Radar is
 idle", a restarted service with the scan resumed after `kill -9` of the app
-process, the first launch's update check finished (its fetch of the
+process, Bluetooth turned off and back on with `/api/status` reporting
+`scan_state: recovering` and why while it is gone and the beacon sighted
+again with no request once the adapter returns, the first launch's update
+check finished (its fetch of the
 repository's release manifest logged with its outcome — a `404` until a
 release is published —, its decision logged, no service record or
 notification left), the API unreachable after

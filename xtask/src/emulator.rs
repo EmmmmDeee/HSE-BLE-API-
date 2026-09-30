@@ -688,16 +688,19 @@ fn body_text(response: &HttpResponse) -> String {
     String::from_utf8_lossy(&response.body).into_owned()
 }
 
-/// `POST /api/scan/start`, which must be accepted: a service instance the
-/// activity's relaunch is destroying refuses a start (its engine is closed)
-/// and the instance the relaunch creates takes the next one, so an
-/// "unavailable" refusal is retried briefly. The `200` body.
+/// `POST /api/scan/start`, which must be accepted. A `409` of "scanner
+/// unavailable" is retried briefly: it can mean a service instance the
+/// activity's relaunch is destroying (its engine is closed, and the instance
+/// the relaunch creates takes the next request) or a platform scanner that is
+/// not ready yet (`startScanner()` returned `false`) — this function does not
+/// know which, so it names neither.
 ///
-/// A start the platform then refuses (a Bluetooth stack that has only just
-/// come up failing the scanner's registration) answers `200` with
-/// `"scanning":false` — the request is accepted and the app is recovering — and
-/// the caller's wait for `"scanning":true` is what proves it heals: the
-/// harness no longer retries the start itself, which hid the defect.
+/// The `200` body is returned exactly as observed: a start the platform then
+/// refuses (a Bluetooth stack that has only just come up failing the
+/// scanner's registration) is accepted with `"scanning":false` — the app is
+/// recovering, not yet scanning — and the caller's own wait for
+/// `"scanning":true` is what must prove it heals. Fabricating a `true` body
+/// here would let that wait pass without ever having observed the real one.
 fn start_scan(port: u16) -> Result<String, String> {
     let mut start = post(port, "/api/scan/start")?;
     let mut start_text = body_text(&start);
@@ -712,19 +715,20 @@ fn start_scan(port: u16) -> Result<String, String> {
         start_text = body_text(&start);
     }
     if retries > 0 {
-        println!("scan start needed {retries} retr(y/ies) while the service instance was replaced");
-    }
-    if start.status == 200 && start_text == SCAN_STOPPED_JSON {
         println!(
-            "scan start was accepted while the platform refused the registration: the app is recovering by itself"
+            "scan start needed {retries} retr(y/ies) on a transient \"scanner unavailable\" refusal"
         );
-        return Ok(SCAN_STARTED_JSON.to_string());
     }
-    if start.status != 200 || start_text != SCAN_STARTED_JSON {
+    if start.status != 200 || (start_text != SCAN_STARTED_JSON && start_text != SCAN_STOPPED_JSON) {
         return Err(format!(
             "POST /api/scan/start answered {} {start_text}; expected 200 {SCAN_STARTED_JSON} (the adapter was enabled above, so a refusal is a regression)",
             start.status
         ));
+    }
+    if start_text == SCAN_STOPPED_JSON {
+        println!(
+            "scan start was accepted while the platform refused the registration: the app is recovering by itself"
+        );
     }
     Ok(start_text)
 }
