@@ -119,7 +119,7 @@ public final class NativeRadar {
     public static final int ADDRESS_TYPE_UNKNOWN = 0xFFFF;
 
     /** The ABI version {@code libbleradar_jni.so} is expected to report via {@link #abiVersion()}. */
-    public static final int EXPECTED_ABI_VERSION = 19;
+    public static final int EXPECTED_ABI_VERSION = 20;
 
     /** {@link #releaseManifestField(String, int)} selector: the release {@code versionCode}, as decimal text. */
     public static final int MANIFEST_FIELD_VERSION_CODE = 0;
@@ -464,6 +464,22 @@ public final class NativeRadar {
             long lastSeenUptimeMillis,
             int confidencePercent,
             double rssiDbm);
+
+    /** {@link #scanFailureAction(int, int)} result: do not start the scan again. */
+    public static final long SCAN_FAILURE_GIVE_UP = -1L;
+    /** {@link #scanFailureAction(int, int)} result: the platform says the scan is already running; restart nothing. */
+    public static final long SCAN_FAILURE_ALREADY_RUNNING = 0L;
+
+    /**
+     * What {@code ScanCallback.onScanFailed(errorCode)} should lead to, decided
+     * by {@code bleradar_core::scan_failure_action}: {@link #SCAN_FAILURE_GIVE_UP}
+     * for a permanent refusal or an incident whose retries are spent,
+     * {@link #SCAN_FAILURE_ALREADY_RUNNING} when the platform says the scan is
+     * running, else the positive number of milliseconds after which to start it
+     * again. {@code retriesSoFar} counts the failures of this incident already
+     * retried (a negative count reads as none).
+     */
+    public static native long scanFailureAction(int errorCode, int retriesSoFar);
 
     /**
      * The canonical form of a release manifest the Rust update core accepts

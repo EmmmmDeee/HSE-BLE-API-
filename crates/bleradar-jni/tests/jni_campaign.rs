@@ -1,7 +1,7 @@
 //! Differential campaign over every exported JNI symbol
 //! (`docs/AUTONOMOUS_DECISIONS.md` #65).
 //!
-//! The Android app calls the 32 `Java_com_hse_bleradar_NativeRadar_*` exports
+//! The Android app calls the `Java_com_hse_bleradar_NativeRadar_*` exports
 //! (the signal/tracking surface, the four automatic-update decision bridges —
 //! `updateDecision`, `shouldCheckForUpdate`, `downloadReadiness`,
 //! `retryBackoffDelaySeconds` — the two device-map policy bridges —
@@ -69,6 +69,7 @@ use bleradar_jni::{
     Java_com_hse_bleradar_NativeRadar_releaseManifestField,
     Java_com_hse_bleradar_NativeRadar_remoteManifestDisposition,
     Java_com_hse_bleradar_NativeRadar_retryBackoffDelaySeconds,
+    Java_com_hse_bleradar_NativeRadar_scanFailureAction,
     Java_com_hse_bleradar_NativeRadar_shouldCheckForUpdate,
     Java_com_hse_bleradar_NativeRadar_signalConfidencePercent,
     Java_com_hse_bleradar_NativeRadar_signalTrend,
@@ -88,12 +89,13 @@ use bleradar_jni::{
     distance_lower_bound_m_or_nan, distance_upper_bound_m_or_nan, download_readiness_ordinal,
     filtered_rssi_or_nan, manifest_source_decision_ordinal, proximity_label_ordinal,
     release_manifest_canonical, release_manifest_error, release_manifest_field,
-    retry_backoff_delay_secs, should_check_for_update_flag, signal_confidence_percent_or_negative,
-    signal_trend_ordinal, tracking_confidence_percent_or_negative,
-    tracking_distance_lower_bound_m_or_nan, tracking_distance_m_or_nan,
-    tracking_distance_proximity_ordinal, tracking_distance_upper_bound_m_or_nan,
-    tracking_filtered_rssi_or_nan, tracking_freshness_ordinal, tracking_proximity_ordinal,
-    tracking_trend_ordinal, update_decision_ordinal,
+    retry_backoff_delay_secs, scan_failure_action_code, should_check_for_update_flag,
+    signal_confidence_percent_or_negative, signal_trend_ordinal,
+    tracking_confidence_percent_or_negative, tracking_distance_lower_bound_m_or_nan,
+    tracking_distance_m_or_nan, tracking_distance_proximity_ordinal,
+    tracking_distance_upper_bound_m_or_nan, tracking_filtered_rssi_or_nan,
+    tracking_freshness_ordinal, tracking_proximity_ordinal, tracking_trend_ordinal,
+    update_decision_ordinal,
 };
 
 const DEFAULT_ITERATIONS: u64 = 20_000;
@@ -1145,6 +1147,57 @@ fn check_device_policy(rng: &mut Rng) -> Result<(), String> {
     Ok(())
 }
 
+/// `scanFailureAction`: the export equals its core, and the documented
+/// encoding holds for every code and count — a retry delay is positive and
+/// bounded, the two sentinels are the only non-positive answers, and an
+/// incident ends (every code reaches give-up by some count).
+fn check_scan_failure_policy(rng: &mut Rng) -> Result<(), String> {
+    let code = if rng.below(2) == 0 {
+        rng.below(9) as i32 - 1
+    } else {
+        int(rng)
+    };
+    let retries = if rng.below(2) == 0 {
+        rng.below(8) as i32
+    } else {
+        int(rng)
+    };
+    let answer = Java_com_hse_bleradar_NativeRadar_scanFailureAction(null(), null(), code, retries);
+    if answer != scan_failure_action_code(code, retries) {
+        return Err(format!(
+            "scanFailureAction export/core disagree [code={code} retries={retries}]"
+        ));
+    }
+    // The documented encoding, written out here from the underlying rule rather
+    // than through the crate's own core, so a wrong sentinel cannot pass by
+    // being wrong in the export and its core alike.
+    let expected =
+        match bleradar_core::scan_failure_action(code, u32::try_from(retries).unwrap_or(0)) {
+            bleradar_core::ScanFailureAction::GiveUp => -1,
+            bleradar_core::ScanFailureAction::AlreadyRunning => 0,
+            bleradar_core::ScanFailureAction::Retry { after_millis } => i64::from(after_millis),
+        };
+    if answer != expected {
+        return Err(format!(
+            "scanFailureAction answered {answer}, the documented encoding of the rule is {expected} [code={code} retries={retries}]"
+        ));
+    }
+    if !(-1..=31_000).contains(&answer) {
+        return Err(format!(
+            "scanFailureAction answered {answer}, outside -1..=31000 [code={code} retries={retries}]"
+        ));
+    }
+    if answer == 0 && code != 1 {
+        return Err(format!(
+            "scanFailureAction said already-running for code {code}, not 1 [retries={retries}]"
+        ));
+    }
+    if scan_failure_action_code(code, i32::MAX) != -1 && code != 1 {
+        return Err(format!("scanFailureAction never gives up on code {code}"));
+    }
+    Ok(())
+}
+
 const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 
 /// A release manifest: a valid template with zero to three random mutations
@@ -1321,6 +1374,7 @@ fn every_export_agrees_with_its_core_and_never_panics() {
             check_tracking(&mut rng)?;
             check_update(&mut rng)?;
             check_device_policy(&mut rng)?;
+            check_scan_failure_policy(&mut rng)?;
             check_manifest(&mut rng, &mock)
         }));
         match outcome {

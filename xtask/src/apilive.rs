@@ -31,7 +31,8 @@ use std::time::{Duration, Instant};
 use crate::dashboard::{
     self, DASHBOARD_ASSET_PATH, DEVICES_JSON, FORBIDDEN_JSON, HEADER_TOO_LARGE_JSON,
     METHOD_NOT_ALLOWED_JSON, NOT_FOUND_JSON, REQUEST_TIMEOUT_JSON, SCAN_STARTED_JSON,
-    SCAN_STOPPED_JSON, STATUS_JSON, Scenario, UPDATES_JSON, WIFI_JSON,
+    SCAN_STOPPED_JSON, STATUS_FAILED_JSON, STATUS_JSON, STATUS_RECOVERING_JSON, Scenario,
+    UPDATES_JSON, WIFI_JSON,
 };
 
 /// The Java sources the server needs on a plain JVM: none of them may
@@ -46,6 +47,8 @@ pub(crate) const HOST_JAVA_SOURCES: &[&str] = &[
     "ReleaseManifest.java",
     "ReleaseManifestSource.java",
     "ScanControl.java",
+    "ScanStatus.java",
+    "ScanSupervisor.java",
     "SnapshotSource.java",
     "Streams.java",
     "UpdateStatusSource.java",
@@ -55,8 +58,7 @@ pub(crate) const HOST_JAVA_SOURCES: &[&str] = &[
 ];
 
 /// `/api/status` while the scripted control has paused the scan: no uptime.
-const PAUSED_STATUS_JSON: &str =
-    r#"{"scanning":false,"device_count":4,"native_available":true,"uptime_ms":0}"#;
+const PAUSED_STATUS_JSON: &str = r#"{"scanning":false,"device_count":4,"native_available":true,"uptime_ms":0,"scan_state":"idle","scan_error":null}"#;
 
 /// The four refusals `ApiHttpServer.startRefusalLabel` documents, as the
 /// harness script answers them in turn (label, exact `409` body).
@@ -111,6 +113,10 @@ public final class ApiSmoke {
 
     /** The scripted scan state; starts scanning, as the browser fixtures say. */
     private static volatile boolean scanning = true;
+    /** What the scripted scan reports: the second stop leaves it recovering, the third failed. */
+    private static volatile ScanStatus scripted = ScanStatus.SCANNING_STATUS;
+    /** How many stops the scripted control has answered. */
+    private static int stops;
     /** How many starts the scripted control has answered. */
     private static int starts;
 
@@ -195,8 +201,8 @@ public final class ApiSmoke {
             }
 
             @Override
-            public boolean isScanning() {
-                return scanning;
+            public ScanStatus scanStatus() {
+                return scripted;
             }
 
             @Override
@@ -224,13 +230,21 @@ public final class ApiSmoke {
                         throw new IllegalStateException("scripted failure");
                     default:
                         scanning = true;
+                        scripted = ScanStatus.SCANNING_STATUS;
                         return START_ACCEPTED;
                 }
             }
 
             @Override
-            public void requestStop() {
+            public synchronized void requestStop() {
                 scanning = false;
+                stops++;
+                scripted = stops == 2
+                        ? new ScanStatus(ScanStatus.RECOVERING, "Bluetooth is off")
+                        : stops == 3
+                        ? new ScanStatus(ScanStatus.FAILED,
+                                "The Bluetooth scan failed: this device cannot scan (code 4); not retrying")
+                        : ScanStatus.IDLE_STATUS;
             }
         };
         UpdateStatusSource updates = new UpdateStatusSource() {
@@ -1020,7 +1034,44 @@ pub fn check_http_contract(port: u16, dashboard: &[u8]) -> Result<usize, String>
         json,
         NOT_FOUND_JSON.as_bytes(),
     )?;
-    Ok(27 + access_control)
+    // The four scan states the status document can carry: the script's second
+    // and third stops leave the scan recovering and failed (a scan that is
+    // wanted but not running, with its reason), and a start ends it scanning
+    // again for the browser render.
+    for (label, expected) in [
+        ("recovering", STATUS_RECOVERING_JSON),
+        ("failed", STATUS_FAILED_JSON),
+    ] {
+        expect(
+            &format!("POST /api/scan/stop (script: {label})"),
+            &post(port, "/api/scan/stop", b"")?,
+            200,
+            json,
+            SCAN_STOPPED_JSON.as_bytes(),
+        )?;
+        expect(
+            &format!("GET /api/status ({label})"),
+            &get(port, "/api/status")?,
+            200,
+            json,
+            expected.as_bytes(),
+        )?;
+    }
+    expect(
+        "POST /api/scan/start (after failed)",
+        &post(port, "/api/scan/start", b"")?,
+        200,
+        json,
+        SCAN_STARTED_JSON.as_bytes(),
+    )?;
+    expect(
+        "GET /api/status (scanning again)",
+        &get(port, "/api/status")?,
+        200,
+        json,
+        STATUS_JSON.as_bytes(),
+    )?;
+    Ok(33 + access_control)
 }
 
 /// The whole command.
@@ -1392,6 +1443,7 @@ mod tests {
             STATUS_JSON
                 .replace(r#""scanning":true"#, r#""scanning":false"#)
                 .replace(r#""uptime_ms":3723000"#, r#""uptime_ms":0"#)
+                .replace(r#""scan_state":"scanning""#, r#""scan_state":"idle""#)
         );
     }
 }

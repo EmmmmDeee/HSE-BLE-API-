@@ -18,9 +18,9 @@
 //!   scan with the idle notification and keeps the service, and a `kill -9`
 //!   of the app process is followed by the `START_STICKY` restart that
 //!   resumes the scan;
-//! * with the beacon still advertising, turning Bluetooth off and back on
-//!   makes the API stop claiming a scan while the adapter is gone and the
-//!   scan sight the beacon again on its own once it is back;
+//! * with the beacon still advertising, turning Bluetooth off and back on:
+//!   the API must stop claiming a scan while the adapter is gone, and the
+//!   scan must sight the beacon again on its own once it is back;
 //! * the update check the first launch starts fetched the repository's
 //!   release manifest — or fell back to the bundled one, the outcome
 //!   reported — ran to its decision and its `dataSync` service finished (no
@@ -602,6 +602,11 @@ fn wait_for_status_within(
     while started.elapsed() < timeout {
         if let Ok(response) = get(port, "/api/status") {
             last = body_text(&response);
+            // The bound is judged after the answer (a request retries on its
+            // own for seconds), so a match that arrived late never passes.
+            if started.elapsed() >= timeout {
+                break;
+            }
             if json_has(&last, key, literal) {
                 return Ok(last);
             }
@@ -687,20 +692,18 @@ fn body_text(response: &HttpResponse) -> String {
 /// activity's relaunch is destroying refuses a start (its engine is closed)
 /// and the instance the relaunch creates takes the next one, so an
 /// "unavailable" refusal is retried briefly. The `200` body.
+///
+/// A start the platform then refuses (a Bluetooth stack that has only just
+/// come up failing the scanner's registration) answers `200` with
+/// `"scanning":false` — the request is accepted and the app is recovering — and
+/// the caller's wait for `"scanning":true` is what proves it heals: the
+/// harness no longer retries the start itself, which hid the defect.
 fn start_scan(port: u16) -> Result<String, String> {
     let mut start = post(port, "/api/scan/start")?;
     let mut start_text = body_text(&start);
     let mut retries = 0;
     for _ in 0..REQUEST_ATTEMPTS {
-        // Two transient outcomes on a Bluetooth stack that has only just come up:
-        // the scanner is not there yet (409), or the start is accepted and the
-        // platform then fails the scanner's registration before the answer is
-        // written (200 with `"scanning":false`, the state the engine really is
-        // in). Each is retried a bounded number of times, and reported when it
-        // happens; a start that never takes is still a failure below.
-        let transient = (start.status == 409 && start_text.contains("scanner unavailable"))
-            || (start.status == 200 && start_text == SCAN_STOPPED_JSON);
-        if !transient {
+        if !(start.status == 409 && start_text.contains("scanner unavailable")) {
             break;
         }
         retries += 1;
@@ -709,9 +712,13 @@ fn start_scan(port: u16) -> Result<String, String> {
         start_text = body_text(&start);
     }
     if retries > 0 {
+        println!("scan start needed {retries} retr(y/ies) while the service instance was replaced");
+    }
+    if start.status == 200 && start_text == SCAN_STOPPED_JSON {
         println!(
-            "scan start needed {retries} retr(y/ies) on a Bluetooth stack that had just come up"
+            "scan start was accepted while the platform refused the registration: the app is recovering by itself"
         );
+        return Ok(SCAN_STARTED_JSON.to_string());
     }
     if start.status != 200 || start_text != SCAN_STARTED_JSON {
         return Err(format!(
@@ -1167,14 +1174,23 @@ fn adapter_phase(adb: &Adb, port: u16, report: &mut Report) -> Result<(), String
     let _ = adb.shell_lenient("svc bluetooth disable");
     let off_after = wait_for_adapter(adb, "0")?;
     let off = Instant::now();
-    match wait_for_status_within(port, "scanning", "false", ADAPTER_OFF_STATUS_TIMEOUT) {
+    match wait_for_status_within(port, "scan_state", "\"recovering\"", ADAPTER_OFF_STATUS_TIMEOUT)
+        .and_then(|status| {
+            if json_has(&status, "scanning", "false")
+                && json_has(&status, "scan_error", "\"Bluetooth is off\"")
+            {
+                Ok(status)
+            } else {
+                Err(format!("the status is recovering without saying why or still scanning: {status}"))
+            }
+        }) {
         Ok(status) => report.push(format!(
             "adapter off: bluetooth_on=0 {:.1}s after `svc bluetooth disable`; /api/status reported {status} {:.1}s later",
             off_after.as_secs_f64(),
             off.elapsed().as_secs_f64()
         )),
         Err(error) => failures.push(format!(
-            "the adapter was off and {error}: the API claims a scan the platform no longer runs"
+            "the adapter was off and {error}: the API must report a wanted scan that is not running as recovering, with its reason"
         )),
     }
 
@@ -1193,6 +1209,7 @@ fn adapter_phase(adb: &Adb, port: u16, report: &mut Report) -> Result<(), String
                 json_integer(row, "last_seen_ago_ms").and_then(|ago| u64::try_from(ago).ok())
             && let Some(seen) = sampled.checked_sub(Duration::from_millis(ago))
             && seen >= on
+            && sampled.duration_since(on) <= ADAPTER_RESUME_TIMEOUT
         {
             break Some((row.to_string(), seen.duration_since(on)));
         }
@@ -1202,6 +1219,20 @@ fn adapter_phase(adb: &Adb, port: u16, report: &mut Report) -> Result<(), String
         }
         thread::sleep(Duration::from_secs(1));
     };
+    if sighted.is_some() {
+        match wait_for_status_within(
+            port,
+            "scan_state",
+            "\"scanning\"",
+            ADAPTER_OFF_STATUS_TIMEOUT,
+        ) {
+            Ok(status) if json_has(&status, "scan_error", "null") => {}
+            Ok(status) => failures.push(format!(
+                "the scan is back but still carries an error: {status}"
+            )),
+            Err(error) => failures.push(format!("the beacon was sighted again but {error}")),
+        }
+    }
     match sighted {
         Some((row, after)) => report.push(format!(
             "adapter back: bluetooth_on=1 {:.1}s after `svc bluetooth enable`; the scan resumed with no request and sighted the beacon {:.1}s after the adapter returned: {row}",

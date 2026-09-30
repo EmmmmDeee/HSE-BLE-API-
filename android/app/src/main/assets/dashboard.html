@@ -380,7 +380,7 @@ footer a { color: var(--info); }
   }
 
   function renderStatus(snapshot, status) {
-    applyScanState(snapshot.scanning === true);
+    applyScanState(status.scan_state, status.scan_error);
     var nativeAvailable = snapshot.native_available === true;
     el.nativeCore.textContent = 'native core: ' + (nativeAvailable ? 'loaded' : 'unavailable');
     el.nativeCore.setAttribute('data-on', String(nativeAvailable));
@@ -463,7 +463,10 @@ footer a { color: var(--info); }
   function validateStatus(status) {
     if (!isPlainObject(status) || typeof status.scanning !== 'boolean'
         || !isNumber(status.device_count) || typeof status.native_available !== 'boolean'
-        || !isNumber(status.uptime_ms)) {
+        || !isNumber(status.uptime_ms)
+        || typeof status.scan_state !== 'string'
+        || !Object.prototype.hasOwnProperty.call(SCAN_LABELS, status.scan_state)
+        || (status.scan_error !== null && typeof status.scan_error !== 'string')) {
       throw new Error('/api/status did not return the documented status object');
     }
     return status;
@@ -637,16 +640,22 @@ footer a { color: var(--info); }
     window.requestAnimationFrame(animate);
   }
 
-  // The scanning pill and the two buttons: Start is offered while idle, Stop
-  // while scanning; a disabled button is how the DOM proofs read the state.
-  // The last state applied is what a refused control request falls back to.
-  var lastScanning = false;
-  function applyScanState(scanning) {
-    lastScanning = scanning;
-    el.scan.textContent = scanning ? 'Scanning' : 'Idle';
-    el.scan.setAttribute('data-on', String(scanning));
-    el.start.disabled = scanning;
-    el.stop.disabled = !scanning;
+  // The scanning pill and the two buttons. The server says which of four
+  // states the scan is in (idle, scanning, recovering, failed) and, for the
+  // last two, why. Start is offered when no scan is wanted or the platform
+  // gave up on it; Stop while one is wanted, running or not (it withdraws a
+  // scan that is waiting for Bluetooth or for a retry). A disabled button is
+  // how the DOM proofs read the state. The last state applied is what a
+  // refused control request falls back to.
+  var SCAN_LABELS = { idle: 'Idle', scanning: 'Scanning', recovering: 'Recovering', failed: 'Failed' };
+  var lastScan = { state: 'idle', error: null };
+  function applyScanState(state, error) {
+    lastScan = { state: state, error: error };
+    el.scan.textContent = SCAN_LABELS[state] + (error ? ' — ' + error : '');
+    el.scan.setAttribute('data-on', String(state === 'scanning'));
+    el.scan.setAttribute('data-state', state);
+    el.start.disabled = state === 'scanning' || state === 'recovering';
+    el.stop.disabled = state === 'idle' || state === 'failed';
   }
 
   // The server's reason for a refused start (its error body), else the status.
@@ -666,13 +675,13 @@ footer a { color: var(--info); }
         if (!response.ok) {
           throw new Error(refusalReason(scan, response.status));
         }
-        applyScanState(scan.scanning === true);
+        applyScanState(scan.scanning === true ? 'scanning' : 'idle', null);
       }, function () {
         throw new Error('HTTP ' + response.status + ' from /api/scan/' + action);
       });
     }).catch(function (error) {
       showError('Scan ' + action + ' refused: ' + String(error && error.message ? error.message : error));
-      applyScanState(lastScanning);
+      applyScanState(lastScan.state, lastScan.error);
     });
   }
   el.start.addEventListener('click', function () { control('start'); });

@@ -8,9 +8,14 @@ import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -43,10 +48,13 @@ final class BleScanEngine implements SnapshotSource {
     private final int trackingProfile;
     private final DeviceHistory history;
     private BluetoothLeScanner scanner;
-    private volatile boolean scanning;
     /** Set by {@link #close()}: the owning service is gone, every later start is refused. */
     private boolean closed;
     private volatile long scanStartUptimeMillis = 0;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private BroadcastReceiver adapterReceiver;
+    /** What the scan is asked to be and what the platform makes of it (see {@link ScanSupervisor}). */
+    private final ScanSupervisor supervisor;
 
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override
@@ -64,7 +72,7 @@ final class BleScanEngine implements SnapshotSource {
         @Override
         public void onScanFailed(int errorCode) {
             Log.w(TAG, "BLE scan failed with code " + errorCode);
-            scanning = false;
+            supervisor.onScanFailed(errorCode);
         }
     };
 
@@ -77,6 +85,11 @@ final class BleScanEngine implements SnapshotSource {
                 ? NativeRadar.defaultTrackingProfile()
                 : NativeRadar.TRACKING_STANDARD;
         this.history = new DeviceHistory(appContext.getFilesDir());
+        this.supervisor = new ScanSupervisor(
+                new AndroidPlatform(),
+                NativeRadar.isAvailable()
+                        ? NativeRadar::scanFailureAction
+                        : (code, retries) -> NativeRadar.SCAN_FAILURE_GIVE_UP);
     }
 
     static boolean hasRequiredPermissions(Context context) {
@@ -119,35 +132,15 @@ final class BleScanEngine implements SnapshotSource {
             Log.w(TAG, "Engine closed with its service; not starting scan");
             return false;
         }
-        if (scanning) {
-            return true;
-        }
         if (!hasRequiredPermissions(appContext)) {
             Log.w(TAG, "Missing required permissions; not starting scan");
             return false;
         }
-        BluetoothManager manager = appContext.getSystemService(BluetoothManager.class);
-        BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
-        if (adapter == null || !adapter.isEnabled()) {
-            Log.w(TAG, "Bluetooth adapter unavailable or disabled");
-            return false;
+        boolean started = supervisor.request();
+        if (started) {
+            watchAdapter();
         }
-        scanner = adapter.getBluetoothLeScanner();
-        if (scanner == null) {
-            return false;
-        }
-        ScanSettings settings = new ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .build();
-        try {
-            scanner.startScan(null, settings, scanCallback);
-            scanning = true;
-            scanStartUptimeMillis = SystemClock.uptimeMillis();
-            return true;
-        } catch (SecurityException error) {
-            Log.w(TAG, "Scan permission revoked at call time", error);
-            return false;
-        }
+        return started;
     }
 
     /**
@@ -159,38 +152,137 @@ final class BleScanEngine implements SnapshotSource {
     synchronized void close() {
         stop();
         closed = true;
-        history.flush(SystemClock.uptimeMillis());
+        supervisor.close();
     }
 
     synchronized void stop() {
-        if (!scanning || scanner == null) {
-            return;
-        }
-        try {
-            scanner.stopScan(scanCallback);
-        } catch (SecurityException ignored) {
-            // Permission may already have been revoked; nothing further to release.
-        } finally {
-            scanning = false;
-            history.flush(SystemClock.uptimeMillis());
-        }
+        supervisor.cancel();
+        unwatchAdapter();
+        history.flush(SystemClock.uptimeMillis());
     }
 
     @Override
-    public boolean isScanning() {
-        return scanning;
+    public ScanStatus scanStatus() {
+        return supervisor.status();
     }
 
     /**
-     * Returns milliseconds elapsed since scanning started, or 0 if not currently scanning.
+     * Milliseconds elapsed since scanning started, or 0 if not currently scanning.
      * Used for UI status display and API reporting.
      */
     @Override
     public long getUptimeMillis() {
-        if (!scanning || scanStartUptimeMillis == 0) {
+        long started = scanStartUptimeMillis;
+        if (!supervisor.status().isScanning() || started == 0) {
             return 0;
         }
-        return SystemClock.uptimeMillis() - scanStartUptimeMillis;
+        return SystemClock.uptimeMillis() - started;
+    }
+
+    /**
+     * Follows the Bluetooth adapter for as long as a scan is wanted: the
+     * platform's scanner does not survive the adapter cycling, and nothing
+     * else restarts it.
+     */
+    private void watchAdapter() {
+        if (adapterReceiver != null) {
+            return;
+        }
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR);
+                if (state == BluetoothAdapter.STATE_OFF || state == BluetoothAdapter.STATE_TURNING_OFF) {
+                    supervisor.onAdapter(false);
+                } else if (state == BluetoothAdapter.STATE_ON) {
+                    supervisor.onAdapter(true);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                appContext.registerReceiver(receiver, filter);
+            }
+            adapterReceiver = receiver;
+        } catch (RuntimeException refused) {
+            Log.w(TAG, "Bluetooth state receiver refused; the scan will not follow the adapter", refused);
+        }
+    }
+
+    private void unwatchAdapter() {
+        if (adapterReceiver == null) {
+            return;
+        }
+        try {
+            appContext.unregisterReceiver(adapterReceiver);
+        } catch (IllegalArgumentException alreadyGone) {
+            // Nothing further to release.
+        }
+        adapterReceiver = null;
+    }
+
+    /** The Android side of {@link ScanSupervisor}. */
+    private final class AndroidPlatform implements ScanSupervisor.Platform {
+        @Override
+        public boolean startScanner() {
+            BluetoothManager manager = appContext.getSystemService(BluetoothManager.class);
+            BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+            if (adapter == null || !adapter.isEnabled()) {
+                Log.w(TAG, "Bluetooth adapter unavailable or disabled");
+                return false;
+            }
+            scanner = adapter.getBluetoothLeScanner();
+            if (scanner == null) {
+                return false;
+            }
+            ScanSettings settings = new ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .build();
+            try {
+                scanner.startScan(null, settings, scanCallback);
+                scanStartUptimeMillis = SystemClock.uptimeMillis();
+                return true;
+            } catch (SecurityException error) {
+                Log.w(TAG, "Scan permission revoked at call time", error);
+                return false;
+            } catch (RuntimeException error) {
+                Log.w(TAG, "The platform refused to start the scan", error);
+                return false;
+            }
+        }
+
+        @Override
+        public void stopScanner() {
+            BluetoothLeScanner current = scanner;
+            scanner = null;
+            if (current == null) {
+                return;
+            }
+            try {
+                current.stopScan(scanCallback);
+            } catch (RuntimeException error) {
+                // Permission revoked, or the adapter already gone: nothing to release.
+                Log.w(TAG, "stopScan failed; the registration is gone with its adapter", error);
+            }
+        }
+
+        @Override
+        public boolean adapterOn() {
+            return isBluetoothEnabled(appContext);
+        }
+
+        @Override
+        public void schedule(long delayMillis, Runnable action) {
+            mainHandler.postDelayed(action, delayMillis);
+        }
+
+        @Override
+        public void cancelScheduled() {
+            mainHandler.removeCallbacksAndMessages(null);
+        }
     }
 
     /**
@@ -228,6 +320,7 @@ final class BleScanEngine implements SnapshotSource {
     }
 
     private void recordResult(ScanResult result) {
+        supervisor.onResult();
         long now = SystemClock.uptimeMillis();
         String address = result.getDevice().getAddress();
         if (address == null) {

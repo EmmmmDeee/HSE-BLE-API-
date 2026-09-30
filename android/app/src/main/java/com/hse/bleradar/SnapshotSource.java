@@ -15,8 +15,13 @@ interface SnapshotSource {
     /** Every live device in ranked order (a defensive copy). */
     List<Blip> snapshot();
 
-    /** Whether a scan is active. */
-    boolean isScanning();
+    /** What the scan is doing and why, as one immutable value. */
+    ScanStatus scanStatus();
+
+    /** Whether the platform scan is running. */
+    default boolean isScanning() {
+        return scanStatus().isScanning();
+    }
 
     /** Milliseconds since scanning started, or 0 when idle. */
     long getUptimeMillis();

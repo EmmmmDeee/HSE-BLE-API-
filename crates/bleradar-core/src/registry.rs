@@ -165,6 +165,16 @@ pub const CAPABILITIES: &[Capability] = &[
         residual_gap: "No empirical comparison of alternative filters (median/Hampel/Kalman) under real load",
     },
     Capability {
+        id: "scan-recovery",
+        objective: "Keep a wanted BLE scan running through what the platform does to it (the adapter cycling, a refused registration) and say when it is not running",
+        strongest_reference: "nRF Connect / Android BLE scanner apps",
+        rust_module: "bleradar_core::scan::scan_failure_action",
+        runtime_entrypoint: "NativeRadar.scanFailureAction -> ScanSupervisor -> BleScanEngine -> /api/status scan_state, the dashboard pill and the activity's status line",
+        tests: "scan unit tests (every code, every count, bounded incidents); jni_bridge + jni_campaign (independent reference encoding); ScanSupervisorTest (15 transitions with the real rule); verify-api-live (all four states through the real server); verify-dashboard-live (recovering and failed rendered); verify-android-emulator (Bluetooth turned off and on with the virtual beacon advertising: the API reports recovering with its reason, then the beacon is sighted again with no request)",
+        status: Status::Partial,
+        residual_gap: "A refused registration can only be observed on the emulator when the stack happens to refuse one, so the retry path is proven by the host state machine and the Rust rule, not by a forced platform failure; a sticky restart that finds Bluetooth off still ends the service instead of waiting for the adapter",
+    },
+    Capability {
         id: "sensor-rules",
         objective: "One authority for the multi-sensor radar's reading-interpretation rules (Wi-Fi/BT/cell)",
         strongest_reference: "Huntsman Search Engine signal_radar",

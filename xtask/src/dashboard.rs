@@ -108,8 +108,11 @@ pub const WIFI_MALFORMED_ENTERPRISE_JSON: &str = concat!(
     r#"],"state":"active","dropped":0,"native_available":true,"timestamp_ms":2}"#,
 );
 /// `/api/status` as `ApiHttpServer.statusJson` writes it (uptime 1:02:03).
-pub const STATUS_JSON: &str =
-    r#"{"scanning":true,"device_count":4,"native_available":true,"uptime_ms":3723000}"#;
+pub const STATUS_JSON: &str = r#"{"scanning":true,"device_count":4,"native_available":true,"uptime_ms":3723000,"scan_state":"scanning","scan_error":null}"#;
+/// `/api/status` while a wanted scan waits for Bluetooth to come back.
+pub const STATUS_RECOVERING_JSON: &str = r#"{"scanning":false,"device_count":4,"native_available":true,"uptime_ms":0,"scan_state":"recovering","scan_error":"Bluetooth is off"}"#;
+/// `/api/status` once the platform will not run the scan.
+pub const STATUS_FAILED_JSON: &str = r#"{"scanning":false,"device_count":4,"native_available":true,"uptime_ms":0,"scan_state":"failed","scan_error":"The Bluetooth scan failed: this device cannot scan (code 4); not retrying"}"#;
 /// `/api/updates` as `ApiHttpServer.updatesJson` writes it.
 pub const UPDATES_JSON: &str =
     r#"{"last_check_ms":1757600000000,"next_check_ms":1757686400000,"retry_count":2}"#;
@@ -155,11 +158,17 @@ pub enum Scenario {
     /// field the page consumes is malformed, so the banner must rise rather
     /// than the row rendering with fallback values.
     WifiWrongShape,
+    /// `/api/status` says the scan is recovering (waiting for Bluetooth): the
+    /// pill names the reason, Start is disabled and Stop stays available.
+    ScanRecovering,
+    /// `/api/status` says the scan failed: the pill names the reason, Start
+    /// is offered again and Stop is disabled.
+    ScanFailed,
 }
 
 impl Scenario {
     /// Every scenario, in the order the command runs them.
-    pub const ALL: [Scenario; 7] = [
+    pub const ALL: [Scenario; 9] = [
         Scenario::Healthy,
         Scenario::ServerError,
         Scenario::WrongShape,
@@ -167,6 +176,8 @@ impl Scenario {
         Scenario::UpdatesError,
         Scenario::WifiError,
         Scenario::WifiWrongShape,
+        Scenario::ScanRecovering,
+        Scenario::ScanFailed,
     ];
 
     /// The scenario's name in output paths and messages.
@@ -179,6 +190,8 @@ impl Scenario {
             Scenario::UpdatesError => "updates-error",
             Scenario::WifiError => "wifi-error",
             Scenario::WifiWrongShape => "wifi-wrong-shape",
+            Scenario::ScanRecovering => "scan-recovering",
+            Scenario::ScanFailed => "scan-failed",
         }
     }
 
@@ -187,7 +200,7 @@ impl Scenario {
     /// one of the two the device table depends on).
     fn expectation(self) -> Option<(&'static str, bool)> {
         match self {
-            Scenario::Healthy => None,
+            Scenario::Healthy | Scenario::ScanRecovering | Scenario::ScanFailed => None,
             Scenario::ServerError => Some(("API unreachable: HTTP 500 from /api/devices", false)),
             Scenario::WrongShape => Some((
                 "API unreachable: /api/devices did not return a devices array",
@@ -250,6 +263,8 @@ pub fn route(scenario: Scenario, method: &str, path: &str, dashboard: &[u8]) -> 
         },
         "/api/status" => match scenario {
             Scenario::StatusWrongShape => json(200, "OK", "[]"),
+            Scenario::ScanRecovering => json(200, "OK", STATUS_RECOVERING_JSON),
+            Scenario::ScanFailed => json(200, "OK", STATUS_FAILED_JSON),
             _ => json(200, "OK", STATUS_JSON),
         },
         "/api/updates" => match scenario {
@@ -663,6 +678,8 @@ fn tail(text: &str, lines: usize) -> String {
 /// order, which the page must preserve). Text is as Chromium serializes it:
 /// markup characters in names come back entity-escaped.
 pub const HEALTHY_MARKERS: &[&str] = &[
+    // The server says the scan is running: the pill and its state attribute.
+    r#"data-state="scanning">Scanning<"#,
     r#"data-state="live""#,
     r#">Scanning<"#,
     // Start is disabled while the server reports scanning (Chromium
@@ -832,6 +849,53 @@ pub fn check_dom(scenario: Scenario, dom: &str) -> Result<u32, String> {
             if polls < MIN_POLLS {
                 return Err(format!(
                     "the page completed {polls} poll(s); at least {MIN_POLLS} expected"
+                ));
+            }
+            Ok(polls)
+        }
+        Scenario::ScanRecovering | Scenario::ScanFailed => {
+            if polls < MIN_POLLS {
+                return Err(format!(
+                    "the page completed {polls} poll(s); at least {MIN_POLLS} expected"
+                ));
+            }
+            if !dom.contains(r#"<body data-state="live""#) {
+                return Err(
+                    "the page is not live: it raised the error banner for a valid status"
+                        .to_string(),
+                );
+            }
+            let (pill, start_disabled, stop_disabled) = if scenario == Scenario::ScanRecovering {
+                (
+                    r#"data-state="recovering">Recovering — Bluetooth is off<"#,
+                    true,
+                    false,
+                )
+            } else {
+                (
+                    r#"data-state="failed">Failed — The Bluetooth scan failed: this device cannot scan (code 4); not retrying<"#,
+                    false,
+                    true,
+                )
+            };
+            if !dom.contains(pill) {
+                return Err(format!("rendered page lacks the pill `{pill}`"));
+            }
+            let start = r#"id="start" data-action="start" type="button" disabled="""#;
+            if dom.contains(start) != start_disabled {
+                return Err(format!(
+                    "the Start button should be {}",
+                    if start_disabled {
+                        "disabled"
+                    } else {
+                        "enabled"
+                    }
+                ));
+            }
+            if dom.contains(STOP_DISABLED_MARKER) != stop_disabled {
+                return Err(format!(
+                    "the Stop button should be {}",
+                    if stop_disabled { "disabled" } else { "enabled" }
                 ));
             }
             Ok(polls)
@@ -1541,7 +1605,7 @@ mod tests {
     fn json_contract_locks_the_java_writer_the_fixture_and_the_page_together() {
         let counts = check_json_contract(API_HTTP_SERVER_JAVA, DASHBOARD_HTML).unwrap();
         assert_eq!(counts.get("/api/devices"), Some(&23));
-        assert_eq!(counts.get("/api/status"), Some(&4));
+        assert_eq!(counts.get("/api/status"), Some(&6));
         assert_eq!(counts.get("/api/updates"), Some(&3));
         assert_eq!(counts.get("/api/scan/*"), Some(&1));
         assert_eq!(counts.get("error bodies"), Some(&1));

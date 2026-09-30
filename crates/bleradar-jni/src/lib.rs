@@ -1260,6 +1260,46 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_deviceRankKey(
     )
 }
 
+// ===== Scan failure policy =====
+
+/// `NativeRadar.SCAN_FAILURE_GIVE_UP`: the scan must not be started again.
+pub const SCAN_FAILURE_GIVE_UP: i64 = -1;
+/// `NativeRadar.SCAN_FAILURE_ALREADY_RUNNING`: the platform says the scan is
+/// already running, so nothing is restarted.
+pub const SCAN_FAILURE_ALREADY_RUNNING: i64 = 0;
+
+/// Pure, unit-testable core of `NativeRadar.scanFailureAction(int, int)`.
+///
+/// What `ScanCallback.onScanFailed(error_code)` should lead to, as
+/// [`bleradar_core::scan_failure_action`] decides it: [`SCAN_FAILURE_GIVE_UP`]
+/// (`-1`), [`SCAN_FAILURE_ALREADY_RUNNING`] (`0`), or a positive number of
+/// milliseconds after which the scan is started again. `retries_so_far` is how
+/// many failures of this incident were already retried; a negative count (a
+/// caller's bug) reads as none.
+#[must_use]
+pub fn scan_failure_action_code(error_code: i32, retries_so_far: i32) -> i64 {
+    match bleradar_core::scan_failure_action(error_code, u32::try_from(retries_so_far).unwrap_or(0))
+    {
+        bleradar_core::ScanFailureAction::GiveUp => SCAN_FAILURE_GIVE_UP,
+        bleradar_core::ScanFailureAction::AlreadyRunning => SCAN_FAILURE_ALREADY_RUNNING,
+        bleradar_core::ScanFailureAction::Retry { after_millis } => i64::from(after_millis),
+    }
+}
+
+/// `NativeRadar.scanFailureAction(int, int): long` — see [`scan_failure_action_code`].
+///
+/// # Safety note
+/// Ignores `_env`/`_class`; never dereferences them.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_hse_bleradar_NativeRadar_scanFailureAction(
+    _env: JniOpaquePtr,
+    _class: JniOpaquePtr,
+    error_code: i32,
+    retries_so_far: i32,
+) -> i64 {
+    scan_failure_action_code(error_code, retries_so_far)
+}
+
 // ===== Release manifest and artifact verification (the string bridge) =====
 //
 // The Android app used to parse release manifests with its own Java parser —
@@ -1633,11 +1673,12 @@ pub extern "system" fn Java_com_hse_bleradar_NativeRadar_historyLookup(
 /// to `17` when the cross-session device history (`historyMerge`,
 /// `historyLookup`) was added, and to `18` when `deviceAddressTrackability` and
 /// `deviceGroupKey` took the platform's BLE address type, and to `19` when the
-/// Wi-Fi observation classification (`wifiObservation`) was added.
+/// Wi-Fi observation classification (`wifiObservation`) was added, and to `20`
+/// when the scan-failure policy (`scanFailureAction`) was added.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_hse_bleradar_NativeRadar_abiVersion(
     _env: JniOpaquePtr,
     _class: JniOpaquePtr,
 ) -> i32 {
-    19
+    20
 }

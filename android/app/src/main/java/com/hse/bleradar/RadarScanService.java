@@ -240,6 +240,11 @@ public final class RadarScanService extends Service implements ScanControl {
         return engine != null && engine.isScanning();
     }
 
+    /** What the scan is doing and why; idle before the engine exists. */
+    ScanStatus scanStatus() {
+        return engine == null ? ScanStatus.IDLE_STATUS : engine.scanStatus();
+    }
+
     List<Blip> snapshot() {
         return engine == null ? Collections.emptyList() : engine.snapshot();
     }

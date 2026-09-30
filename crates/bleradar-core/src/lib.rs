@@ -14,6 +14,7 @@ mod infrastructure;
 mod osint;
 mod pipeline;
 mod runtime;
+mod scan;
 mod signal;
 mod sweep;
 mod tracking;
@@ -96,6 +97,13 @@ pub use pipeline::{
     PipelineError, PipelineStage, TemporalGeoGraph, TemporalSpan,
 };
 pub use runtime::{Runtime, ScanCommand, ScanMode};
+pub use scan::{
+    MAX_SCAN_RATE_LIMIT_RETRIES, MAX_SCAN_RETRIES, SCAN_FAILED_ALREADY_STARTED,
+    SCAN_FAILED_APPLICATION_REGISTRATION_FAILED, SCAN_FAILED_FEATURE_UNSUPPORTED,
+    SCAN_FAILED_INTERNAL_ERROR, SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES,
+    SCAN_FAILED_SCANNING_TOO_FREQUENTLY, SCAN_RATE_LIMIT_RETRY_MS, SCAN_RETRY_BASE_MS,
+    SCAN_RETRY_CAP_MS, ScanFailureAction, scan_failure_action,
+};
 pub use signal::{
     BleCalibration, CalibrationProfile, FilterError, ProximityBand, RssiEma, SignalTrend,
     ble_distance_m, ble_distance_range_m, calibration_profile, calibration_profile_from_ordinal,
