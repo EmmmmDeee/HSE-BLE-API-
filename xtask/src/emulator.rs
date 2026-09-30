@@ -1342,9 +1342,23 @@ fn exercise(
     require_keys(
         "GET /api/status",
         &status.body,
-        &["scanning", "device_count", "native_available", "uptime_ms"],
+        &[
+            "scanning",
+            "device_count",
+            "native_available",
+            "uptime_ms",
+            "scan_state",
+            "scan_error",
+        ],
     )?;
     let status_text = body_text(&status);
+    if !json_has(&status_text, "scan_state", "\"idle\"")
+        || !json_has(&status_text, "scan_error", "null")
+    {
+        return Err(format!(
+            "before any scan the status must be idle with no error: {status_text}"
+        ));
+    }
     if !json_has(&status_text, "native_available", "true") {
         return Err(format!(
             "native_available is not true on the device (the library did not load): {status_text}"
