@@ -150,9 +150,9 @@ pub const CAPABILITIES: &[Capability] = &[
         strongest_reference: "nRF Connect",
         rust_module: "bleradar_core::adv::company_name",
         runtime_entrypoint: "NativeRadar.advertisementManufacturerName",
-        tests: "adv unit tests (table sorted, unknown->None); verify-api-live; verify-android-emulator",
-        status: Status::Partial,
-        residual_gap: "A curated ~40-entry subset, not the full SIG registry (a data-only follow-up)",
+        tests: "adv unit tests (the table equals the SIG's own file for all 65,536 identifiers, pinned awkward rows, a malformed data line fails the build); verify-api-live; verify-android-emulator",
+        status: Status::Parity,
+        residual_gap: "A snapshot of the SIG's file (4,041 assignments, 2026-09-29): an identifier assigned later reads as unknown until the data is refreshed with `cargo xtask sync-company-ids`",
     },
     Capability {
         id: "rssi-signal",
