@@ -192,6 +192,7 @@ final class BleScanEngine implements SnapshotSource {
             @Override
             public void onReceive(Context context, Intent intent) {
                 int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR);
+                Log.i(TAG, "Bluetooth adapter state " + state + " (scan: " + supervisor.status().state + ")");
                 if (state == BluetoothAdapter.STATE_OFF || state == BluetoothAdapter.STATE_TURNING_OFF) {
                     supervisor.onAdapter(false);
                 } else if (state == BluetoothAdapter.STATE_ON) {

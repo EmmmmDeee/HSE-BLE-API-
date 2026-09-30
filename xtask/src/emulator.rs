@@ -1143,6 +1143,40 @@ fn wait_for_adapter(adb: &Adb, expected: &str) -> Result<Duration, String> {
     ))
 }
 
+/// The Bluetooth manager's own account of the adapter (`ON`, `OFF`,
+/// `TURNING_ON`, ...), from `dumpsys bluetooth_manager`. The `bluetooth_on`
+/// setting flips when a change is *requested*, before the adapter has made
+/// it, so it cannot say when the adapter is really gone or really back.
+fn adapter_state(adb: &Adb) -> Option<String> {
+    adb.shell_lenient("dumpsys bluetooth_manager")
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.trim().split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("state")
+                .then(|| value.trim().to_ascii_uppercase())
+        })
+}
+
+/// Waits until [`adapter_state`] reads `expected`; the time it took.
+fn wait_for_adapter_state(adb: &Adb, expected: &str) -> Result<Duration, String> {
+    let started = Instant::now();
+    let mut last = None;
+    while started.elapsed() < BLUETOOTH_TIMEOUT {
+        last = adapter_state(adb);
+        if last.as_deref() == Some(expected) {
+            return Ok(started.elapsed());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!(
+        "the Bluetooth manager's state stayed {last:?}, not {expected}, for {}s\n{}",
+        BLUETOOTH_TIMEOUT.as_secs(),
+        adb.shell_lenient("dumpsys bluetooth_manager | head -n 25")
+            .trim()
+    ))
+}
+
 fn shutdown(adb: &Adb, emulator: &mut Child) {
     let _ = adb.run(&["emu", "kill"]);
     let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
@@ -1173,6 +1207,7 @@ fn adapter_phase(adb: &Adb, port: u16, report: &mut Report) -> Result<(), String
     println!("== Bluetooth turned off while scanning: the API must not claim a scan ==");
     let _ = adb.shell_lenient("svc bluetooth disable");
     let off_after = wait_for_adapter(adb, "0")?;
+    wait_for_adapter_state(adb, "OFF")?;
     let off = Instant::now();
     match wait_for_status_within(port, "scan_state", "\"recovering\"", ADAPTER_OFF_STATUS_TIMEOUT)
         .and_then(|status| {
@@ -1197,6 +1232,7 @@ fn adapter_phase(adb: &Adb, port: u16, report: &mut Report) -> Result<(), String
     println!("== Bluetooth turned back on: the scan must resume by itself ==");
     let _ = adb.shell_lenient("svc bluetooth enable");
     let on_after = wait_for_adapter(adb, "1")?;
+    wait_for_adapter_state(adb, "ON")?;
     let on = Instant::now();
     let mut last = String::new();
     let sighted = loop {
@@ -1230,7 +1266,12 @@ fn adapter_phase(adb: &Adb, port: u16, report: &mut Report) -> Result<(), String
             Ok(status) => failures.push(format!(
                 "the scan is back but still carries an error: {status}"
             )),
-            Err(error) => failures.push(format!("the beacon was sighted again but {error}")),
+            Err(error) => failures.push(format!(
+                "the beacon was sighted again but {error}\n-- bluetooth_on: {} --\n-- the app's log --\n{}\n-- the Bluetooth manager --\n{}",
+                adb.shell_lenient("settings get global bluetooth_on").trim(),
+                adb.shell_lenient("logcat -d -s BleScanEngine:* RadarScanService:* | tail -n 60").trim(),
+                adb.shell_lenient("dumpsys bluetooth_manager | grep -iE 'state|enabled|ble' | head -n 20").trim()
+            )),
         }
     }
     match sighted {
