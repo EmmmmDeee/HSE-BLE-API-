@@ -110,12 +110,11 @@ fn evidence_failure_auto_downgrades() {
     ledger
         .invalidate_test("T1040", "test-capability-1")
         .expect("invalidate");
-    let after = ledger.status_of("T1040");
-    assert!(
-        after == Some(CapabilityStatus::Unverified) || after == Some(CapabilityStatus::Partial),
-        "expected Unverified or Partial after invalidate, got {after:?}"
+    // derive_status hard-fails any failed linked test to exactly Unverified.
+    assert_eq!(
+        ledger.status_of("T1040"),
+        Some(CapabilityStatus::Unverified)
     );
-    assert_ne!(after, Some(CapabilityStatus::Verified));
     assert_eq!(ledger.verified_count(), 0);
 
     let layer = ledger.navigator_layer("test-layer", "enterprise-attack", "14.1");
@@ -128,11 +127,14 @@ fn evidence_failure_auto_downgrades() {
         layer.contains("\"techniqueID\":\"T1040\""),
         "T1040 still present in layer"
     );
-    // Downgraded color should be Unverified (#de2d26) given failed tests.
+    // Downgraded color must be exactly Unverified (#de2d26) given a failed test.
     assert!(
-        layer.contains("\"techniqueID\":\"T1040\",\"score\":10,\"color\":\"#de2d26\"")
-            || layer.contains("\"techniqueID\":\"T1040\",\"score\":50,\"color\":\"#fec44f\""),
-        "expected Unverified or Partial navigator colors for T1040"
+        layer.contains("\"techniqueID\":\"T1040\",\"score\":10,\"color\":\"#de2d26\""),
+        "expected the Unverified navigator score and color for T1040"
+    );
+    assert!(
+        !layer.contains("\"techniqueID\":\"T1040\",\"score\":50,"),
+        "a failed test must not leave T1040 Partial"
     );
 }
 
@@ -191,8 +193,61 @@ fn navigator_deterministic_and_derived_only() {
     let i1040 = a.find("\"techniqueID\":\"T1040\"").expect("T1040");
     assert!(i1003 < i1016 && i1016 < i1040);
 
-    // Write fixture snippet for change report (optional side effect).
-    let _ = std::fs::write("/tmp/capability-navigator-seed.json", &a);
+    // Write the layer for the change report to a unique, freshly created
+    // temp file (never a fixed shared path), then clean it up.
+    let path = unique_temp_path("capability-navigator-seed", "json");
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create a new unique temp file");
+        file.write_all(a.as_bytes()).expect("write navigator layer");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read navigator layer"),
+        a
+    );
+    std::fs::remove_file(&path).expect("remove temp file");
+}
+
+/// A temp-dir path unique to this process and moment; opened with
+/// `create_new`, so an existing file or symlink there is never followed.
+fn unique_temp_path(stem: &str, extension: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    std::env::temp_dir().join(format!("{stem}-{}-{nanos}.{extension}", std::process::id()))
+}
+
+#[test]
+fn verified_requires_a_regression_lock() {
+    // Every other link complete and healthy, but no regression lock.
+    let unlocked = CapabilityEvidenceLinks {
+        regression_lock_ids: vec![],
+        ..complete_links()
+    };
+    assert!(!unlocked.mandatory_complete());
+    assert_ne!(
+        derive_status(ClaimScope::InScope, &unlocked),
+        CapabilityStatus::Verified
+    );
+    assert_eq!(
+        derive_status(ClaimScope::InScope, &unlocked),
+        CapabilityStatus::Partial
+    );
+
+    let mut ledger = CapabilityLedger::seed_v0();
+    ledger.set_links("T1040", unlocked).expect("T1040 present");
+    assert_eq!(ledger.status_of("T1040"), Some(CapabilityStatus::Partial));
+    assert_eq!(ledger.verified_count(), 0);
+
+    // Adding the lock is what promotes the same chain to Verified.
+    assert_eq!(
+        derive_status(ClaimScope::InScope, &complete_links()),
+        CapabilityStatus::Verified
+    );
 }
 
 #[test]

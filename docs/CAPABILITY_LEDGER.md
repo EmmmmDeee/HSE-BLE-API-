@@ -23,7 +23,7 @@ Do **not** map `docs/REQUIREMENTS_LEDGER.md` `VERIFIED` rows or
 
 | Status | Meaning |
 |---|---|
-| Verified | Full mandatory evidence links present and healthy |
+| Verified | Full mandatory evidence links present and healthy, including at least one regression lock (`regression_lock_ids`) |
 | Partial | Some but not all mandatory links |
 | Unverified | In-scope claim without enough evidence, or hard failure (failed test / broken regression) |
 | NotApplicable | Explicitly out of product scope (omission ≠ N/A) |

@@ -149,6 +149,7 @@ impl CapabilityEvidenceLinks {
     /// - non-empty `source_ids`, `input_ids`, `output_ids`, `corroboration_ids`
     /// - `execution_record_id` and `provenance_claim_id` present
     /// - non-empty `test_ids`
+    /// - non-empty `regression_lock_ids` (no regression lock, no `Verified`)
     /// - `corroboration_ok` and `regression_ok`
     /// - `failed_test_ids` empty
     /// - every `test_id` appears in `passed_test_ids`
@@ -159,6 +160,7 @@ impl CapabilityEvidenceLinks {
             || self.output_ids.is_empty()
             || self.corroboration_ids.is_empty()
             || self.test_ids.is_empty()
+            || self.regression_lock_ids.is_empty()
         {
             return false;
         }
