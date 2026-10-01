@@ -6,8 +6,6 @@
 //! Strings live in a thread-local arena so the safe API never dereferences a
 //! raw pointer: `read` finds a reference by pointer identity.
 
-#![allow(dead_code)]
-
 use core::cell::RefCell;
 use core::ffi::c_void;
 
@@ -80,13 +78,13 @@ unsafe extern "system" fn exception_check(_env: JniEnvPtr) -> u8 {
 /// A fake VM: a function table whose populated slots are the ones the crate
 /// reads, plus the double indirection JNI uses (`JNIEnv*` → table pointer →
 /// table).
-pub struct MockEnv {
+pub(crate) struct MockEnv {
     _table: Box<[*const c_void; TABLE_LEN]>,
     table_ptr: *const c_void,
 }
 
 impl MockEnv {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut table = Box::new([core::ptr::null::<c_void>(); TABLE_LEN]);
         table[SLOT_NEW_STRING] = new_string as *const c_void;
         table[SLOT_GET_STRING_LENGTH] = get_string_length as *const c_void;
@@ -100,26 +98,30 @@ impl MockEnv {
     }
 
     /// The `JNIEnv*` to hand to an export.
-    pub fn env(&self) -> JniEnvPtr {
+    pub(crate) fn env(&self) -> JniEnvPtr {
         core::ptr::from_ref::<*const c_void>(&self.table_ptr)
             .cast_mut()
             .cast()
     }
 
     /// A `jstring` holding `text`.
-    pub fn string(&self, text: &str) -> JStringRef {
+    pub(crate) fn string(&self, text: &str) -> JStringRef {
         register(text.encode_utf16().collect())
     }
 
     /// A `jstring` holding arbitrary UTF-16 units (Java strings may carry
     /// unpaired surrogates; `&str` cannot express them).
-    pub fn string_units(&self, units: &[u16]) -> JStringRef {
+    #[allow(
+        dead_code,
+        reason = "shared module: only the jni_bridge test binary calls this"
+    )]
+    pub(crate) fn string_units(&self, units: &[u16]) -> JStringRef {
         register(units.to_vec())
     }
 
     /// The text behind a `jstring` this mock produced (by `string` or by an
     /// export's `NewString`), or `None` for null or an unknown reference.
-    pub fn read(&self, string: JStringRef) -> Option<String> {
+    pub(crate) fn read(&self, string: JStringRef) -> Option<String> {
         if string.is_null() {
             return None;
         }
@@ -140,7 +142,11 @@ impl MockEnv {
 
     /// Frees every string this thread's mock produced; outstanding references
     /// become invalid, so call it only between independent test iterations.
-    pub fn reset(&self) {
+    #[allow(
+        dead_code,
+        reason = "shared module: only the jni_campaign test binary calls this"
+    )]
+    pub(crate) fn reset(&self) {
         ARENA.with(|arena| arena.borrow_mut().clear());
     }
 }

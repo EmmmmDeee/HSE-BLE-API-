@@ -1454,8 +1454,8 @@ fn merge_raw_value_is_order_independent() {
     // Merge both directions: the stored raw_value must not depend on order.
     let mut a = upper.clone();
     a.merge(lower.clone());
-    let mut b = lower.clone();
-    b.merge(upper.clone());
+    let mut b = lower;
+    b.merge(upper);
     assert_eq!(
         a.raw_value, b.raw_value,
         "raw_value must be merge-order independent (Determinism Requirement)"
@@ -1490,7 +1490,7 @@ fn entity_kind_other_display() {
 /// `Other(s)` displays as `"other:{s}"` — so the FULL preimage for an
 /// `Other` entity is `"other:" + s + ":" + value` with no escaping between
 /// the field-name segment and the value segment. Two semantically DISTINCT
-/// (field_name, value) pairs — a scraped breach-JSON key/value, per
+/// `(field_name, value)` pairs — a scraped breach-JSON key/value, per
 /// `modules::breach_rich`'s catch-all loop — must never collide onto the
 /// same uid just because a `:` moved from one segment to the other.
 #[test]
