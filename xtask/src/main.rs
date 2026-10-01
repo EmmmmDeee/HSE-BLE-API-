@@ -1230,26 +1230,79 @@ fn install_pinned_emulator(sdk_root: &Path) -> Result<String, String> {
     .map_err(|e| format!("downloading the pinned emulator {url}: {e}"))?;
     check_pinned_emulator_archive(&read_bytes(&download)?)?;
     let dir = sdk_root.join("emulator");
-    if dir.exists() {
-        fs::remove_dir_all(&dir).map_err(|e| format!("removing {}: {e}", dir.display()))?;
+    // Unpacked beside the live emulator and swapped in only once complete, so
+    // a failed unzip leaves the installed emulator as it was.
+    let staging = sdk_root.join(".emulator-pin-staging");
+    let previous = sdk_root.join(".emulator-pin-previous");
+    for stale in [&staging, &previous] {
+        if stale.exists() {
+            fs::remove_dir_all(stale).map_err(|e| format!("removing {}: {e}", stale.display()))?;
+        }
     }
+    fs::create_dir_all(&staging).map_err(|e| format!("creating {}: {e}", staging.display()))?;
     // The archive's single top-level directory is `emulator/`.
     run_status({
         let mut c = Command::new("unzip");
-        c.arg("-q").arg(&download).arg("-d").arg(sdk_root);
+        c.arg("-q").arg(&download).arg("-d").arg(&staging);
         c
     })?;
     let _ = fs::remove_file(&download);
-    match installed_emulator_revision(sdk_root) {
-        Some(revision) if revision == PINNED_EMULATOR_REVISION => Ok(format!(
-            "emulator {PINNED_EMULATOR_REVISION}: the pinned archive {PINNED_EMULATOR_ARCHIVE}, verified, in place of {}",
-            installed.as_deref().unwrap_or("none")
-        )),
-        other => Err(format!(
-            "{} unpacked {PINNED_EMULATOR_ARCHIVE} but emulator/source.properties reads {other:?}, not {PINNED_EMULATOR_REVISION}",
-            dir.display()
-        )),
+    let unpacked = staging.join("emulator");
+    let revision = installed_emulator_revision(&staging);
+    if revision.as_deref() != Some(PINNED_EMULATOR_REVISION) {
+        return Err(format!(
+            "{} unpacked {PINNED_EMULATOR_ARCHIVE} but its source.properties reads {revision:?}, not {PINNED_EMULATOR_REVISION}",
+            staging.display()
+        ));
     }
+    // The archive carries no package.xml (sdkmanager writes it): the one
+    // sdkmanager wrote is kept, its revision rewritten to the pinned one.
+    let metadata = fs::read_to_string(dir.join("package.xml")).ok();
+    let package_xml = unpacked.join("package.xml");
+    fs::write(
+        &package_xml,
+        pinned_emulator_package_xml(metadata.as_deref()),
+    )
+    .map_err(|e| format!("writing {}: {e}", package_xml.display()))?;
+    if dir.exists() {
+        fs::rename(&dir, &previous).map_err(|e| format!("moving {} aside: {e}", dir.display()))?;
+    }
+    if let Err(e) = fs::rename(&unpacked, &dir) {
+        let _ = fs::rename(&previous, &dir);
+        return Err(format!("moving {} into place: {e}", unpacked.display()));
+    }
+    let _ = fs::remove_dir_all(&previous);
+    let _ = fs::remove_dir_all(&staging);
+    Ok(format!(
+        "emulator {PINNED_EMULATOR_REVISION}: the pinned archive {PINNED_EMULATOR_ARCHIVE}, verified, in place of {}",
+        installed.as_deref().unwrap_or("none")
+    ))
+}
+
+/// The `package.xml` of the pinned emulator: sdkmanager's own for the
+/// emulator it installed, with the revision rewritten, else a minimal one
+/// in sdkmanager's format.
+fn pinned_emulator_package_xml(existing: Option<&str>) -> String {
+    let mut parts = PINNED_EMULATOR_REVISION.split('.');
+    let mut part = || parts.next().unwrap_or("0");
+    let revision = format!(
+        "<revision><major>{}</major><minor>{}</minor><micro>{}</micro></revision>",
+        part(),
+        part(),
+        part()
+    );
+    if let Some(xml) = existing {
+        let local = xml.find("<localPackage").unwrap_or(0);
+        if let Some(open) = xml[local..].find("<revision>").map(|at| local + at)
+            && let Some(close) = xml[open..].find("</revision>").map(|at| open + at)
+        {
+            let close = close + "</revision>".len();
+            return format!("{}{revision}{}", &xml[..open], &xml[close..]);
+        }
+    }
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><ns2:repository xmlns:ns2=\"http://schemas.android.com/repository/android/common/02\" xmlns:ns5=\"http://schemas.android.com/repository/android/generic/02\"><localPackage path=\"emulator\" obsolete=\"false\"><type-details xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"ns5:genericDetailsType\"/>{revision}<display-name>Android Emulator</display-name></localPackage></ns2:repository>"
+    )
 }
 
 /// The release asset URL of a version name's artifact (tag `v<name>`).
@@ -4348,6 +4401,25 @@ mod tests {
                 .unwrap_err()
                 .contains("not the pinned 349654171")
         );
+        // sdkmanager's metadata is kept, only its revision rewritten; without
+        // it a minimal one in its format names the pinned revision.
+        let pinned = "<revision><major>37</major><minor>2</minor><micro>12</micro></revision>";
+        let sdkmanager = r#"<?xml version="1.0"?><ns2:repository><license id="l">a <revision> in a licence</license><localPackage path="emulator" obsolete="false"><revision><major>37</major><minor>3</minor><micro>2</micro></revision><display-name>Android Emulator</display-name></localPackage></ns2:repository>"#;
+        let rewritten = pinned_emulator_package_xml(Some(sdkmanager));
+        assert_eq!(
+            rewritten,
+            sdkmanager.replace(
+                "<revision><major>37</major><minor>3</minor><micro>2</micro></revision>",
+                pinned
+            )
+        );
+        let generated = pinned_emulator_package_xml(None);
+        assert!(
+            generated.contains(r#"<localPackage path="emulator""#),
+            "{generated}"
+        );
+        assert!(generated.contains(pinned), "{generated}");
+        assert_eq!(pinned_emulator_package_xml(Some("garbage")), generated);
         assert_eq!(PINNED_EMULATOR_ARCHIVE_SHA256.len(), 64);
         assert!(PINNED_EMULATOR_ARCHIVE.starts_with("emulator-linux_x64-"));
     }
