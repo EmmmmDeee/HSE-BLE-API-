@@ -161,6 +161,9 @@ const WIFI_ROW_KEYS: &[&str] = &[
 const EMULATOR_FEATURE_OVERRIDES: &[&str] = &["-feature", "-WiFiPacketStream"];
 /// What the emulator logs when netsimd carries the guest's Wi-Fi.
 const NETSIM_WIFI_LOG_LINE: &str = "Successfully initialized netsim WiFi";
+/// The BSSID of the emulator's own virtio-wifi access point
+/// (`emulator/lib/hostapd.conf`), globally administered, so `TRACKABLE`.
+const EMULATOR_WIFI_BSSID: &str = "00:13:10:85:fe:01";
 /// How many times `adb root` is attempted: right after boot adbd can still be
 /// restarting on its own, and the request then fails with `unable to connect
 /// for root: closed` (seen once on CI) although a moment later it succeeds.
@@ -499,6 +502,15 @@ pub fn check_survey_history(survey: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The emulator's own access point (`EMULATOR_WIFI_BSSID`) in a surveyed
+/// `/api/wifi` document, if it is listed as `TRACKABLE`.
+pub fn emulator_access_point(survey: &str) -> Option<&str> {
+    access_point_rows(survey).into_iter().find(|row| {
+        json_has(row, "bssid", &format!("\"{EMULATOR_WIFI_BSSID}\""))
+            && json_has(row, "trackability", "\"TRACKABLE\"")
+    })
 }
 
 /// The virtual advertiser's row in a `/api/devices` document: its address as
@@ -1613,23 +1625,33 @@ fn exercise(
         // so a remembered access point carries it on the very first read. Only
         // a trackable BSSID is remembered, so the history is judged per row
         // against the row's own trackability rather than on the whole body.
+        // The override is checked, not assumed: netsimd's Wi-Fi fails the run
+        // by name, and the surveyed access point must be the emulator's own.
         let log = fs::read_to_string(emulator_log).unwrap_or_default();
-        let backend = if log.contains(NETSIM_WIFI_LOG_LINE) {
-            format!(
-                "netsimd (the emulator logged \"{NETSIM_WIFI_LOG_LINE}\" despite {})",
-                EMULATOR_FEATURE_OVERRIDES.join(" ")
-            )
-        } else {
-            "the emulator's own virtio-wifi backend".to_string()
-        };
-        if let Err(error) = check_survey_history(&survey) {
+        if log.contains(NETSIM_WIFI_LOG_LINE) {
             return Err(format!(
-                "{error}\n-- the guest's Wi-Fi came from {backend} --\n{}",
+                "the emulator logged \"{NETSIM_WIFI_LOG_LINE}\" despite {}: netsimd, not the emulator's virtio-wifi backend, carries the guest's Wi-Fi: {survey}\n{}",
+                EMULATOR_FEATURE_OVERRIDES.join(" "),
                 radio_log_lines(&log, 30).join("\n")
             ));
         }
+        check_survey_history(&survey).map_err(|error| {
+            format!(
+                "{error}\n-- the emulator log --\n{}",
+                radio_log_lines(&log, 30).join("\n")
+            )
+        })?;
+        let access_point = emulator_access_point(&survey).ok_or_else(|| {
+            format!(
+                "the survey does not list the emulator's virtio-wifi access point {EMULATOR_WIFI_BSSID} as TRACKABLE: {survey}"
+            )
+        })?;
+        println!(
+            "survey history check passed on {} row(s); the emulator's access point: {access_point}; no \"{NETSIM_WIFI_LOG_LINE}\" in the emulator log",
+            access_point_rows(&survey).len()
+        );
         report.push(format!(
-            "GET /api/wifi: active with an access point {:.1}s after the scan started, every rule key present, the guest's Wi-Fi from {backend}: {survey}",
+            "GET /api/wifi: active with an access point {:.1}s after the scan started, every rule key present, the history rule held per row, {EMULATOR_WIFI_BSSID} TRACKABLE from the emulator's own virtio-wifi backend (no netsim Wi-Fi in its log): {survey}",
             waited.as_secs_f64()
         ));
 
@@ -2465,8 +2487,12 @@ fn upgrade_through(
             ));
         }
         if launched.elapsed() > UPGRADE_TIMEOUT {
+            // What DownloadManager itself said, so a stalled download names why.
+            let downloads = adb.shell_lenient(&format!(
+                "logcat -d -T '{since}' -s DownloadManager:* DownloadProvider:* | tail -n 40"
+            ));
             return Err(format!(
-                "no installer hand-off within {}s of the launch; progress {progress:?}; the service's log:\n{log}",
+                "no installer hand-off within {}s of the launch; progress {progress:?}; the service's log:\n{log}\n-- DownloadManager's log --\n{downloads}",
                 UPGRADE_TIMEOUT.as_secs()
             ));
         }
@@ -2948,6 +2974,11 @@ mod tests {
         let red = r#"{"access_points":[{"bssid":"02:15:b2:00:00:01","ssid":"AndroidWifi","frequency_mhz":2437,"channel":6,"rssi_dbm":-50,"reliability":"VERY_HIGH_PLUS","proximity":"IMMEDIATE","security":"OPEN","enterprise":false,"trackability":"RANDOMIZED","last_seen_ms":1790872301299,"first_seen_ms":null,"visits":null}],"state":"active","dropped":0,"native_available":true,"timestamp_ms":1790872308451}"#;
         assert_eq!(access_point_rows(green).len(), 1);
         assert_eq!(check_survey_history(green), Ok(()));
+        assert_eq!(
+            emulator_access_point(green),
+            Some(access_point_rows(green)[0])
+        );
+        assert_eq!(emulator_access_point(red), None);
         let error = check_survey_history(red).unwrap_err();
         assert!(
             error.contains("no surveyed access point is TRACKABLE"),

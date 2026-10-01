@@ -1186,18 +1186,38 @@ fn installed_emulator_revision(sdk_root: &Path) -> Option<String> {
         .and_then(|properties| emulator::package_revision(&properties))
 }
 
-/// Whether `archive` is the pinned emulator archive: its size, then its SHA-256.
-fn check_pinned_emulator_archive(archive: &[u8]) -> Result<(), String> {
-    if archive.len() != PINNED_EMULATOR_ARCHIVE_SIZE {
+/// One emulator archive the proof may run: its revision, its file name in
+/// the SDK repository, its size and its SHA-256.
+struct EmulatorPin<'a> {
+    revision: &'a str,
+    archive: &'a str,
+    size: usize,
+    sha256: &'a str,
+}
+
+/// The emulator the proof is pinned to.
+const PINNED_EMULATOR: EmulatorPin<'static> = EmulatorPin {
+    revision: PINNED_EMULATOR_REVISION,
+    archive: PINNED_EMULATOR_ARCHIVE,
+    size: PINNED_EMULATOR_ARCHIVE_SIZE,
+    sha256: PINNED_EMULATOR_ARCHIVE_SHA256,
+};
+
+/// Whether `archive` is the pin's archive: its size, then its SHA-256.
+fn check_emulator_archive(pin: &EmulatorPin, archive: &[u8]) -> Result<(), String> {
+    if archive.len() != pin.size {
         return Err(format!(
-            "{PINNED_EMULATOR_ARCHIVE} is {} bytes, not the pinned {PINNED_EMULATOR_ARCHIVE_SIZE}",
-            archive.len()
+            "{} is {} bytes, not the pinned {}",
+            pin.archive,
+            archive.len(),
+            pin.size
         ));
     }
     let digest = sha256::to_hex(&sha256::sha256(archive));
-    if digest != PINNED_EMULATOR_ARCHIVE_SHA256 {
+    if digest != pin.sha256 {
         return Err(format!(
-            "{PINNED_EMULATOR_ARCHIVE} has SHA-256 {digest}, not the pinned {PINNED_EMULATOR_ARCHIVE_SHA256}"
+            "{} has SHA-256 {digest}, not the pinned {}",
+            pin.archive, pin.sha256
         ));
     }
     Ok(())
@@ -1208,30 +1228,40 @@ fn check_pinned_emulator_archive(archive: &[u8]) -> Result<(), String> {
 /// archive, downloaded from the SDK repository and verified first; what was
 /// done, for the log.
 fn install_pinned_emulator(sdk_root: &Path) -> Result<String, String> {
+    install_emulator_pin(sdk_root, &PINNED_EMULATOR, |archive, dest| {
+        let url = format!("{SDK_REPOSITORY_URL}/{archive}");
+        println!("== fetching {url} ==");
+        run_status({
+            let mut c = Command::new("curl");
+            c.args(["-fsSL", "--retry", "3", "-o"]).arg(dest).arg(&url);
+            c
+        })
+        .map_err(|e| format!("downloading the pinned emulator {url}: {e}"))
+    })
+}
+
+/// `install_pinned_emulator` for any pin, `fetch` writing the pin's archive
+/// to the path it is given. The archive is verified, unpacked into a sibling
+/// staging directory and checked there, given the installed emulator's
+/// `package.xml`, and only then swapped in: any failure on the way leaves
+/// the installed emulator as it was and no staging directory behind.
+fn install_emulator_pin(
+    sdk_root: &Path,
+    pin: &EmulatorPin,
+    fetch: impl FnOnce(&str, &Path) -> Result<(), String>,
+) -> Result<String, String> {
     let installed = installed_emulator_revision(sdk_root);
-    if installed.as_deref() == Some(PINNED_EMULATOR_REVISION) {
+    if installed.as_deref() == Some(pin.revision) {
         return Ok(format!(
-            "emulator {PINNED_EMULATOR_REVISION}: the pinned revision, as sdkmanager installed it"
+            "emulator {}: the pinned revision, as sdkmanager installed it",
+            pin.revision
         ));
     }
-    let url = format!("{SDK_REPOSITORY_URL}/{PINNED_EMULATOR_ARCHIVE}");
     println!(
-        "== emulator {} installed, {PINNED_EMULATOR_REVISION} pinned: fetching {url} ==",
-        installed.as_deref().unwrap_or("(none)")
+        "== emulator {} installed, {} pinned ==",
+        installed.as_deref().unwrap_or("(none)"),
+        pin.revision
     );
-    let download = env::temp_dir().join(PINNED_EMULATOR_ARCHIVE);
-    run_status({
-        let mut c = Command::new("curl");
-        c.args(["-fsSL", "--retry", "3", "-o"])
-            .arg(&download)
-            .arg(&url);
-        c
-    })
-    .map_err(|e| format!("downloading the pinned emulator {url}: {e}"))?;
-    check_pinned_emulator_archive(&read_bytes(&download)?)?;
-    let dir = sdk_root.join("emulator");
-    // Unpacked beside the live emulator and swapped in only once complete, so
-    // a failed unzip leaves the installed emulator as it was.
     let staging = sdk_root.join(".emulator-pin-staging");
     let previous = sdk_root.join(".emulator-pin-previous");
     for stale in [&staging, &previous] {
@@ -1240,50 +1270,73 @@ fn install_pinned_emulator(sdk_root: &Path) -> Result<String, String> {
         }
     }
     fs::create_dir_all(&staging).map_err(|e| format!("creating {}: {e}", staging.display()))?;
-    // The archive's single top-level directory is `emulator/`.
-    run_status({
-        let mut c = Command::new("unzip");
-        c.arg("-q").arg(&download).arg("-d").arg(&staging);
-        c
-    })?;
-    let _ = fs::remove_file(&download);
-    let unpacked = staging.join("emulator");
-    let revision = installed_emulator_revision(&staging);
-    if revision.as_deref() != Some(PINNED_EMULATOR_REVISION) {
-        return Err(format!(
-            "{} unpacked {PINNED_EMULATOR_ARCHIVE} but its source.properties reads {revision:?}, not {PINNED_EMULATOR_REVISION}",
-            staging.display()
-        ));
-    }
-    // The archive carries no package.xml (sdkmanager writes it): the one
-    // sdkmanager wrote is kept, its revision rewritten to the pinned one.
-    let metadata = fs::read_to_string(dir.join("package.xml")).ok();
-    let package_xml = unpacked.join("package.xml");
-    fs::write(
-        &package_xml,
-        pinned_emulator_package_xml(metadata.as_deref()),
-    )
-    .map_err(|e| format!("writing {}: {e}", package_xml.display()))?;
-    if dir.exists() {
-        fs::rename(&dir, &previous).map_err(|e| format!("moving {} aside: {e}", dir.display()))?;
-    }
-    if let Err(e) = fs::rename(&unpacked, &dir) {
-        let _ = fs::rename(&previous, &dir);
-        return Err(format!("moving {} into place: {e}", unpacked.display()));
-    }
-    let _ = fs::remove_dir_all(&previous);
+    let staged = stage_emulator_pin(sdk_root, &staging, pin, fetch);
+    let swapped = staged.and_then(|unpacked| {
+        let dir = sdk_root.join("emulator");
+        if dir.exists() {
+            fs::rename(&dir, &previous)
+                .map_err(|e| format!("moving {} aside: {e}", dir.display()))?;
+        }
+        if let Err(e) = fs::rename(&unpacked, &dir) {
+            let _ = fs::rename(&previous, &dir);
+            return Err(format!("moving {} into place: {e}", unpacked.display()));
+        }
+        let _ = fs::remove_dir_all(&previous);
+        Ok(())
+    });
     let _ = fs::remove_dir_all(&staging);
+    swapped?;
     Ok(format!(
-        "emulator {PINNED_EMULATOR_REVISION}: the pinned archive {PINNED_EMULATOR_ARCHIVE}, verified, in place of {}",
+        "emulator {}: the pinned archive {}, verified, in place of {}",
+        pin.revision,
+        pin.archive,
         installed.as_deref().unwrap_or("none")
     ))
 }
 
-/// The `package.xml` of the pinned emulator: sdkmanager's own for the
+/// Fetches, verifies and unpacks the pin's archive inside `staging`, with
+/// the installed emulator's `package.xml` carried over; the unpacked
+/// `emulator` directory.
+fn stage_emulator_pin(
+    sdk_root: &Path,
+    staging: &Path,
+    pin: &EmulatorPin,
+    fetch: impl FnOnce(&str, &Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let download = staging.join(pin.archive);
+    fetch(pin.archive, &download)?;
+    check_emulator_archive(pin, &read_bytes(&download)?)?;
+    // The archive's single top-level directory is `emulator/`.
+    run_status({
+        let mut c = Command::new("unzip");
+        c.arg("-q").arg(&download).arg("-d").arg(staging);
+        c
+    })?;
+    let revision = installed_emulator_revision(staging);
+    if revision.as_deref() != Some(pin.revision) {
+        return Err(format!(
+            "{} unpacked to source.properties revision {revision:?}, not {}",
+            pin.archive, pin.revision
+        ));
+    }
+    // The archive carries no package.xml (sdkmanager writes it): the one
+    // sdkmanager wrote is kept, its revision rewritten to the pinned one.
+    let unpacked = staging.join("emulator");
+    let metadata = fs::read_to_string(sdk_root.join("emulator/package.xml")).ok();
+    let package_xml = unpacked.join("package.xml");
+    fs::write(
+        &package_xml,
+        emulator_package_xml(pin.revision, metadata.as_deref()),
+    )
+    .map_err(|e| format!("writing {}: {e}", package_xml.display()))?;
+    Ok(unpacked)
+}
+
+/// The `package.xml` of an emulator `revision`: sdkmanager's own for the
 /// emulator it installed, with the revision rewritten, else a minimal one
 /// in sdkmanager's format.
-fn pinned_emulator_package_xml(existing: Option<&str>) -> String {
-    let mut parts = PINNED_EMULATOR_REVISION.split('.');
+fn emulator_package_xml(revision: &str, existing: Option<&str>) -> String {
+    let mut parts = revision.split('.');
     let mut part = || parts.next().unwrap_or("0");
     let revision = format!(
         "<revision><major>{}</major><minor>{}</minor><micro>{}</micro></revision>",
@@ -4397,7 +4450,7 @@ mod tests {
                 .contains("as sdkmanager installed it")
         );
         assert!(
-            check_pinned_emulator_archive(b"PK")
+            check_emulator_archive(&PINNED_EMULATOR, b"PK")
                 .unwrap_err()
                 .contains("not the pinned 349654171")
         );
@@ -4405,7 +4458,7 @@ mod tests {
         // it a minimal one in its format names the pinned revision.
         let pinned = "<revision><major>37</major><minor>2</minor><micro>12</micro></revision>";
         let sdkmanager = r#"<?xml version="1.0"?><ns2:repository><license id="l">a <revision> in a licence</license><localPackage path="emulator" obsolete="false"><revision><major>37</major><minor>3</minor><micro>2</micro></revision><display-name>Android Emulator</display-name></localPackage></ns2:repository>"#;
-        let rewritten = pinned_emulator_package_xml(Some(sdkmanager));
+        let rewritten = emulator_package_xml(PINNED_EMULATOR_REVISION, Some(sdkmanager));
         assert_eq!(
             rewritten,
             sdkmanager.replace(
@@ -4413,15 +4466,159 @@ mod tests {
                 pinned
             )
         );
-        let generated = pinned_emulator_package_xml(None);
+        let generated = emulator_package_xml(PINNED_EMULATOR_REVISION, None);
         assert!(
             generated.contains(r#"<localPackage path="emulator""#),
             "{generated}"
         );
         assert!(generated.contains(pinned), "{generated}");
-        assert_eq!(pinned_emulator_package_xml(Some("garbage")), generated);
+        assert_eq!(
+            emulator_package_xml(PINNED_EMULATOR_REVISION, Some("garbage")),
+            generated
+        );
         assert_eq!(PINNED_EMULATOR_ARCHIVE_SHA256.len(), 64);
         assert!(PINNED_EMULATOR_ARCHIVE.starts_with("emulator-linux_x64-"));
+    }
+
+    /// A stored (uncompressed) zip of `files`, as `unzip` reads it.
+    fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for byte in data {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        let (mut out, mut central) = (Vec::new(), Vec::new());
+        for (name, data) in files {
+            let offset = u32::try_from(out.len()).unwrap();
+            let (size, crc) = (u32::try_from(data.len()).unwrap(), crc32(data));
+            let name_len = u16::try_from(name.len()).unwrap();
+            let mut common = Vec::new();
+            common.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            common.extend_from_slice(&crc.to_le_bytes());
+            common.extend_from_slice(&size.to_le_bytes());
+            common.extend_from_slice(&size.to_le_bytes());
+            common.extend_from_slice(&name_len.to_le_bytes());
+            common.extend_from_slice(&[0, 0]);
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            out.extend_from_slice(&common);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&[20, 3]);
+            central.extend_from_slice(&common);
+            // comment length, disk number, internal attributes
+            central.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+            central.extend_from_slice(&(0o100_755u32 << 16).to_le_bytes());
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let (central_at, central_len) = (
+            u32::try_from(out.len()).unwrap(),
+            u32::try_from(central.len()).unwrap(),
+        );
+        let count = u16::try_from(files.len()).unwrap();
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&central_len.to_le_bytes());
+        out.extend_from_slice(&central_at.to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    #[test]
+    fn a_pinned_emulator_is_swapped_in_only_when_verified_and_unpacked() {
+        let sdk = sdk_fixture("emulator-swap");
+        let old_xml = r#"<ns2:repository><license id="android-sdk-license">terms</license><localPackage path="emulator" obsolete="false"><revision><major>37</major><minor>3</minor><micro>2</micro></revision><display-name>Android Emulator</display-name></localPackage></ns2:repository>"#;
+        let old = sdk.join("emulator");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("source.properties"), "Pkg.Revision=37.3.2\n").unwrap();
+        fs::write(old.join("package.xml"), old_xml).unwrap();
+        fs::write(old.join("old-marker"), "old").unwrap();
+        let old_intact = |sdk: &Path| {
+            assert_eq!(installed_emulator_revision(sdk).as_deref(), Some("37.3.2"));
+            assert!(sdk.join("emulator/old-marker").is_file());
+            assert_eq!(
+                fs::read_to_string(sdk.join("emulator/package.xml")).unwrap(),
+                old_xml
+            );
+            assert!(!sdk.join(".emulator-pin-staging").exists());
+            assert!(!sdk.join(".emulator-pin-previous").exists());
+        };
+        let good = stored_zip(&[
+            (
+                "emulator/source.properties",
+                b"Pkg.Revision=9.8.7\nPkg.Path=emulator\n",
+            ),
+            ("emulator/emulator", b"#!/bin/sh\n"),
+        ]);
+        let digest = sha256::to_hex(&sha256::sha256(&good));
+        let pin = EmulatorPin {
+            revision: "9.8.7",
+            archive: "fake.zip",
+            size: good.len(),
+            sha256: &digest,
+        };
+        let serve = |bytes: Vec<u8>| {
+            move |_: &str, dest: &Path| fs::write(dest, &bytes).map_err(|e| e.to_string())
+        };
+
+        // A failed fetch, a wrong SHA-256, and an archive unzip cannot read
+        // all leave the installed emulator as it was, with no staging left.
+        let error =
+            install_emulator_pin(&sdk, &pin, |_, _| Err("offline".to_string())).unwrap_err();
+        assert_eq!(error, "offline");
+        old_intact(&sdk);
+        let wrong_sha = EmulatorPin {
+            sha256: &"0".repeat(64),
+            ..pin
+        };
+        let error = install_emulator_pin(&sdk, &wrong_sha, serve(good.clone())).unwrap_err();
+        assert!(error.contains("has SHA-256"), "{error}");
+        old_intact(&sdk);
+        let garbage = vec![b'x'; 64];
+        let garbage_digest = sha256::to_hex(&sha256::sha256(&garbage));
+        let not_a_zip = EmulatorPin {
+            size: garbage.len(),
+            sha256: &garbage_digest,
+            ..pin
+        };
+        let error = install_emulator_pin(&sdk, &not_a_zip, serve(garbage)).unwrap_err();
+        assert!(error.contains("unzip"), "{error}");
+        old_intact(&sdk);
+
+        // The verified archive replaces the emulator, keeping sdkmanager's
+        // package.xml with the pinned revision, and nothing is left beside it.
+        let done = install_emulator_pin(&sdk, &pin, serve(good)).unwrap();
+        assert!(done.contains("in place of 37.3.2"), "{done}");
+        assert_eq!(installed_emulator_revision(&sdk).as_deref(), Some("9.8.7"));
+        assert!(sdk.join("emulator/emulator").is_file());
+        assert!(!sdk.join("emulator/old-marker").exists());
+        let xml = fs::read_to_string(sdk.join("emulator/package.xml")).unwrap();
+        assert_eq!(
+            xml,
+            old_xml.replace(
+                "<major>37</major><minor>3</minor><micro>2</micro>",
+                "<major>9</major><minor>8</minor><micro>7</micro>"
+            )
+        );
+        assert!(!sdk.join(".emulator-pin-staging").exists());
+        assert!(!sdk.join(".emulator-pin-previous").exists());
+        // Now pinned, a second run keeps it without fetching.
+        let kept = install_emulator_pin(&sdk, &pin, |_, _| panic!("no fetch")).unwrap();
+        assert!(kept.contains("as sdkmanager installed it"), "{kept}");
+        let _ = fs::remove_dir_all(&sdk);
     }
 
     #[test]
