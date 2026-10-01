@@ -526,16 +526,14 @@ impl Adb {
     fn is_online(&self) -> bool {
         let mut command = Command::new(&self.exe);
         command.arg("devices");
-        dashboard::run_with_timeout(command, ADB_TIMEOUT)
-            .map(|outcome| {
-                String::from_utf8_lossy(&outcome.stdout)
-                    .lines()
-                    .any(|line| {
-                        let mut parts = line.split_whitespace();
-                        parts.next() == Some(self.serial.as_str()) && parts.next() == Some("device")
-                    })
-            })
-            .unwrap_or(false)
+        dashboard::run_with_timeout(command, ADB_TIMEOUT).is_ok_and(|outcome| {
+            String::from_utf8_lossy(&outcome.stdout)
+                .lines()
+                .any(|line| {
+                    let mut parts = line.split_whitespace();
+                    parts.next() == Some(self.serial.as_str()) && parts.next() == Some("device")
+                })
+        })
     }
 }
 
@@ -1350,10 +1348,9 @@ fn exercise(
             install.trim()
         ));
     }
-    let size = fs::metadata(config.apk).map(|m| m.len()).unwrap_or(0);
+    let size = fs::metadata(config.apk).map_or(0, |m| m.len());
     report.push(format!(
-        "install: Success ({} bytes, runtime permissions granted)",
-        size
+        "install: Success ({size} bytes, runtime permissions granted)"
     ));
 
     println!("== am start -W {ACTIVITY} ==");
@@ -2193,7 +2190,7 @@ fn wait_for_unmetered_network(adb: &Adb) -> Result<updateproof::ActiveNetwork, S
     loop {
         let dump = adb.shell("dumpsys connectivity")?;
         if let Some(network) =
-            updateproof::active_default_network(&dump).filter(|network| network.unmetered())
+            updateproof::active_default_network(&dump).filter(updateproof::ActiveNetwork::unmetered)
         {
             return Ok(network);
         }
