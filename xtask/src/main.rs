@@ -13,6 +13,7 @@
 //! invoking it from a subdirectory still works.
 
 mod apilive;
+mod boundary;
 mod companyids;
 mod dashboard;
 mod dex;
@@ -80,6 +81,9 @@ fn main() -> ExitCode {
         "parity-report" => cmd_parity_report(),
         "check-dependency-policy" => cmd_check_dependency_policy(),
         "check-oracle-integrity" => cmd_check_oracle_integrity(),
+        "check-crate-boundary" => {
+            repo_root().and_then(|root| boundary::cmd_check_crate_boundary(&root))
+        }
         "apk-inventory" => cmd_apk_inventory(&rest),
         "native-abi" => cmd_native_abi(&rest),
         "dex-classes" => cmd_dex_classes(&rest),
@@ -133,6 +137,7 @@ fn print_usage() {
          \x20 parity-report              regenerate docs/PARITY_COVERAGE.md\n\
          \x20 check-dependency-policy    fail if Cargo.lock has non-workspace crates\n\
          \x20 check-oracle-integrity     verify retained oracle SHA-256 hashes\n\
+         \x20 check-crate-boundary       fail if a bleradar-core radar/HSE-model module, bleradar-jni or bleradar-compat reaches a non-radar engine (docs/CRATE_BOUNDARY_PLAN.md)\n\
          \x20 apk-inventory <apk>        print sha256 + every zip entry name\n\
          \x20 native-abi <lib.so>        print sorted defined FUNC/OBJECT symbols\n\
          \x20 dex-classes <classes.dex>  print sorted class descriptors\n\
@@ -4077,6 +4082,9 @@ fn cmd_gates() -> Result<(), String> {
 
     println!("== dependency policy ==");
     cmd_check_dependency_policy()?;
+
+    println!("== crate boundary (radar surface never reaches the non-radar engines) ==");
+    boundary::cmd_check_crate_boundary(&root)?;
 
     println!("== oracle integrity ==");
     cmd_check_oracle_integrity()?;
