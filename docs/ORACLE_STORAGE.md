@@ -21,21 +21,25 @@ checks it by hand).
 
 1. The APK matches `docs/INPUT_SHA256.txt` and the archive matches its pinned
    baseline (unchanged from before this layout).
-2. Every file listed in `oracle/SHA256SUMS` exists with exactly that digest.
-3. Every file in `oracle/` is listed, so nothing unpinned can sit beside the
-   oracles.
+2. Every file listed in `oracle/SHA256SUMS` exists as a regular file (a
+   symlink is never followed) with exactly that digest.
+3. Every entry in `oracle/` is listed: a file, subdirectory or symlink that is
+   not pinned fails, so nothing unpinned can sit beside the oracles.
 4. The manifest agrees with the gate's own independent pins (APK, archive,
    native oracle), so editing the manifest cannot bless a changed oracle.
 5. `migration/critically-enhanced-v0.3.0/SHA256SUMS` (the checked-in
-   reconstruction's own manifest) verifies, and each of its `./oracle/`
-   entries is byte-identical to a canonical file here: those are copies,
-   never a second, divergent oracle.
+   reconstruction's own manifest) verifies, and its copies of the canonical
+   files are byte-identical to them: every `./oracle/` entry carries a
+   canonical digest, and `./git-history.bundle` carries exactly
+   `oracle/git-history.bundle`'s digest. Those are copies, never a second,
+   divergent oracle.
 
 Each branch was falsified before merging: a byte appended to `classes.dex`, a
-stray unpinned file in `oracle/`, a byte appended to the snapshot's oracle
-copy, the APK removed, and the archive's manifest line edited to a different
-digest each fail the gate with a message naming the file; restoring the tree
-passes it again.
+stray unpinned file in `oracle/`, an unpinned subdirectory, an unpinned
+symlink, a byte appended to the snapshot's oracle copy, the snapshot's history
+bundle changed together with its own manifest line, the APK removed, and the
+archive's manifest line edited to a different digest each fail the gate with a
+message naming the file; restoring the tree passes it again.
 
 ## What moved, and why it was safe
 
