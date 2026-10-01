@@ -101,18 +101,27 @@ echo 'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94  temurin2
 sudo mkdir -p /opt/java && sudo tar -xzf temurin21.tar.gz -C /opt/java
 sudo ln -sfn /opt/java/jdk-21.0.12.1+1 /opt/java/temurin-21
 
-# Android cmdline-tools into ~/Android/Sdk (sha256 2d2d5085…5e258).
+# unzip unpacks the cmdline-tools below; zip is what `cargo xtask build-apk` runs.
+sudo apt-get install -y unzip zip
+
+# Android cmdline-tools into ~/Android/Sdk, checksum-verified before extraction.
 curl -fsSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+echo '2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258  cmdline-tools.zip' | sha256sum -c
 mkdir -p ~/Android/Sdk/cmdline-tools && unzip -q cmdline-tools.zip -d /tmp/cltx
 mv /tmp/cltx/cmdline-tools ~/Android/Sdk/cmdline-tools/latest
 
+# This shell does not have the environment block below yet: point it at the
+# fresh JDK and SDK. `sdkmanager` runs on JAVA_HOME, and `xtask` finds the SDK
+# only through ANDROID_HOME/ANDROID_SDK_ROOT (its fallbacks are
+# /usr/local/lib/android/sdk and /opt/android-sdk, not ~/Android/Sdk).
+export JAVA_HOME=/opt/java/temurin-21
+export ANDROID_HOME="$HOME/Android/Sdk" ANDROID_SDK_ROOT="$HOME/Android/Sdk"
+export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$HOME/.cargo/bin:$PATH"
+
 # The pinned platform, build-tools and NDK, installed the way CI installs them.
-# This accepts the licenses, retries, and checks that discovery finds them.
-yes | sdkmanager --licenses >/dev/null
+# This accepts the licenses itself, retries, and checks that discovery finds them.
 cargo xtask android-sdk-install
 sdkmanager --install platform-tools
-
-sudo apt-get install -y zip
 ```
 
 ### Environment (every shell)
