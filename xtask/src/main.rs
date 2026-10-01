@@ -1269,6 +1269,24 @@ fn install_emulator_pin(
     pin: &EmulatorPin,
     fetch: impl FnOnce(&str, &Path) -> Result<(), String>,
 ) -> Result<String, String> {
+    let dir = sdk_root.join("emulator");
+    let staging = sdk_root.join(".emulator-pin-staging");
+    let previous = sdk_root.join(".emulator-pin-previous");
+    // A run whose rollback failed left the only copy of the old emulator at
+    // `previous`: it is put back before anything else, never deleted.
+    if previous.exists() && !dir.exists() {
+        fs::rename(&previous, &dir).map_err(|e| {
+            format!(
+                "restoring the previous emulator from {} to {}: {e}",
+                previous.display(),
+                dir.display()
+            )
+        })?;
+        println!(
+            "== restored the previous emulator from {} ==",
+            previous.display()
+        );
+    }
     let installed = installed_emulator_revision(sdk_root);
     let mismatch = match verify_installed_emulator(sdk_root, pin) {
         Ok(verified) => return Ok(format!("emulator {}: kept, {verified}", pin.revision)),
@@ -1279,40 +1297,45 @@ fn install_emulator_pin(
         installed.as_deref().unwrap_or("none"),
         pin.revision
     );
-    let staging = sdk_root.join(".emulator-pin-staging");
-    let previous = sdk_root.join(".emulator-pin-previous");
+    // `previous` can only be here beside `dir` now: a stale copy.
     for stale in [&staging, &previous] {
         if stale.exists() {
             fs::remove_dir_all(stale).map_err(|e| format!("removing {}: {e}", stale.display()))?;
         }
     }
     fs::create_dir_all(&staging).map_err(|e| format!("creating {}: {e}", staging.display()))?;
-    let dir = sdk_root.join("emulator");
-    let mut swapped = stage_emulator_pin(sdk_root, &staging, pin, fetch).and_then(|unpacked| {
+    let swapped = stage_emulator_pin(sdk_root, &staging, pin, fetch).and_then(|unpacked| {
         swap_in_emulator(&unpacked, &dir, &previous, |from, to| fs::rename(from, to))
     });
     // Leftovers are named, never silently left behind.
     let mut leftovers = Vec::new();
-    for leftover in [&staging, &previous] {
-        // `previous` is the only copy of the old emulator when the swap
-        // could not move it back: then it stays.
-        if leftover == &previous && !dir.exists() {
-            continue;
-        }
-        if leftover.exists()
-            && let Err(e) = fs::remove_dir_all(leftover)
-        {
-            leftovers.push(format!("{} could not be removed: {e}", leftover.display()));
-        }
-    }
-    if let Err(error) = &mut swapped
-        && !leftovers.is_empty()
+    if staging.exists()
+        && let Err(e) = fs::remove_dir_all(&staging)
     {
-        error.push_str(&format!("; {}", leftovers.join("; ")));
+        leftovers.push(format!("{} could not be removed: {e}", staging.display()));
     }
-    swapped?;
-    let verified = verify_installed_emulator(sdk_root, pin)
-        .map_err(|e| format!("the swapped-in emulator does not verify: {e}"))?;
+    if let Err(mut error) = swapped {
+        // What the swap left is in its error; `previous`, if there, is kept.
+        if !leftovers.is_empty() {
+            error.push_str(&format!("; {}", leftovers.join("; ")));
+        }
+        return Err(error);
+    }
+    // The previous emulator is kept until its replacement verifies.
+    let verified = match verify_installed_emulator(sdk_root, pin) {
+        Ok(verified) => verified,
+        Err(e) => {
+            return Err(format!(
+                "the swapped-in emulator does not verify: {e}; {}",
+                restore_previous_emulator(&dir, &previous)
+            ));
+        }
+    };
+    if previous.exists()
+        && let Err(e) = fs::remove_dir_all(&previous)
+    {
+        leftovers.push(format!("{} could not be removed: {e}", previous.display()));
+    }
     Ok(format!(
         "emulator {}: the pinned archive {}, verified, in place of {}; {verified}{}",
         pin.revision,
@@ -1324,6 +1347,32 @@ fn install_emulator_pin(
             format!(" (warning: {})", leftovers.join("; "))
         }
     ))
+}
+
+/// Puts the emulator kept at `previous` back at `dir` in place of one that
+/// did not verify; what is where afterwards.
+fn restore_previous_emulator(dir: &Path, previous: &Path) -> String {
+    if !previous.exists() {
+        return format!(
+            "there was no previous emulator to restore, so the unverified one stays at {}",
+            dir.display()
+        );
+    }
+    if let Err(e) = fs::remove_dir_all(dir) {
+        return format!(
+            "removing the unverified emulator at {} failed ({e}); the previous emulator is at {}",
+            dir.display(),
+            previous.display()
+        );
+    }
+    match fs::rename(previous, dir) {
+        Ok(()) => format!("the previous emulator was restored to {}", dir.display()),
+        Err(e) => format!(
+            "restoring the previous emulator failed ({e}): {} is missing and the previous emulator is at {}",
+            dir.display(),
+            previous.display()
+        ),
+    }
 }
 
 /// Moves the emulator at `dir` aside to `previous` and `unpacked` into its
@@ -1385,11 +1434,11 @@ fn verify_installed_emulator(sdk_root: &Path, pin: &EmulatorPin) -> Result<Strin
     let package_xml = fs::read_to_string(dir.join("package.xml"))
         .map_err(|e| format!("no readable package.xml: {e}"))?;
     let named = emulator_package_revision(&package_xml);
-    if named != Some(emulator_revision_xml(pin.revision)) {
+    if named.as_deref() != Some(pin.revision) {
         return Err(format!(
-            "package.xml names {}, not {}",
-            named.unwrap_or_else(|| "no revision".to_string()),
-            emulator_revision_xml(pin.revision)
+            "package.xml names revision {}, not {}",
+            named.as_deref().unwrap_or("none"),
+            pin.revision
         ));
     }
     for (file, want) in pin.files {
@@ -1475,9 +1524,24 @@ fn package_revision_span(xml: &str) -> Option<(usize, usize)> {
     Some((open, close))
 }
 
-/// The `<localPackage>`'s `<revision>` element of a `package.xml`.
+/// The revision (`37.2.12`) the `<localPackage>` of a `package.xml` names,
+/// read component by component, whatever whitespace separates them; a
+/// missing `<minor>` or `<micro>` reads 0, as sdkmanager means it.
 fn emulator_package_revision(xml: &str) -> Option<String> {
-    package_revision_span(xml).map(|(open, close)| xml[open..close].to_string())
+    let (open, close) = package_revision_span(xml)?;
+    let span = &xml[open..close];
+    let part = |tag: &str| -> Option<u32> {
+        let (start, end) = (format!("<{tag}>"), format!("</{tag}>"));
+        let from = span.find(&start)? + start.len();
+        let to = from + span[from..].find(&end)?;
+        span[from..to].trim().parse().ok()
+    };
+    let major = part("major")?;
+    Some(format!(
+        "{major}.{}.{}",
+        part("minor").unwrap_or(0),
+        part("micro").unwrap_or(0)
+    ))
 }
 
 /// The `package.xml` of an emulator `revision`: sdkmanager's own for the
@@ -4647,6 +4711,28 @@ mod tests {
                 pinned
             )
         );
+        // The revision is read by component, whatever the whitespace.
+        let indented = "<ns2:repository><license>a <revision><major>1</major></revision></license>\n  <localPackage path=\"emulator\">\n    <revision>\n      <major>37</major>\n      <minor> 2 </minor>\n      <micro>12</micro>\n    </revision>\n  </localPackage>\n</ns2:repository>";
+        assert_eq!(
+            emulator_package_revision(indented).as_deref(),
+            Some("37.2.12")
+        );
+        assert_eq!(
+            emulator_package_revision(&rewritten).as_deref(),
+            Some(PINNED_EMULATOR_REVISION)
+        );
+        assert_eq!(
+            emulator_package_revision(
+                "<localPackage><revision><major>37</major></revision></localPackage>"
+            )
+            .as_deref(),
+            Some("37.0.0")
+        );
+        assert_eq!(
+            emulator_package_revision("<localPackage><revision><major>x</major></revision>"),
+            None
+        );
+        assert_eq!(emulator_package_revision("garbage"), None);
         let generated = emulator_package_xml(PINNED_EMULATOR_REVISION, None);
         assert!(
             generated.contains(r#"<localPackage path="emulator""#),
@@ -4877,6 +4963,27 @@ mod tests {
         assert!(error.contains("unzip"), "{error}");
         old_intact(&sdk);
 
+        // An archive that verifies but unpacks to files the pin does not
+        // name is swapped back out: the previous emulator, kept until then,
+        // is restored.
+        let wrong_files = [("emulator", "0".repeat(64))];
+        let wrong_files: Vec<(&str, &str)> =
+            wrong_files.iter().map(|(f, d)| (*f, d.as_str())).collect();
+        let unverified = EmulatorPin {
+            files: &wrong_files,
+            ..pin
+        };
+        let error = install_emulator_pin(&sdk, &unverified, serve(good.clone())).unwrap_err();
+        assert!(
+            error.contains("the swapped-in emulator does not verify"),
+            "{error}"
+        );
+        assert!(
+            error.contains("the previous emulator was restored to"),
+            "{error}"
+        );
+        old_intact(&sdk);
+
         // The verified archive replaces the emulator, keeping sdkmanager's
         // package.xml with the pinned revision, and nothing is left beside it.
         let done = install_emulator_pin(&sdk, &pin, serve(good.clone())).unwrap();
@@ -4912,6 +5019,13 @@ mod tests {
         let healed = install_emulator_pin(&sdk, &pin, serve(good)).unwrap();
         assert!(healed.contains("in place of 9.8.7"), "{healed}");
         assert_eq!(verify_installed_emulator(&sdk, &pin).map(|_| ()), Ok(()));
+        // The only copy of an emulator left at .emulator-pin-previous by a
+        // failed rollback is put back, never deleted, and verified as usual.
+        fs::rename(sdk.join("emulator"), sdk.join(".emulator-pin-previous")).unwrap();
+        let restored = install_emulator_pin(&sdk, &pin, |_, _| panic!("no fetch")).unwrap();
+        assert!(restored.contains("kept"), "{restored}");
+        assert!(sdk.join("emulator/emulator").is_file());
+        assert!(!sdk.join(".emulator-pin-previous").exists());
         // A package.xml naming another revision is not kept either.
         let xml = fs::read_to_string(sdk.join("emulator/package.xml")).unwrap();
         fs::write(
@@ -4922,7 +5036,7 @@ mod tests {
         assert!(
             verify_installed_emulator(&sdk, &pin)
                 .unwrap_err()
-                .contains("package.xml names")
+                .contains("package.xml names revision 9.8.8")
         );
         let _ = fs::remove_dir_all(&sdk);
     }
