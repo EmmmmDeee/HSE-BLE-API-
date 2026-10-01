@@ -613,6 +613,10 @@ link is GitHub itself.
 
 Release archives are produced per `docs/PACKAGING_ASSISTANT.md`: all tracked project files (oracles included, since the integrity gate depends on them), excluding `.git/`, `target/`, and non-project local files; named `hse-ble-api-v<version>.zip` with a SHA-256 sidecar; verified by extracting to a clean directory and running every gate from the extraction before delivery.
 
+## Support
+
+If this project helps you, consider [sponsoring @EmmmmDeee on GitHub Sponsors](https://github.com/sponsors/EmmmmDeee). Sponsorship pays for maintenance, test infrastructure and the API keys behind new data sources.
+
 ## License
 
 Proprietary (see the `license` field in `Cargo.toml`). All rights reserved by the project owner; the retained APK and native artifacts remain the property of their original rights holder and are included solely as behavioral verification oracles.
