@@ -1,17 +1,28 @@
 name: release
 
-# Publish the committed, CI-verified APK as a downloadable GitHub Release so an
-# end user only installs it on Android — no Termux, checkout, shell, build, or
-# configuration. The release also carries release_manifest.txt at the stable
-# `releases/latest/download/` URL the app's UpdateCheckService polls, closing
-# the self-update loop against a real artifact.
+# Publish every CI-verified commit of main as a PRE-RELEASE, so an end user can
+# install exactly that build on Android with no Termux, checkout, shell, build or
+# configuration:
+#   * `main-<sha7>`: one pre-release per verified main commit (immutable once
+#     created: never re-pointed, never clobbered)
+#   * `latest`: one rolling pre-release, deleted and re-created on the newest
+#     verified main commit
+# Both carry the committed APK and a release_manifest.txt whose `url` names
+# that pre-release's own asset.
+#
+# This workflow NEVER creates, edits, re-tags or uploads to a stable release
+# (v1.0.0 or any other), and never marks anything "Latest". Stable releases
+# are cut deliberately, outside this workflow. Because GitHub's
+# `releases/latest/download/` (the URL UpdateCheckService polls) resolves to
+# the newest *stable* release and ignores pre-releases, installed apps keep
+# reading the stable manifest and are never auto-updated to a main build.
 #
 # It runs only after the `gates` workflow succeeds on main, so nothing is ever
 # published that CI has not already built from a fresh checkout, exercised on a
 # real Android runtime, and proven the committed APK reproduces from source.
 # It re-publishes the exact committed bytes (no rebuild, no re-sign), so no
 # signing key or any other secret is needed or embedded (only the default
-# GITHUB_TOKEN, to create the release).
+# GITHUB_TOKEN, to create the pre-releases).
 
 on:
   workflow_run:
@@ -83,36 +94,86 @@ jobs:
       - name: Generate the release manifest from the committed APK
         if: steps.commit.outputs.publish == 'true'
         run: cargo xtask release-manifest --out "${{ steps.plan.outputs.manifest }}"
-      - name: Publish or refresh the release with the committed APK and manifest
+      - name: Refuse credentials in the publish environment
+        if: steps.commit.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          # Only GITHUB_TOKEN (as GH_TOKEN, scoped to the publish steps) may reach this job.
+          if env | grep -E '^(HUNTSMAN_[A-Z0-9_]*|[A-Z0-9_]*(API_KEY|_SECRET|_PASSWORD|KEYSTORE[A-Z0-9_]*))=' >/dev/null; then
+            echo "::error::a credential-like environment variable is set in the release job"; exit 1
+          fi
+      - name: Resolve the pre-release identities
+        if: steps.commit.outputs.publish == 'true'
+        id: pre
+        env:
+          COMMIT: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sha7="${COMMIT:0:7}"
+          echo "main_tag=main-${sha7}" >> "$GITHUB_OUTPUT"
+          echo "rolling_tag=latest" >> "$GITHUB_OUTPUT"
+          echo "sha7=${sha7}" >> "$GITHUB_OUTPUT"
+      - name: Never touch a stable release
         if: steps.commit.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.plan.outputs.tag }}
+          MAIN_TAG: ${{ steps.pre.outputs.main_tag }}
+          ROLLING_TAG: ${{ steps.pre.outputs.rolling_tag }}
+          STABLE_TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for tag in "$MAIN_TAG" "$ROLLING_TAG"; do
+            case "$tag" in main-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]|latest) ;;
+              *) echo "::error::refusing to publish to non-pre-release tag '$tag'"; exit 1;; esac
+            [ "$tag" != "$STABLE_TAG" ] || { echo "::error::'$tag' is the stable tag"; exit 1; }
+            # An existing release under either name must already be a pre-release.
+            if pre="$(gh release view "$tag" --json isPrerelease --jq .isPrerelease 2>/dev/null)"; then
+              [ "$pre" = "true" ] || { echo "::error::release '$tag' exists and is NOT a pre-release; refusing"; exit 1; }
+            fi
+          done
+      - name: Publish main-<sha7> and move the rolling `latest` pre-release
+        if: steps.commit.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
           APK: ${{ steps.plan.outputs.apk }}
           MANIFEST: ${{ steps.plan.outputs.manifest }}
           VERSION_NAME: ${{ steps.plan.outputs.version_name }}
           COMMIT: ${{ steps.commit.outputs.sha }}
+          MAIN_TAG: ${{ steps.pre.outputs.main_tag }}
+          ROLLING_TAG: ${{ steps.pre.outputs.rolling_tag }}
         run: |
           set -euo pipefail
-          notes="HSE BLE Radar ${VERSION_NAME} — Android ARM64.
-
-          Install: download **${APK}** and open it on Android (allow installing from this source if prompted). No Termux, checkout, shell, or configuration; the only first-run step is granting the Android permissions the app requests.
-
-          Published automatically from commit ${COMMIT} after the \`gates\` workflow passed. The APK is the committed artifact, which CI proved reproduces from source (a fresh-checkout rebuild matching its entries) and exercised on a real Android runtime; \`${MANIFEST}\` carries its pinned size and SHA-256 for the in-app updater."
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            # Same version, newer commit: move the tag with the assets so the
-            # release's source never disagrees with its APK.
-            echo "Release $TAG exists; moving it to $COMMIT and refreshing its assets."
-            git tag -f "$TAG" "$COMMIT"
-            git push -f origin "refs/tags/$TAG"
-            gh release upload "$TAG" "$APK" "$MANIFEST" --clobber
-            gh release edit "$TAG" --latest --notes "$notes"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download"
+          notes_for() {
+            printf '%s\n\n%s\n\n%s' \
+              "HSE BLE Radar ${VERSION_NAME} main build \`$1\` (commit ${COMMIT}). **Pre-release. Not a stable release.**" \
+              "Install: download **${APK}** and open it on Android (allow installing from this source if prompted). Installed apps are not auto-updated to main builds. The in-app updater follows the stable release only." \
+              "Published automatically after the \`gates\` workflow passed on this commit. The APK is the committed artifact, which CI proved reproduces from source (a fresh-checkout rebuild matching its entries) and exercised on a real Android runtime. \`${MANIFEST}\` carries its pinned size and SHA-256, with \`url\` pointing at this pre-release's own asset."
+          }
+          # 1) main-<sha7>: created once, never moved or clobbered.
+          if gh release view "$MAIN_TAG" >/dev/null 2>&1; then
+            echo "$MAIN_TAG already published; leaving it as is."
           else
-            echo "Creating release $TAG on $COMMIT."
-            gh release create "$TAG" "$APK" "$MANIFEST" \
-              --target "$COMMIT" \
-              --title "HSE BLE Radar ${VERSION_NAME}" \
-              --latest \
-              --notes "$notes"
+            mkdir -p "out/$MAIN_TAG"
+            cargo xtask release-manifest --url "$base/$MAIN_TAG/$APK" --out "out/$MAIN_TAG/$MANIFEST"
+            cp "$APK" "out/$MAIN_TAG/"
+            ( cd "out/$MAIN_TAG" && sha256sum "$APK" "$MANIFEST" > SHA256SUMS )
+            gh release create "$MAIN_TAG" "out/$MAIN_TAG/$APK" "out/$MAIN_TAG/$MANIFEST" "out/$MAIN_TAG/SHA256SUMS" \
+              --target "$COMMIT" --prerelease --latest=false \
+              --title "HSE BLE Radar ${VERSION_NAME} (main ${COMMIT:0:7})" \
+              --notes "$(notes_for "$MAIN_TAG")"
           fi
-          echo "Published: $(gh release view "$TAG" --json url --jq .url)"
+          # 2) rolling `latest`: delete the old pre-release + its tag, re-create it on this commit.
+          #    (Guarded above: deletion only ever happens to a release that is already a pre-release.)
+          mkdir -p "out/$ROLLING_TAG"
+          cargo xtask release-manifest --url "$base/$ROLLING_TAG/$APK" --out "out/$ROLLING_TAG/$MANIFEST"
+          cp "$APK" "out/$ROLLING_TAG/"
+          ( cd "out/$ROLLING_TAG" && sha256sum "$APK" "$MANIFEST" > SHA256SUMS )
+          if gh release view "$ROLLING_TAG" >/dev/null 2>&1; then
+            gh release delete "$ROLLING_TAG" --yes --cleanup-tag
+          fi
+          gh release create "$ROLLING_TAG" "out/$ROLLING_TAG/$APK" "out/$ROLLING_TAG/$MANIFEST" "out/$ROLLING_TAG/SHA256SUMS" \
+            --target "$COMMIT" --prerelease --latest=false \
+            --title "HSE BLE Radar ${VERSION_NAME} (latest main build)" \
+            --notes "$(notes_for "$ROLLING_TAG")"
+          echo "Published: $(gh release view "$MAIN_TAG" --json url --jq .url) and $(gh release view "$ROLLING_TAG" --json url --jq .url)"
