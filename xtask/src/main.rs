@@ -1179,6 +1179,79 @@ fn release_artifact_url() -> String {
     release_artifact_url_for(APP_VERSION_NAME)
 }
 
+/// The installed emulator's `Pkg.Revision`, if it has one.
+fn installed_emulator_revision(sdk_root: &Path) -> Option<String> {
+    fs::read_to_string(sdk_root.join("emulator/source.properties"))
+        .ok()
+        .and_then(|properties| emulator::package_revision(&properties))
+}
+
+/// Whether `archive` is the pinned emulator archive: its size, then its SHA-256.
+fn check_pinned_emulator_archive(archive: &[u8]) -> Result<(), String> {
+    if archive.len() != PINNED_EMULATOR_ARCHIVE_SIZE {
+        return Err(format!(
+            "{PINNED_EMULATOR_ARCHIVE} is {} bytes, not the pinned {PINNED_EMULATOR_ARCHIVE_SIZE}",
+            archive.len()
+        ));
+    }
+    let digest = sha256::to_hex(&sha256::sha256(archive));
+    if digest != PINNED_EMULATOR_ARCHIVE_SHA256 {
+        return Err(format!(
+            "{PINNED_EMULATOR_ARCHIVE} has SHA-256 {digest}, not the pinned {PINNED_EMULATOR_ARCHIVE_SHA256}"
+        ));
+    }
+    Ok(())
+}
+
+/// Makes `<sdk>/emulator` the pinned revision (`PINNED_EMULATOR_REVISION`):
+/// kept when sdkmanager installed exactly that, else replaced by the pinned
+/// archive, downloaded from the SDK repository and verified first; what was
+/// done, for the log.
+fn install_pinned_emulator(sdk_root: &Path) -> Result<String, String> {
+    let installed = installed_emulator_revision(sdk_root);
+    if installed.as_deref() == Some(PINNED_EMULATOR_REVISION) {
+        return Ok(format!(
+            "emulator {PINNED_EMULATOR_REVISION}: the pinned revision, as sdkmanager installed it"
+        ));
+    }
+    let url = format!("{SDK_REPOSITORY_URL}/{PINNED_EMULATOR_ARCHIVE}");
+    println!(
+        "== emulator {} installed, {PINNED_EMULATOR_REVISION} pinned: fetching {url} ==",
+        installed.as_deref().unwrap_or("(none)")
+    );
+    let download = env::temp_dir().join(PINNED_EMULATOR_ARCHIVE);
+    run_status({
+        let mut c = Command::new("curl");
+        c.args(["-fsSL", "--retry", "3", "-o"])
+            .arg(&download)
+            .arg(&url);
+        c
+    })
+    .map_err(|e| format!("downloading the pinned emulator {url}: {e}"))?;
+    check_pinned_emulator_archive(&read_bytes(&download)?)?;
+    let dir = sdk_root.join("emulator");
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("removing {}: {e}", dir.display()))?;
+    }
+    // The archive's single top-level directory is `emulator/`.
+    run_status({
+        let mut c = Command::new("unzip");
+        c.arg("-q").arg(&download).arg("-d").arg(sdk_root);
+        c
+    })?;
+    let _ = fs::remove_file(&download);
+    match installed_emulator_revision(sdk_root) {
+        Some(revision) if revision == PINNED_EMULATOR_REVISION => Ok(format!(
+            "emulator {PINNED_EMULATOR_REVISION}: the pinned archive {PINNED_EMULATOR_ARCHIVE}, verified, in place of {}",
+            installed.as_deref().unwrap_or("none")
+        )),
+        other => Err(format!(
+            "{} unpacked {PINNED_EMULATOR_ARCHIVE} but emulator/source.properties reads {other:?}, not {PINNED_EMULATOR_REVISION}",
+            dir.display()
+        )),
+    }
+}
+
 /// The release asset URL of a version name's artifact (tag `v<name>`).
 fn release_artifact_url_for(version_name: &str) -> String {
     format!(
@@ -1207,6 +1280,24 @@ const PINNED_SYSTEM_IMAGE_TAG: &str = "default";
 const PINNED_EMULATOR_IMAGE_API: u32 = 34;
 const PINNED_EMULATOR_IMAGE_TAG: &str = "google_apis";
 const PINNED_EMULATOR_IMAGE_ABI: &str = "x86_64";
+/// The emulator the emulator proof boots the image with. sdkmanager cannot
+/// ask for a version of `emulator`, only for the newest its channel carries,
+/// and that moved from 37.1.11 to 37.2.12 between two runner images: 37.2.12
+/// hands the guest's Wi-Fi to netsimd, whose access point has a locally
+/// administered BSSID, and every survey history check went red with no change
+/// in this repository. So `android-sdk-install --emulator` checks what
+/// sdkmanager installed and, when the channel has moved on, puts this exact
+/// archive from the SDK repository in its place, checked against its pinned
+/// size and SHA-256 (the repository lists its SHA-1 as
+/// cd7362ea55dfb86a418958138dc396e74165dd01). Bump all four together, in a
+/// reviewed change, once the proof is green on the new revision.
+const PINNED_EMULATOR_REVISION: &str = "37.2.12";
+const PINNED_EMULATOR_ARCHIVE: &str = "emulator-linux_x64-16428233.zip";
+const PINNED_EMULATOR_ARCHIVE_SIZE: usize = 349_654_171;
+const PINNED_EMULATOR_ARCHIVE_SHA256: &str =
+    "b08fc43d8608d2955f607f1b287beb525041e730086bdca3af152accac3af9c1";
+/// Where sdkmanager itself downloads SDK archives from.
+const SDK_REPOSITORY_URL: &str = "https://dl.google.com/android/repository";
 
 /// Which pinned package set `android-sdk-packages` prints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1369,6 +1460,9 @@ fn cmd_android_sdk_install(args: &[String]) -> Result<(), String> {
                 .collect::<Vec<_>>()
                 .join(" ")
         ));
+    }
+    if set == SdkPackageSet::Emulator {
+        println!("{}", install_pinned_emulator(&sdk_root)?);
     }
     // What the proofs will actually pick up.
     let found: Vec<String> = match set {
@@ -4227,6 +4321,35 @@ mod tests {
             sdk_package_dir(sdk, "emulator"),
             PathBuf::from("/sdk/emulator")
         );
+    }
+
+    #[test]
+    fn the_emulator_is_pinned_to_one_verified_archive() {
+        let sdk = sdk_fixture("emulator-pin");
+        assert_eq!(installed_emulator_revision(&sdk), None);
+        fs::create_dir_all(sdk.join("emulator")).unwrap();
+        fs::write(
+            sdk.join("emulator/source.properties"),
+            format!("Pkg.Revision={PINNED_EMULATOR_REVISION}\nPkg.Path=emulator\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            installed_emulator_revision(&sdk).as_deref(),
+            Some(PINNED_EMULATOR_REVISION)
+        );
+        // The pinned revision as sdkmanager installed it is kept: no download.
+        assert!(
+            install_pinned_emulator(&sdk)
+                .unwrap()
+                .contains("as sdkmanager installed it")
+        );
+        assert!(
+            check_pinned_emulator_archive(b"PK")
+                .unwrap_err()
+                .contains("not the pinned 349654171")
+        );
+        assert_eq!(PINNED_EMULATOR_ARCHIVE_SHA256.len(), 64);
+        assert!(PINNED_EMULATOR_ARCHIVE.starts_with("emulator-linux_x64-"));
     }
 
     #[test]
