@@ -107,9 +107,10 @@ What this shows:
 ## 2. Proposed staged split
 
 Each step is one PR. It lands only when its gate is green and CI (gates,
-android-apk, web-dashboard, android-emulator) passes. Steps 1 to 3 keep
-`bleradar-core`'s public API source-compatible for HSE, so HSE's pinned `rev`
-keeps building without changes.
+android-apk, web-dashboard, android-emulator) passes. Steps 1 and 2 keep
+`bleradar-core`'s public API source-compatible, including what HSE uses.
+Step 3 removes the engine items from it in a breaking version bump. HSE uses
+none of them, and its pinned `rev` keeps building either way.
 
 ### Step 0: record the boundary (this PR, done)
 
@@ -123,14 +124,16 @@ keeps building without changes.
     can only shrink;
   - `bleradar-jni` or `bleradar-compat` transitively reaches an engine;
   - a module is unclassified, or a classification names a module that is gone;
-  - a `crate::`/`super::`/`bleradar_core::` path can't be resolved. The check
+  - a `crate::`/`super::`/`bleradar_core::` path can't be resolved, including any
+    wildcard (`*`) import outside a `#[cfg(test)]` module. The check
     fails loudly rather than miss an edge.
 - **Why it is safe:** `xtask` is its own workspace and no shipped crate
   depends on it. No file under `crates/` or `android/` changes, so
   `libbleradar_jni.so` and the committed APK stay byte-identical. CI's
   android-apk reproduce check confirms that.
-- **Gate:** 10 unit tests in `boundary.rs`. Nine use fixtures for the lexer,
-  the `use`-group parser, `lib.rs` re-export resolution, and each rule. One
+- **Gate:** 12 unit tests in `boundary.rs`. Eleven use fixtures for the lexer,
+  the `use`-group parser, `lib.rs` re-export resolution (any `mod`
+  visibility), wildcard and `#[path]` rejection, and each rule. One
   holds the committed tree to the recorded boundary. The check was falsified
   by hand: each of the following fails it with a message naming the edge,
   and restoring the file passes it again:
@@ -189,9 +192,14 @@ keeps building without changes.
   `bleradar-core` for `Confidence` and `LatLon`. Move `evidence`, `fusion`,
   `infrastructure`, `osint`, `verification`, `advancement`, `website`,
   `pipeline` and `validation` there, along with their 142 integration tests
-  and their unit tests. `bleradar-core` keeps a deprecated
-  `engines` feature that re-exports `bleradar_engines::*` for one release, so
-  HSE can move on its own schedule. Decide separately whether the HSE model
+  and their unit tests. `bleradar-core` does **not** re-export them: that
+  would need `bleradar-core` to depend on `bleradar-engines`, which already
+  depends on `bleradar-core`, and Cargo rejects that cycle. The engine items
+  leave `bleradar-core`'s public API in a breaking version bump (0.6 to 0.7),
+  and any engine consumer depends on `bleradar-engines` directly. Today there
+  is none outside this repository: HSE uses only `sweep`
+  (`docs/REPOSITORY_BOUNDARY.md`), and its pinned `rev` keeps building the old
+  version until it chooses to bump. Decide separately whether the HSE model
   (`entity`, `coords`, `tags`) goes with the engines or into its own crate.
   The gate already proves no radar code needs it after step 1.
 - **Risks:**
@@ -202,9 +210,11 @@ keeps building without changes.
     `publish = false`).
   - `Cargo.lock` changes.
   - The `registry` capability rows name module paths.
-  - The re-export would create a dependency cycle (core -> engines -> core).
-    Avoid it by having HSE depend on `bleradar-engines` directly if it ever
-    needs the engines. It doesn't today.
+  - Removing the engine items from `bleradar-core` is a breaking API change.
+    Before the bump, check HSE's current pinned `rev` and its sources for any
+    engine item (expected: none, only `sweep`). A consumer that turns up moves
+    to `bleradar-engines` in the same coordinated change. A re-export from
+    core is not an option, because it would be a dependency cycle.
 - **Gate:** `cargo tree -p bleradar-jni` shows no `bleradar-engines`. Also
   `check-crate-boundary`, extended to classify crates, the per-file test
   counts conserved (571 in total), `check-dependency-policy`, `cargo deny`,

@@ -279,8 +279,13 @@ fn is_ident_byte(b: u8) -> bool {
 }
 
 /// Every identifier inside a `{ ... }` use-group (nested groups included),
-/// except the local alias after `as` (`x as y` reaches `x`, not `y`).
-fn group_idents(group: &str) -> Vec<String> {
+/// except the local alias after `as` (`x as y` reaches `x`, not `y`). A
+/// wildcard anywhere in the group is an error: it could bring in any name,
+/// so it cannot be resolved to a known set of modules.
+fn group_idents(group: &str) -> Result<Vec<String>, String> {
+    if group.contains('*') {
+        return Err("a wildcard (`*`) import cannot be resolved to modules".to_string());
+    }
     let mut found = Vec::new();
     let mut skip_alias = false;
     for token in group
@@ -297,13 +302,15 @@ fn group_idents(group: &str) -> Vec<String> {
             _ => found.push(token.to_string()),
         }
     }
-    found
+    Ok(found)
 }
 
 /// The names reached through `prefix` paths in `code` (`prefix` is e.g.
 /// `"crate::"` or `"bleradar_core::"`): `prefix::name` yields `name`, and
 /// `prefix::{a, b::c}` yields every identifier in the group. A match preceded
-/// by an identifier character (`my_crate::`) is not a match.
+/// by an identifier character (`my_crate::`) is not a match. A wildcard
+/// (`prefix::*`, `prefix::m::*`, or `*` inside a group) is an error, never a
+/// silent "no edge": it can expose any name for unqualified use.
 pub fn path_targets(code: &str, prefix: &str) -> Result<Vec<String>, String> {
     let bytes = code.as_bytes();
     let mut found = Vec::new();
@@ -318,16 +325,56 @@ pub fn path_targets(code: &str, prefix: &str) -> Result<Vec<String>, String> {
         if bytes.get(start) == Some(&b'{') {
             let end = matching_brace(code, start)
                 .map_err(|_| format!("unbalanced `{prefix}{{` group"))?;
-            found.extend(group_idents(&code[start + 1..end]));
+            found.extend(
+                group_idents(&code[start + 1..end])
+                    .map_err(|e| format!("`{prefix}{{..}}`: {e}"))?,
+            );
             from = end;
         } else {
             let len = bytes[start..]
                 .iter()
                 .take_while(|&&b| is_ident_byte(b))
                 .count();
+            // Follow the rest of the path (`a::b::c`) to catch a trailing
+            // wildcard (`a::*`) or a nested group (`a::{b, *}`).
+            let mut end = start + len;
+            while code[end..].starts_with("::") {
+                let next = end + 2;
+                match bytes.get(next) {
+                    Some(b'*') => {
+                        return Err(format!(
+                            "`{prefix}{}*`: a wildcard (`*`) import cannot be resolved to modules",
+                            &code[start..next]
+                        ));
+                    }
+                    Some(b'{') => {
+                        let close = matching_brace(code, next)
+                            .map_err(|_| format!("unbalanced `{prefix}..::{{` group"))?;
+                        group_idents(&code[next + 1..close])
+                            .map_err(|e| format!("`{prefix}{}{{..}}`: {e}", &code[start..next]))?;
+                        end = close + 1;
+                        break;
+                    }
+                    _ => {
+                        let more = bytes[next..]
+                            .iter()
+                            .take_while(|&&b| is_ident_byte(b))
+                            .count();
+                        if more == 0 {
+                            break;
+                        }
+                        end = next + more;
+                    }
+                }
+            }
             if len > 0 {
                 found.push(code[start..start + len].to_string());
+            } else if bytes.get(start) == Some(&b'*') {
+                return Err(format!(
+                    "`{prefix}*`: a wildcard (`*`) import cannot be resolved to modules"
+                ));
             }
+            from = end.max(start);
         }
     }
     Ok(found)
@@ -335,8 +382,11 @@ pub fn path_targets(code: &str, prefix: &str) -> Result<Vec<String>, String> {
 
 /// Reads `lib.rs`: declared modules, the module behind every crate-root name
 /// (`pub use m::{..}` / `pub use m::x` re-exports, `X as Y` renames, and items
-/// defined in the root itself), and the root's own code.
-pub fn parse_lib(lib_rs: &str) -> CrateIndex {
+/// defined in the root itself), and the root's own code. Any visibility
+/// (`pub`, `pub(crate)`, `pub(super)`, `pub(in ..)`) is accepted on a `mod`
+/// declaration; a `#[path]` attribute or a wildcard re-export is an error,
+/// because either would hide a module or a name from the check.
+pub fn parse_lib(lib_rs: &str) -> Result<CrateIndex, String> {
     let code = mask_code(lib_rs);
     let mut index = CrateIndex::default();
     let mut root_code = String::new();
@@ -344,7 +394,12 @@ pub fn parse_lib(lib_rs: &str) -> CrateIndex {
     for line in code.lines() {
         let t = line.trim();
         if statement.is_empty() {
-            let decl = t.strip_prefix("pub ").unwrap_or(t);
+            if t.starts_with("#[path") {
+                return Err(format!(
+                    "lib.rs: `{t}` relocates a module file; not supported"
+                ));
+            }
+            let decl = strip_visibility(t);
             if let Some(name) = decl.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')) {
                 index.modules.insert(name.trim().to_string());
                 continue;
@@ -352,7 +407,7 @@ pub fn parse_lib(lib_rs: &str) -> CrateIndex {
             if !(t.starts_with("pub use ") || t.starts_with("use ")) {
                 root_code.push_str(line);
                 root_code.push('\n');
-                if line.starts_with("pub ") || line.starts_with("pub(crate) ") {
+                if line.starts_with("pub ") || line.starts_with("pub(") {
                     let words: Vec<&str> = line.split_whitespace().collect();
                     if let Some(pos) = words.iter().position(|w| {
                         matches!(
@@ -397,6 +452,11 @@ pub fn parse_lib(lib_rs: &str) -> CrateIndex {
             if entry.is_empty() {
                 continue;
             }
+            if entry.contains('*') {
+                return Err(format!(
+                    "lib.rs: `use {module}::{entry}` is a wildcard re-export; its names cannot be resolved"
+                ));
+            }
             let exported = entry.rsplit(" as ").next().unwrap_or(entry).trim();
             let exported = exported.rsplit("::").next().unwrap_or(exported);
             index.names.insert(exported.to_string(), module.clone());
@@ -407,7 +467,18 @@ pub fn parse_lib(lib_rs: &str) -> CrateIndex {
         .names
         .retain(|_, module| module == CRATE_ROOT || modules.contains(module));
     index.root_code = root_code;
-    index
+    Ok(index)
+}
+
+/// `t` without a leading visibility qualifier (`pub`, `pub(crate)`,
+/// `pub(super)`, `pub(self)`, `pub(in path)`).
+fn strip_visibility(t: &str) -> &str {
+    if let Some(rest) = t.strip_prefix("pub(") {
+        return rest
+            .split_once(')')
+            .map_or(t, |(_, after)| after.trim_start());
+    }
+    t.strip_prefix("pub ").map_or(t, str::trim_start)
 }
 
 /// Resolves a name reached through a `crate::`/`bleradar_core::` path to the
@@ -582,7 +653,7 @@ pub struct Graph {
 pub fn graph_at(root: &Path) -> Result<Graph, String> {
     let src = root.join(CORE_SRC);
     let lib = fs::read_to_string(src.join("lib.rs")).map_err(|e| format!("reading lib.rs: {e}"))?;
-    let index = parse_lib(&lib);
+    let index = parse_lib(&lib)?;
     let mut edges = BTreeMap::new();
     edges.insert(CRATE_ROOT.to_string(), {
         let mut root_edges = module_edges(&index, CRATE_ROOT, &index.root_code)?;
@@ -741,8 +812,48 @@ pub fn wifi_band(mhz: u16) -> u16 {
     }
 
     #[test]
+    fn wildcard_imports_are_errors_never_a_silent_no_edge() {
+        for code in [
+            "use crate::*;",
+            "use super::*;",
+            "use crate::osint::*;",
+            "use crate::{signal, osint::*};",
+            "use crate::osint::{Foo, *};",
+        ] {
+            let prefix = if code.contains("super") {
+                "super::"
+            } else {
+                "crate::"
+            };
+            let err = path_targets(code, prefix).unwrap_err();
+            assert!(err.contains("wildcard"), "{code}: {err}");
+        }
+        assert!(path_targets("use bleradar_core::*;", "bleradar_core::").is_err());
+        // A multiplication after a path is not an import.
+        assert_eq!(
+            path_targets("let x = crate::K * 2;", "crate::").unwrap(),
+            vec!["K"]
+        );
+        assert!(
+            parse_lib("mod osint;\npub use osint::*;\n")
+                .unwrap_err()
+                .contains("wildcard")
+        );
+    }
+
+    #[test]
+    fn parse_lib_reads_every_visibility_on_mod_and_rejects_path_attributes() {
+        let index = parse_lib(
+            "mod a;\npub mod b;\npub(crate) mod c;\npub(super) mod d;\npub(in crate) mod e;\n",
+        )
+        .unwrap();
+        assert_eq!(index.modules, set(&["a", "b", "c", "d", "e"]));
+        assert!(parse_lib("#[path = \"x.rs\"]\nmod a;\n").is_err());
+    }
+
+    #[test]
     fn parse_lib_maps_modules_reexports_renames_and_root_items() {
-        let index = parse_lib(LIB);
+        let index = parse_lib(LIB).unwrap();
         assert_eq!(index.modules, set(&["entity", "osint", "signal", "update"]));
         assert_eq!(resolve(&index, "OsintEngine"), Some("osint"));
         assert_eq!(resolve(&index, "OsintError"), Some("osint"));
@@ -759,7 +870,7 @@ pub fn wifi_band(mhz: u16) -> u16 {
 
     #[test]
     fn module_edges_resolve_names_and_fail_loudly_on_unknown_paths() {
-        let index = parse_lib(LIB);
+        let index = parse_lib(LIB).unwrap();
         let code = "use crate::{Confidence, entity};\nfn f() { super::OsintEngine::new(); crate::update::x(); }\n#[cfg(test)]\nmod tests { use crate::Updater; }";
         assert_eq!(
             module_edges(&index, "update", code).unwrap(),
