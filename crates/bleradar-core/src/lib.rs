@@ -5,6 +5,7 @@
 //! gaps rather than guessed legacy behavior.
 
 mod advancement;
+mod capability;
 mod evidence;
 mod fusion;
 mod geo;
@@ -42,6 +43,10 @@ pub use advancement::{
     AdvancementRejection, AdvancementRun, AdvancementState, BenchmarkMetric, BenchmarkReport,
     FalsificationCheck, FalsificationFinding, FalsificationResult, FalsificationStatus,
     MetamorphicSoftwareAdvancementEngine, MetricDirection, SoftwareAdvancementEngine,
+};
+pub use capability::{
+    CapabilityClaimSpec, CapabilityError, CapabilityEvidenceLinks, CapabilityLedger, CapabilityRow,
+    CapabilityStatus, ClaimScope, derive_status,
 };
 pub use entity::{
     CANDIDATE_CONF, CONSENSUS_SOURCE, CORROBORATION_COEFF, CORROBORATION_DOUBT_DECAY,
