@@ -36,6 +36,10 @@ permissions:
   # To confirm a manually dispatched commit already passed `gates`.
   actions: read
 
+env:
+  # Release-build marker: only artifacts produced on Actions with HSE_RELEASE=1 may be published.
+  HSE_RELEASE: "1"
+
 concurrency:
   group: release
   cancel-in-progress: false
@@ -131,6 +135,25 @@ jobs:
               [ "$pre" = "true" ] || { echo "::error::release '$tag' exists and is NOT a pre-release; refusing"; exit 1; }
             fi
           done
+      - name: Key check on the exact artifacts to publish (must be zero)
+        if: steps.commit.outputs.publish == 'true'
+        env:
+          APK: ${{ steps.plan.outputs.apk }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [ "${HSE_RELEASE:-}" = "1" ] && [ "${GITHUB_ACTIONS:-}" = "true" ] \
+            || { echo "::error::publishing requires a GitHub Actions build with HSE_RELEASE=1"; exit 1; }
+          mkdir -p scan && (cd scan && unzip -q "../$APK")
+          {
+            echo "key-scan report"
+            echo "artifact: $APK"
+            echo "artifact_sha256: $(sha256sum "$APK" | cut -d' ' -f1)"
+            echo "commit: $COMMIT"
+            echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            bash scripts/scan-for-keys.sh "$APK" scan 2>&1 && echo "result: PASS (0 findings)"
+          } | tee key-scan-report.txt
+          grep -qx "result: PASS (0 findings)" key-scan-report.txt
       - name: Publish main-<sha7> and move the rolling `latest` pre-release
         if: steps.commit.outputs.publish == 'true'
         env:
@@ -156,9 +179,9 @@ jobs:
           else
             mkdir -p "out/$MAIN_TAG"
             cargo xtask release-manifest --url "$base/$MAIN_TAG/$APK" --out "out/$MAIN_TAG/$MANIFEST"
-            cp "$APK" "out/$MAIN_TAG/"
-            ( cd "out/$MAIN_TAG" && sha256sum "$APK" "$MANIFEST" > SHA256SUMS )
-            gh release create "$MAIN_TAG" "out/$MAIN_TAG/$APK" "out/$MAIN_TAG/$MANIFEST" "out/$MAIN_TAG/SHA256SUMS" \
+            cp "$APK" key-scan-report.txt "out/$MAIN_TAG/"
+            ( cd "out/$MAIN_TAG" && sha256sum "$APK" "$MANIFEST" key-scan-report.txt > SHA256SUMS )
+            gh release create "$MAIN_TAG" "out/$MAIN_TAG/$APK" "out/$MAIN_TAG/$MANIFEST" "out/$MAIN_TAG/key-scan-report.txt" "out/$MAIN_TAG/SHA256SUMS" \
               --target "$COMMIT" --prerelease --latest=false \
               --title "HSE BLE Radar ${VERSION_NAME} (main ${COMMIT:0:7})" \
               --notes "$(notes_for "$MAIN_TAG")"
@@ -167,12 +190,12 @@ jobs:
           #    (Guarded above: deletion only ever happens to a release that is already a pre-release.)
           mkdir -p "out/$ROLLING_TAG"
           cargo xtask release-manifest --url "$base/$ROLLING_TAG/$APK" --out "out/$ROLLING_TAG/$MANIFEST"
-          cp "$APK" "out/$ROLLING_TAG/"
-          ( cd "out/$ROLLING_TAG" && sha256sum "$APK" "$MANIFEST" > SHA256SUMS )
+          cp "$APK" key-scan-report.txt "out/$ROLLING_TAG/"
+          ( cd "out/$ROLLING_TAG" && sha256sum "$APK" "$MANIFEST" key-scan-report.txt > SHA256SUMS )
           if gh release view "$ROLLING_TAG" >/dev/null 2>&1; then
             gh release delete "$ROLLING_TAG" --yes --cleanup-tag
           fi
-          gh release create "$ROLLING_TAG" "out/$ROLLING_TAG/$APK" "out/$ROLLING_TAG/$MANIFEST" "out/$ROLLING_TAG/SHA256SUMS" \
+          gh release create "$ROLLING_TAG" "out/$ROLLING_TAG/$APK" "out/$ROLLING_TAG/$MANIFEST" "out/$ROLLING_TAG/key-scan-report.txt" "out/$ROLLING_TAG/SHA256SUMS" \
             --target "$COMMIT" --prerelease --latest=false \
             --title "HSE BLE Radar ${VERSION_NAME} (latest main build)" \
             --notes "$(notes_for "$ROLLING_TAG")"
