@@ -204,6 +204,8 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(45);
 /// `DownloadManager`'s own process: forked before the trust store is
 /// shadowed, so it is ended and re-forked from the shadowed zygote.
 const DOWNLOADS_PROVIDER: &str = "com.android.providers.downloads";
+/// The process `DOWNLOADS_PROVIDER` runs in.
+const DOWNLOADS_PROCESS: &str = "android.process.media";
 /// The confirmation button's texts across the installer's variants.
 const INSTALLER_BUTTONS: &[&str] = &["Update", "Install", "UPDATE", "INSTALL"];
 
@@ -2295,7 +2297,13 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
     // the stand-in's logs are complete only once it has stopped.
     let _ = adb.shell_lenient("settings put global http_proxy :0");
     let (requests, tunnels) = host.stop();
-    outcome?;
+    outcome.map_err(|error| {
+        format!(
+            "{error}\n-- the stand-in's requests --\n{}\n-- its tunnels --\n{}",
+            requests.join("\n"),
+            tunnels.join("\n")
+        )
+    })?;
 
     // The stand-in's own view: the release URL's redirect, the manifest, the
     // artifact — each fetched, in that order, through a relayed tunnel.
@@ -2434,6 +2442,10 @@ fn upgrade_through(
     // DownloadManager's process may predate the shadow: end it so its next
     // fork inherits the shadowed store like every other app.
     let _ = adb.shell_lenient(&format!("am force-stop {DOWNLOADS_PROVIDER}"));
+    // The provider runs in android.process.media, which it shares with the
+    // media provider: a force-stop of one package can leave that process
+    // (and its unshadowed trust store) alive, so it is ended outright.
+    let _ = adb.shell_lenient(&format!("pid=$(pidof {DOWNLOADS_PROCESS}) && kill $pid"));
     report.push(format!(
         "trust anchor {}: the system store ({}) shadowed by a tmpfs copy carrying it, in the root, zygote and app namespaces",
         anchor.android_name,
@@ -2491,8 +2503,10 @@ fn upgrade_through(
             let downloads = adb.shell_lenient(&format!(
                 "logcat -d -T '{since}' -s DownloadManager:* DownloadProvider:* | tail -n 40"
             ));
+            let rows =
+                adb.shell_lenient("content query --uri content://downloads/all_downloads 2>&1");
             return Err(format!(
-                "no installer hand-off within {}s of the launch; progress {progress:?}; the service's log:\n{log}\n-- DownloadManager's log --\n{downloads}",
+                "no installer hand-off within {}s of the launch; progress {progress:?}; the service's log:\n{log}\n-- DownloadManager's log --\n{downloads}\n-- content://downloads/all_downloads --\n{rows}",
                 UPGRADE_TIMEOUT.as_secs()
             ));
         }
