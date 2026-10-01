@@ -250,7 +250,7 @@ impl ReleaseManifest {
                 "sha256" => set_once(&mut sha256, "sha256", parse_hex32(value)?)?,
                 "min_sdk" => set_once(&mut min_sdk, "min_sdk", parse_u32(value, "min_sdk")?)?,
                 "mandatory" => {
-                    set_once(&mut mandatory, "mandatory", parse_bool(value, "mandatory")?)?
+                    set_once(&mut mandatory, "mandatory", parse_bool(value, "mandatory")?)?;
                 }
                 "notes" => set_once(&mut notes, "notes", value.to_string())?,
                 other => return Err(UpdateError::UnknownField(other.to_string())),
