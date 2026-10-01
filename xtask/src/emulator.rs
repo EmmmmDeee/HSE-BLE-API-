@@ -146,6 +146,28 @@ const WIFI_ROW_KEYS: &[&str] = &[
     "\"trackability\":\"",
     "\"last_seen_ms\":",
 ];
+/// The emulator features the proof switches off. `WiFiPacketStream` hands the
+/// guest's Wi-Fi to netsimd; from emulator 37.2 netsimd answers with its own
+/// access point, `02:15:b2:00:00:01` on channel 6 (its `DEFAULT_WIFI_BSSID`
+/// base `02:15:b2:00:00:00`), whose U/L bit is set: the Rust core rightly
+/// rules that BSSID `RANDOMIZED`, the app rightly never remembers it, and the
+/// history, kill -9 and Auto Backup checks are left with nothing to prove. With
+/// the feature off the emulator runs its own per-emulator virtio-wifi backend,
+/// whose `lib/hostapd.conf` serves `AndroidWifi` as `00:13:10:85:fe:01` on
+/// channel 8 — the globally administered access point every green run up to
+/// emulator 37.1.11 surveyed. The Bluetooth packet streamer (the beacon's
+/// netsimd HCI socket) is a separate feature and stays on; an emulator that
+/// does not know the feature ignores the override.
+const EMULATOR_FEATURE_OVERRIDES: &[&str] = &["-feature", "-WiFiPacketStream"];
+/// What the emulator logs when netsimd carries the guest's Wi-Fi.
+const NETSIM_WIFI_LOG_LINE: &str = "Successfully initialized netsim WiFi";
+/// The BSSID of the emulator's own virtio-wifi access point
+/// (`emulator/lib/hostapd.conf`), globally administered, so `TRACKABLE`.
+const EMULATOR_WIFI_BSSID: &str = "00:13:10:85:fe:01";
+/// How many times `adb root` is attempted: right after boot adbd can still be
+/// restarting on its own, and the request then fails with `unable to connect
+/// for root: closed` (seen once on CI) although a moment later it succeeds.
+const ADB_ROOT_ATTEMPTS: u32 = 3;
 /// How long the survey may take to list an access point once the scan started:
 /// the first platform scan finishes within seconds, and the engine reads the
 /// results at once when it does; the bound covers a slow emulated radio.
@@ -182,6 +204,8 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(45);
 /// `DownloadManager`'s own process: forked before the trust store is
 /// shadowed, so it is ended and re-forked from the shadowed zygote.
 const DOWNLOADS_PROVIDER: &str = "com.android.providers.downloads";
+/// The process `DOWNLOADS_PROVIDER` runs in.
+const DOWNLOADS_PROCESS: &str = "android.process.media";
 /// The confirmation button's texts across the installer's variants.
 const INSTALLER_BUTTONS: &[&str] = &["Update", "Install", "UPDATE", "INSTALL"];
 
@@ -410,6 +434,85 @@ pub fn device_row<'a>(devices_json: &'a str, key: &str, value: &str) -> Option<&
     let start = devices_json[..at].rfind('{')?;
     let end = at + devices_json[at..].find('}')?;
     Some(&devices_json[start..=end])
+}
+
+/// The objects of the `access_points` array of a `/api/wifi` document, in
+/// order. Rows are flat objects; braces inside a string (an SSID may carry
+/// any character) are skipped by tracking quotes and escapes.
+pub fn access_point_rows(wifi_json: &str) -> Vec<&str> {
+    let marker = "\"access_points\":[";
+    let Some(start) = wifi_json.find(marker).map(|at| at + marker.len()) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    let (mut in_string, mut escaped, mut open) = (false, false, None);
+    for (offset, c) in wifi_json[start..].char_indices() {
+        let at = start + offset;
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' if open.is_none() => open = Some(at),
+            '}' => {
+                if let Some(from) = open.take() {
+                    rows.push(&wifi_json[from..=at]);
+                }
+            }
+            ']' if open.is_none() => break,
+            _ => {}
+        }
+    }
+    rows
+}
+
+/// The history rule on a surveyed `/api/wifi` document: a `TRACKABLE` row
+/// carries its first sighting (epoch ms, > 0) and exactly one visit (the
+/// proof's install is fresh), any other row carries `null` for both (the
+/// app never remembers a BSSID it cannot follow), and at least one row is
+/// `TRACKABLE`, which the later history, kill -9 and Auto Backup checks need.
+pub fn check_survey_history(survey: &str) -> Result<(), String> {
+    let rows = access_point_rows(survey);
+    if rows.is_empty() {
+        return Err(format!("the survey lists no access point: {survey}"));
+    }
+    let mut trackable = 0;
+    for row in &rows {
+        if json_has(row, "trackability", "\"TRACKABLE\"") {
+            trackable += 1;
+            let first_seen = json_integer(row, "first_seen_ms").filter(|ms| *ms > 0);
+            if first_seen.is_none() || json_integer(row, "visits") != Some(1) {
+                return Err(format!(
+                    "the trackable access point does not carry its first sighting and one visit: {row}"
+                ));
+            }
+        } else if !json_has(row, "first_seen_ms", "null") || !json_has(row, "visits", "null") {
+            return Err(format!(
+                "an access point that is not trackable carries a remembered history (only a trackable BSSID may be remembered): {row}"
+            ));
+        }
+    }
+    if trackable == 0 {
+        return Err(format!(
+            "no surveyed access point is TRACKABLE, so nothing can be remembered and the history checks have nothing to prove: every BSSID listed is locally administered or unreadable (the emulator's virtual access point is expected to be the globally administered 00:13:10:85:fe:01): {survey}"
+        ));
+    }
+    Ok(())
+}
+
+/// The emulator's own access point (`EMULATOR_WIFI_BSSID`) in a surveyed
+/// `/api/wifi` document, if it is listed as `TRACKABLE`.
+pub fn emulator_access_point(survey: &str) -> Option<&str> {
+    access_point_rows(survey).into_iter().find(|row| {
+        json_has(row, "bssid", &format!("\"{EMULATOR_WIFI_BSSID}\""))
+            && json_has(row, "trackability", "\"TRACKABLE\"")
+    })
 }
 
 /// The virtual advertiser's row in a `/api/devices` document: its address as
@@ -1046,6 +1149,7 @@ fn launch_emulator(
             "-accel",
             "on",
         ])
+        .args(EMULATOR_FEATURE_OVERRIDES)
         .env("ANDROID_SDK_ROOT", sdk_root)
         .env("ANDROID_HOME", sdk_root)
         .env("ANDROID_AVD_HOME", avd_home)
@@ -1103,6 +1207,47 @@ fn wait_until_online(adb: &Adb, timeout: Duration) -> Result<(), String> {
     Err(format!(
         "the device did not come back within {}s after adb root",
         timeout.as_secs()
+    ))
+}
+
+/// `adb root`, retried while adbd is still settling after boot, until the
+/// shell really runs as uid 0; what `adb root` said, and the attempt it took
+/// when it was not the first.
+fn become_root(adb: &Adb) -> Result<String, String> {
+    let mut last = String::new();
+    for attempt in 1..=ADB_ROOT_ATTEMPTS {
+        match adb.run(&["root"]) {
+            Ok(said) => {
+                // adbd restarts: the device drops off for a moment before it is back.
+                thread::sleep(Duration::from_secs(3));
+                wait_until_online(adb, Duration::from_secs(60))?;
+                let uid = adb.shell_lenient("id -u");
+                if uid.trim() == "0" {
+                    return Ok(if attempt == 1 {
+                        said.trim().to_string()
+                    } else {
+                        format!(
+                            "{} (attempt {attempt}/{ADB_ROOT_ATTEMPTS}; before: {last})",
+                            said.trim()
+                        )
+                    });
+                }
+                last = format!(
+                    "adb root answered `{}` but the shell runs as uid `{}`",
+                    said.trim(),
+                    uid.trim()
+                );
+            }
+            Err(error) => last = error,
+        }
+        if attempt < ADB_ROOT_ATTEMPTS {
+            println!("{last}; waiting for adbd before attempt {}", attempt + 1);
+            thread::sleep(Duration::from_secs(3));
+            wait_until_online(adb, Duration::from_secs(60))?;
+        }
+    }
+    Err(format!(
+        "adb root did not give a root shell in {ADB_ROOT_ATTEMPTS} attempts; last: {last}"
     ))
 }
 
@@ -1327,11 +1472,8 @@ fn exercise(
 
     // Root first, so the forward below survives adbd's restart.
     println!("== adb root ==");
-    let root = adb.run(&["root"])?;
-    // adbd restarts: the device drops off for a moment before it is back.
-    thread::sleep(Duration::from_secs(3));
-    wait_until_online(adb, Duration::from_secs(60))?;
-    report.push(format!("adb root: {}", root.trim()));
+    let root = become_root(adb)?;
+    report.push(format!("adb root: {root}"));
     let _ = adb.shell_lenient("input keyevent 82");
     // The adapter transition is asynchronous: wait for the enabled state so a
     // start is never refused for an adapter that was still coming up.
@@ -1482,14 +1624,36 @@ fn exercise(
             }
         }
         // The survey merges each read into its history before it builds the rows,
-        // so a remembered access point carries it on the very first read.
-        if !survey.contains(r#""first_seen_ms":1"#) || !survey.contains(r#""visits":1"#) {
+        // so a remembered access point carries it on the very first read. Only
+        // a trackable BSSID is remembered, so the history is judged per row
+        // against the row's own trackability rather than on the whole body.
+        // The override is checked, not assumed: netsimd's Wi-Fi fails the run
+        // by name, and the surveyed access point must be the emulator's own.
+        let log = fs::read_to_string(emulator_log).unwrap_or_default();
+        if log.contains(NETSIM_WIFI_LOG_LINE) {
             return Err(format!(
-                "the surveyed access point does not carry its first sighting and one visit: {survey}"
+                "the emulator logged \"{NETSIM_WIFI_LOG_LINE}\" despite {}: netsimd, not the emulator's virtio-wifi backend, carries the guest's Wi-Fi: {survey}\n{}",
+                EMULATOR_FEATURE_OVERRIDES.join(" "),
+                radio_log_lines(&log, 30).join("\n")
             ));
         }
+        check_survey_history(&survey).map_err(|error| {
+            format!(
+                "{error}\n-- the emulator log --\n{}",
+                radio_log_lines(&log, 30).join("\n")
+            )
+        })?;
+        let access_point = emulator_access_point(&survey).ok_or_else(|| {
+            format!(
+                "the survey does not list the emulator's virtio-wifi access point {EMULATOR_WIFI_BSSID} as TRACKABLE: {survey}"
+            )
+        })?;
+        println!(
+            "survey history check passed on {} row(s); the emulator's access point: {access_point}; no \"{NETSIM_WIFI_LOG_LINE}\" in the emulator log",
+            access_point_rows(&survey).len()
+        );
         report.push(format!(
-            "GET /api/wifi: active with an access point {:.1}s after the scan started, every rule key present: {survey}",
+            "GET /api/wifi: active with an access point {:.1}s after the scan started, every rule key present, the history rule held per row, {EMULATOR_WIFI_BSSID} TRACKABLE from the emulator's own virtio-wifi backend (no netsim Wi-Fi in its log): {survey}",
             waited.as_secs_f64()
         ));
 
@@ -2133,7 +2297,13 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
     // the stand-in's logs are complete only once it has stopped.
     let _ = adb.shell_lenient("settings put global http_proxy :0");
     let (requests, tunnels) = host.stop();
-    outcome?;
+    outcome.map_err(|error| {
+        format!(
+            "{error}\n-- the stand-in's requests --\n{}\n-- its tunnels --\n{}",
+            requests.join("\n"),
+            tunnels.join("\n")
+        )
+    })?;
 
     // The stand-in's own view: the release URL's redirect, the manifest, the
     // artifact — each fetched, in that order, through a relayed tunnel.
@@ -2272,6 +2442,10 @@ fn upgrade_through(
     // DownloadManager's process may predate the shadow: end it so its next
     // fork inherits the shadowed store like every other app.
     let _ = adb.shell_lenient(&format!("am force-stop {DOWNLOADS_PROVIDER}"));
+    // The provider runs in android.process.media, which it shares with the
+    // media provider: a force-stop of one package can leave that process
+    // (and its unshadowed trust store) alive, so it is ended outright.
+    let _ = adb.shell_lenient(&format!("pid=$(pidof {DOWNLOADS_PROCESS}) && kill $pid"));
     report.push(format!(
         "trust anchor {}: the system store ({}) shadowed by a tmpfs copy carrying it, in the root, zygote and app namespaces",
         anchor.android_name,
@@ -2325,8 +2499,14 @@ fn upgrade_through(
             ));
         }
         if launched.elapsed() > UPGRADE_TIMEOUT {
+            // What DownloadManager itself said, so a stalled download names why.
+            let downloads = adb.shell_lenient(&format!(
+                "logcat -d -T '{since}' -s DownloadManager:* DownloadProvider:* | tail -n 40"
+            ));
+            let rows =
+                adb.shell_lenient("content query --uri content://downloads/all_downloads 2>&1");
             return Err(format!(
-                "no installer hand-off within {}s of the launch; progress {progress:?}; the service's log:\n{log}",
+                "no installer hand-off within {}s of the launch; progress {progress:?}; the service's log:\n{log}\n-- DownloadManager's log --\n{downloads}\n-- content://downloads/all_downloads --\n{rows}",
                 UPGRADE_TIMEOUT.as_secs()
             ));
         }
@@ -2798,5 +2978,62 @@ mod tests {
         );
         assert_eq!(radio_log_lines(log, 1).len(), 1);
         assert!(radio_log_lines("", 5).is_empty());
+    }
+
+    /// The survey bodies the green (emulator 37.1.11) and red (37.2.12, netsim
+    /// Wi-Fi) CI runs actually received, and the edges of the per-row rule.
+    #[test]
+    fn survey_history_follows_each_rows_trackability() {
+        let green = r#"{"access_points":[{"bssid":"00:13:10:85:fe:01","ssid":"AndroidWifi","frequency_mhz":2447,"channel":8,"rssi_dbm":-50,"reliability":"VERY_HIGH_PLUS","proximity":"IMMEDIATE","security":"OPEN","enterprise":false,"trackability":"TRACKABLE","last_seen_ms":1790741295934,"first_seen_ms":1790741295934,"visits":1}],"state":"active","dropped":0,"native_available":true,"timestamp_ms":1790741307584}"#;
+        let red = r#"{"access_points":[{"bssid":"02:15:b2:00:00:01","ssid":"AndroidWifi","frequency_mhz":2437,"channel":6,"rssi_dbm":-50,"reliability":"VERY_HIGH_PLUS","proximity":"IMMEDIATE","security":"OPEN","enterprise":false,"trackability":"RANDOMIZED","last_seen_ms":1790872301299,"first_seen_ms":null,"visits":null}],"state":"active","dropped":0,"native_available":true,"timestamp_ms":1790872308451}"#;
+        assert_eq!(access_point_rows(green).len(), 1);
+        assert_eq!(check_survey_history(green), Ok(()));
+        assert_eq!(
+            emulator_access_point(green),
+            Some(access_point_rows(green)[0])
+        );
+        assert_eq!(emulator_access_point(red), None);
+        let error = check_survey_history(red).unwrap_err();
+        assert!(
+            error.contains("no surveyed access point is TRACKABLE"),
+            "{error}"
+        );
+
+        // Both together: the randomized row is rightly unremembered.
+        let both = green.replace(
+            r#"}],"state""#,
+            &format!("}},{}],\"state\"", access_point_rows(red)[0]),
+        );
+        assert_eq!(access_point_rows(&both).len(), 2);
+        assert_eq!(check_survey_history(&both), Ok(()));
+
+        // A trackable row without its history, or with a second visit, fails.
+        let forgotten = green.replace(
+            r#""first_seen_ms":1790741295934,"visits":1"#,
+            r#""first_seen_ms":null,"visits":null"#,
+        );
+        assert!(
+            check_survey_history(&forgotten)
+                .unwrap_err()
+                .contains("trackable access point")
+        );
+        let revisited = green.replace(r#""visits":1"#, r#""visits":2"#);
+        assert!(check_survey_history(&revisited).is_err());
+        // A randomized row that is remembered breaks the privacy rule.
+        let leaked = red.replace(
+            r#""first_seen_ms":null,"visits":null"#,
+            r#""first_seen_ms":5,"visits":1"#,
+        );
+        assert!(
+            check_survey_history(&leaked)
+                .unwrap_err()
+                .contains("not trackable")
+        );
+        // Braces and brackets inside an SSID do not split a row.
+        let tricky = green.replace(r#""ssid":"AndroidWifi""#, r#""ssid":"a}],{\"b""#);
+        assert_eq!(access_point_rows(&tricky).len(), 1);
+        assert_eq!(check_survey_history(&tricky), Ok(()));
+        assert!(access_point_rows(r#"{"access_points":[],"state":"idle"}"#).is_empty());
+        assert!(check_survey_history(r#"{"access_points":[],"state":"active"}"#).is_err());
     }
 }
