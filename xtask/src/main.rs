@@ -76,6 +76,17 @@ const ORACLE_SO_ZIP_ENTRY: &str = "oracle/libbleradar_core.so";
 /// SHA-256 of that oracle `.so`, pinned so `oracle-differential` refuses to run
 /// against anything but the recorded immutable binary.
 const ORACLE_SO_SHA256: &str = "d14022cd113332312fb1719aafa107155a4c046c056cb9b2bcd3c94eb980b12d";
+/// The original v0.3.0 DEX in [`ORACLE_DIR`] (relative to the repo root).
+const ORACLE_DEX_PATH: &str = "oracle/classes.dex";
+/// SHA-256 of [`ORACLE_DEX_PATH`], an independent pin so editing the oracle
+/// manifest (and the snapshot's) cannot bless a changed DEX.
+const ORACLE_DEX_SHA256: &str = "a1311463a58fd2e4859e5227ee6b56040ccbcf1a63c8db544d65cc4ad3feeccc";
+/// The v0.3.0 recovery history in [`ORACLE_DIR`] (relative to the repo root).
+const ORACLE_HISTORY_BUNDLE_PATH: &str = "oracle/git-history.bundle";
+/// SHA-256 of [`ORACLE_HISTORY_BUNDLE_PATH`], an independent pin like
+/// [`ORACLE_DEX_SHA256`].
+const ORACLE_HISTORY_BUNDLE_SHA256: &str =
+    "e93a359b5ad836f00d557edd3c5af7ca7b0cb0bdfd20466a59c0d297e94abc6c";
 /// Committed executed-oracle ground truth `oracle-differential` regenerates and
 /// drift-checks (relative to the repo root).
 const EXECUTED_VECTORS_PATH: &str = "crates/bleradar-compat/tests/oracle/wifi_executed_vectors.tsv";
@@ -662,22 +673,7 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
     let manifest_path = oracle_dir.join(ORACLE_MANIFEST_NAME);
     let listing = list_entry_names(&oracle_dir)?;
     let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_default();
-    let pins: Vec<(&str, String)> = [
-        expected_apk_sha
-            .clone()
-            .map(|h| (file_name_of(ORACLE_APK_PATH), h)),
-        Some((
-            file_name_of(MIGRATION_ZIP_PATH),
-            MIGRATION_ZIP_SHA256.to_string(),
-        )),
-        Some((
-            file_name_of(ORACLE_SO_ZIP_ENTRY),
-            ORACLE_SO_SHA256.to_string(),
-        )),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let pins = independent_oracle_pins(expected_apk_sha.clone());
     let canonical = oracle_manifest_violations(
         &format!("{ORACLE_DIR}/{ORACLE_MANIFEST_NAME}"),
         &manifest_text,
@@ -724,6 +720,23 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
          {MIGRATION_SNAPSHOT_MANIFEST_PATH} verifies and each copy of a canonical file is identical to its own counterpart."
     );
     Ok(())
+}
+
+/// The gate's own pins for every canonical oracle, independent of
+/// `oracle/SHA256SUMS`: the APK's digest as parsed from `docs/INPUT_SHA256.txt`
+/// (left out when unparsable, which already fails the gate), and the in-code
+/// digests of the archive, the native oracle, the DEX and the history bundle.
+/// `(file name in ORACLE_DIR, digest)` pairs.
+fn independent_oracle_pins(apk_sha: Option<String>) -> Vec<(&'static str, String)> {
+    let apk = apk_sha.map(|digest| (file_name_of(ORACLE_APK_PATH), digest));
+    let in_code = [
+        (MIGRATION_ZIP_PATH, MIGRATION_ZIP_SHA256),
+        (ORACLE_SO_ZIP_ENTRY, ORACLE_SO_SHA256),
+        (ORACLE_DEX_PATH, ORACLE_DEX_SHA256),
+        (ORACLE_HISTORY_BUNDLE_PATH, ORACLE_HISTORY_BUNDLE_SHA256),
+    ]
+    .map(|(path, digest)| (file_name_of(path), digest.to_string()));
+    apk.into_iter().chain(in_code).collect()
 }
 
 /// The last path component of a `/`-separated repo-relative path.
@@ -6593,6 +6606,46 @@ mod tests {
                 "oracle/SHA256SUMS does not pin {name} at {pinned}"
             );
         }
+    }
+
+    #[test]
+    fn independent_pins_cover_every_committed_canonical_oracle_at_its_digest() {
+        // Review finding L2: the DEX and the history bundle had no pin of
+        // their own, so editing both manifests together blessed a change.
+        let root = repo_root_from(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("repo root");
+        let text = fs::read_to_string(root.join(ORACLE_DIR).join(ORACLE_MANIFEST_NAME))
+            .expect("oracle/SHA256SUMS is committed");
+        let input_sha = fs::read_to_string(root.join("docs/INPUT_SHA256.txt"))
+            .expect("docs/INPUT_SHA256.txt is committed");
+        let apk_sha = find_sha256_after_label(&input_sha, "Original APK SHA-256:");
+        assert!(apk_sha.is_some(), "docs/INPUT_SHA256.txt pins the APK");
+        let mut pinned = independent_oracle_pins(apk_sha);
+        pinned.sort();
+        let mut listed: Vec<(&str, String)> = parse_sha256sums("oracle/SHA256SUMS", &text)
+            .expect("manifest parses")
+            .iter()
+            .map(|(digest, name)| {
+                let name = [
+                    ORACLE_APK_PATH,
+                    MIGRATION_ZIP_PATH,
+                    ORACLE_SO_ZIP_ENTRY,
+                    ORACLE_DEX_PATH,
+                    ORACLE_HISTORY_BUNDLE_PATH,
+                ]
+                .into_iter()
+                .map(file_name_of)
+                .find(|known| known == name)
+                .unwrap_or("<not a known oracle>");
+                (name, digest.clone())
+            })
+            .collect();
+        listed.sort();
+        assert_eq!(pinned, listed);
+        assert_eq!(
+            independent_oracle_pins(None).len(),
+            4,
+            "an unparsable APK record drops only the APK pin"
+        );
     }
 
     #[test]

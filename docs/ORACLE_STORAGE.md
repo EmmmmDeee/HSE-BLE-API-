@@ -25,8 +25,10 @@ checks it by hand).
    symlink is never followed) with exactly that digest.
 3. Every entry in `oracle/` is listed: a file, subdirectory or symlink that is
    not pinned fails, so nothing unpinned can sit beside the oracles.
-4. The manifest agrees with the gate's own independent pins (APK, archive,
-   native oracle), so editing the manifest cannot bless a changed oracle.
+4. The manifest agrees with the gate's own independent pins for all five
+   files (the APK via `docs/INPUT_SHA256.txt`; the archive, native oracle, DEX
+   and history bundle via constants in `xtask/src/main.rs`), so editing the
+   manifest cannot bless a changed oracle.
 5. `migration/critically-enhanced-v0.3.0/SHA256SUMS` (the checked-in
    reconstruction's own manifest) verifies, and each of its copies of the
    canonical files is byte-identical to its own counterpart. The gate maps
@@ -49,7 +51,8 @@ Each branch was falsified before merging: a byte appended to `classes.dex`, a
 stray unpinned file in `oracle/`, an unpinned subdirectory, an unpinned
 symlink, a byte appended to the snapshot's oracle copy, the snapshot's history
 bundle changed together with its own manifest line, the snapshot's APK copy
-replaced by the bytes of `classes.dex` together with its own manifest line, the
+replaced by the bytes of `classes.dex` together with its own manifest line,
+`classes.dex` and its snapshot copy changed together with both manifest lines, the
 APK removed, and the archive's manifest line edited to a different digest each
 fail the gate with a message naming the file; restoring the tree passes it
 again.
