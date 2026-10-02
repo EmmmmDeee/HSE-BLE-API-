@@ -199,7 +199,7 @@ retry budget and the previous known-good version persist across a restart.
 ## Publishing a release
 
 The check fetches `releases/latest/download/release_manifest.txt`, the asset of
-the repository's newest release, so every release must carry both the APK and
+the repository's newest stable (non-pre-release) release, so every release must carry both the APK and
 the manifest describing it, and the manifest's `size_bytes`/`sha256` must be
 those of the uploaded bytes exactly (`verify_artifact` refuses anything else).
 `cargo xtask release-manifest [--url <artifact url>] [--out <path>]` writes
@@ -222,24 +222,45 @@ decision — the download, the verification, the installer, the install —
 against a stand-in release host on every pull request ("Verifying it"
 below). The steps are listed under "Releasing" in the README.
 
-Publishing is automated so a user only ever installs the APK. The `release`
-workflow (`.github/workflows/release.yml`) runs after `gates` succeeds on a
-push to this repository's `main` (never for a pull request, even a fork's
-branch named `main`), or when dispatched manually from `main` with `gates`
-already passed on that commit; it publishes only the current tip of `main`
-(a re-run of an older gates run publishes nothing), and refreshing an existing
-release moves its tag to the published commit. It it reads the authoritative identity with `cargo xtask release-plan`
-(tag `v<version>`, the committed APK's name, the manifest filename — the same
-values the build and the artifact URL derive from), generates
-`release_manifest.txt` with `cargo xtask release-manifest`, and creates or
-refreshes the `v<version>` GitHub release — marked latest — carrying the
-committed APK and that manifest. It re-publishes the exact committed bytes
-(no rebuild, no re-sign), so no signing key or other secret is required or
-embedded; only the default `GITHUB_TOKEN` creates the release. Because the
-release is marked latest, `releases/latest/download/release_manifest.txt`
-resolves to the manifest of the shipped build, so the in-app check concludes
-"up to date" against a real artifact instead of the `404` a repository
-without releases returns.
+Stable releases are cut by hand; the automation publishes only
+pre-releases. The `release` workflow (`.github/workflows/release.yml`) runs
+after `gates` succeeds on a push to this repository's `main` (never for a
+pull request, even a fork's branch named `main`), or when dispatched manually
+from `main` with `gates` already passed on that commit; it publishes only the
+current tip of `main` (a re-run of an older gates run publishes nothing). Its
+`prepare` job checks the commit out with `persist-credentials: false` and a
+read-only token, reads the authoritative identity with
+`cargo xtask release-plan` (tag `v<version>`, the committed APK's name, the
+manifest filename), runs `scripts/scan-for-keys.sh` on the committed APK and
+its unpacked entries (an Actions run with `HSE_RELEASE=1` only; any finding
+fails the run) into `key-scan-report.txt`, and stages, per pre-release, the
+APK, a `release_manifest.txt` from `cargo xtask release-manifest` whose `url`
+is that pre-release's own asset, the report and `SHA256SUMS`. Its `publish`
+job, the only one granted `contents: write`, checks out and runs no
+repository code: it requires the handed-over APK to be the exact bytes the
+scan passed (SHA-256), then
+
+* creates `main-<sha7>` once on the commit; an existing one is never
+  re-pointed or clobbered — it must be a pre-release whose tag resolves to the
+  commit, a missing asset is re-uploaded, an interrupted draft is completed,
+  and its APK and manifest must equal the staged bytes, its `SHA256SUMS` must
+  verify and its report must be a zero-finding scan of this APK and commit,
+  otherwise the run fails;
+* deletes the rolling `latest` pre-release and its tag and re-creates it on
+  the commit, then verifies it the same way.
+
+It refuses to touch any release that is not a pre-release or carries the
+stable tag, and never marks anything latest. It re-publishes the exact
+committed bytes (no rebuild, no re-sign), so no signing key or other secret is
+required or embedded; only the default `GITHUB_TOKEN` creates the
+pre-releases. Because GitHub's `releases/latest/download/` resolves to the
+newest stable release and ignores pre-releases, installed apps never
+auto-update to a main build: they follow the stable `v<version>` release a
+maintainer creates from a `gates`-verified main commit, carrying the
+committed APK and the manifest `cargo xtask release-manifest` generates for
+its `v<version>` asset URL, and marked latest ("Releasing" in the README).
+Until such a release exists, the check gets the `404` a repository without a
+stable release returns.
 
 ## Verifying it
 
