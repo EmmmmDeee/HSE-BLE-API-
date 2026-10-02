@@ -1,13 +1,15 @@
 # `xtask` is deliberately its own workspace (matching the standard cargo-xtask
-# pattern) so it never joins the `bleradar-*` dependency graph or shows up in
-# `cargo build/test/clippy --workspace` for the shipped library crates. See
+# pattern) so it never joins the shipped crates' workspace or their dependency
+# graph, and never shows up in `cargo build/test/clippy --workspace` for the
+# shipped library crates (the root `Cargo.lock` has no `xtask`). Its own graph
+# holds only the in-repo `bleradar-core` (below) and no third-party crate. See
 # `docs/AUTONOMOUS_DECISIONS.md` decision 24.
 [workspace]
 
 [package]
 name = "xtask"
 version = "0.1.0"
-description = "Dependency-free Rust-native developer tooling: parity report, policy/oracle gates, ABI/APK/DEX census, and the one-command local gate runner."
+description = "Third-party-free Rust-native developer tooling: parity report, policy/oracle gates, ABI/APK/DEX census, and the one-command local gate runner."
 edition = "2024"
 rust-version = "1.98"
 license = "Proprietary"
