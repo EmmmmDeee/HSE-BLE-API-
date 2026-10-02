@@ -34,8 +34,11 @@ version. Release policy: only pre-releases (`main-<sha7>` plus a rolling
 - `docs/DEVELOPMENT.md` records the verified toolchain setup: Rust 1.98.0,
   Temurin 21, Android platform 36, build-tools 37.0.0 and NDK 27.3.13750724
   (#44).
-- Documentation synced with `main` at `8a0ab6e`: release policy and the
-  release workflow's actual behaviour, the emulator and system-image pins,
+- The `release` workflow publishes each `main` build as the `main-<sha7>`
+  pre-release and moves the rolling `latest` pre-release to it. It never
+  creates, edits or re-tags a stable release (#50).
+- Documentation synced with `main` at `8a0ab6e`, then with #50: release
+  policy and the release workflow's behaviour, the emulator and system-image pins,
   the full `cargo xtask` command list, the Java unit-test classes (7 classes,
   115 tests), the committed APK's size and entries, and the current state of
   HSE's side of the repository boundary. Historical records keep the
@@ -50,11 +53,10 @@ version. Release policy: only pre-releases (`main-<sha7>` plus a rolling
 
 ### Known issues
 
-- `.github/workflows/release.yml` publishes a `v<version>` release with
-  `--latest` and force-moves its tag, which does not match the pre-release
-  policy. GitHub shows `v1.0.0` as a pre-release, so
-  `releases/latest/download/release_manifest.txt` answers `404` and the
-  in-app check uses the bundled manifest.
+- The in-app update check reads
+  `releases/latest/download/release_manifest.txt`, which GitHub resolves only
+  to a stable release. While only pre-releases exist it answers `404`, and
+  the check uses the bundled manifest.
 
 ## [1.0.0] - 2026-09-30
 

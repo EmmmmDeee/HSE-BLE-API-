@@ -599,10 +599,9 @@ BLERADAR_ADVANCEMENT_CAMPAIGN_SEQUENCES=50000 cargo test -p bleradar-core --rele
 explicit approval and is never automatic.
 
 The app checks `https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt`
-daily (`docs/AUTO_UPDATE.md`), so a release carries two assets: the APK and
-the manifest that describes it. The version has one authority,
-`APP_VERSION_CODE`/`APP_VERSION_NAME` in `xtask/src/main.rs`. Preparing a new
-APK:
+daily (`docs/AUTO_UPDATE.md`), so a stable release is a GitHub release (not a
+pre-release) carrying two assets — the APK and the manifest that describes it — and the version has one
+authority, `APP_VERSION_CODE`/`APP_VERSION_NAME` in `xtask/src/main.rs`:
 
 ```sh
 # 1. bump APP_VERSION_CODE / APP_VERSION_NAME in xtask/src/main.rs and the
@@ -612,20 +611,28 @@ git rm HSE-BLE-Radar-arm64-v<previous>.apk # one artifact is committed: check-ap
 cargo xtask check-app-version              # the bundled manifest, the artifact's name, no stale artifact (also a `gates` step)
 cargo xtask verify-android-live            # the built version read back; the package's entries reproduced by a second build
 git add HSE-BLE-Radar-arm64-v<version name>.apk
-# 2. merge to main; the `release` workflow then runs as described below
+# 2. merge to main — the `release` workflow publishes that commit as the
+#    pre-releases main-<sha7> and `latest` (never a stable release)
+# 3. cut the stable release by hand, from a main commit `gates` passed on:
+cargo xtask release-plan                                 # tag v<version name>, the APK and manifest names
+cargo xtask release-manifest --out release_manifest.txt  # url = the asset on the v<version name> release
+scan="$(mktemp -d)" && unzip -q -d "$scan" HSE-BLE-Radar-arm64-v<version name>.apk
+bash scripts/scan-for-keys.sh HSE-BLE-Radar-arm64-v<version name>.apk "$scan"  # must report 0 findings
+gh release create v<version name> HSE-BLE-Radar-arm64-v<version name>.apk release_manifest.txt \
+  --target <commit> --title "HSE BLE Radar <version name>" --latest
 ```
 
-**Current workflow (not yet aligned with the policy):** after `gates` passes
-on a push to `main`, `.github/workflows/release.yml` creates or refreshes a
-release tagged `v<version name>` (from `cargo xtask release-plan`), moves that
-tag to the new commit with a force-push, uploads the committed APK and a
-generated manifest, and requests `--latest`. On GitHub today the only
-release, `v1.0.0`, is flagged as a pre-release. GitHub's `releases/latest`
-never resolves to a pre-release, so the manifest URL above answers `404` and
-the app falls back to its bundled manifest. Aligning this with the policy
-needs a reviewed change to `release.yml` and to
-`UpdateCheckService.RELEASE_MANIFEST_URL`; see "Publishing a release" in
-`docs/AUTO_UPDATE.md`.
+Every main build is published automatically, as pre-releases only: once a
+commit is on `main` and `gates` passes, the `release` workflow publishes the
+committed APK (with a `release_manifest.txt` pointing at that pre-release's
+own asset, the zero-finding `key-scan-report.txt` and `SHA256SUMS`) as the
+immutable `main-<sha7>` pre-release and moves the rolling `latest`
+pre-release to it, so a tester only ever downloads and installs the APK. It
+never creates, edits or re-tags a stable release and never marks anything
+latest, and GitHub's `releases/latest/download/` URL skips pre-releases, so
+installed apps are updated only by a stable release cut by hand (step 3) —
+see "Publishing a release" in `docs/AUTO_UPDATE.md` for exactly when the
+workflow runs and what it refuses.
 
 `release-manifest` refuses a non-`https` URL, and `verify-api-live` serves
 the manifest it generates to the real core as the accepted-manifest scenario,
