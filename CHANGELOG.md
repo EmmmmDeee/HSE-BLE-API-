@@ -60,8 +60,11 @@ version. Release policy: only pre-releases (`main-<sha7>` plus a rolling
 
 ## [1.0.0] - 2026-09-30
 
-Published as a GitHub pre-release. The release workflow has since moved the
-`v1.0.0` tag to later commits on `main`, most recently `8a0ab6e`.
+Published as a GitHub pre-release. Before #50 the release workflow moved the
+`v1.0.0` tag to later commits on `main`, most recently `8a0ab6e`. Since #50
+the workflow no longer touches `v1.0.0`. Main builds are published as
+`main-<sha7>` pre-releases (first: `main-49b0c97`) and the rolling `latest`
+pre-release.
 
 ### Added
 
