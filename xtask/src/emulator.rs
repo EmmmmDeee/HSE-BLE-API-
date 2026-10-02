@@ -1651,6 +1651,13 @@ fn exercise(
     println!("== am start -W {ACTIVITY} ==");
     launch_activity(adb)?;
     report.push("launch: MainActivity started (Status: ok)".to_string());
+    // The first launch's update check starts from the activity's onStart,
+    // which `am start -W` has waited past: its lines are read from here on —
+    // now, once the API answers, early after the documents and between every
+    // later phase — not only once the API is up (which may take up to
+    // API_TIMEOUT).
+    let mut update_log = UpdateLog::default();
+    update_log.snapshot(adb);
 
     let forward = adb.run(&["forward", "tcp:0", &format!("tcp:{GUEST_API_PORT}")])?;
     let port = forwarded_port(&forward)
@@ -1660,9 +1667,6 @@ fn exercise(
         "API: http://127.0.0.1:{GUEST_API_PORT}/ in the guest answered {:.1}s after the launch (adb forward tcp:{port})",
         api_after.as_secs_f64()
     ));
-    // The first launch's update check starts with the activity: its lines
-    // are read from here on (see the early read after the documents).
-    let mut update_log = UpdateLog::default();
     update_log.snapshot(adb);
 
     println!("== the documents ==");
