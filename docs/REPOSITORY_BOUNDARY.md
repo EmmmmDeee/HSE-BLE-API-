@@ -2,10 +2,12 @@
 
 Two repositories, two purposes. Each stays distinct; each uses the strongest part of the other through one narrow, tested seam.
 
+> **State of the HSE side (checked against HSE `main` at `1ea6c304`, 2026-10-02):** HSE has been rebuilt as the single `huntsman-recon` crate. Its `Cargo.toml` depends on `serde`, `serde_json`, `thiserror` and `ureq` only, so it does **not** currently depend on `bleradar-core`. The HSE column and the seam below describe the HSE v1.41.0 monolith, which HSE now keeps as read-only reference under `legacy/`. The radar side of this document (nothing from HSE) is unchanged and enforced by `gates`.
+
 | | **HSE BLE Radar** — this repository | **Huntsman Search Engine (HSE)** — [`EmmmmDeee/Huntsman-Search-Engine-HSE-Termux-Android-Aarch64-Rust-`](https://github.com/EmmmmDeee/Huntsman-Search-Engine-HSE-Termux-Android-Aarch64-Rust-) |
 |---|---|---|
 | Purpose | A standalone Android ARM64 wireless-intelligence app (BLE radar today) and the safe-Rust engine library behind it (`bleradar-core`) | All-source OSINT / GEOINT / NETINT reconnaissance: 194 modules, one CLI/Web-UI binary, run in Termux on Android aarch64 |
-| Ships | An installable `HSE-BLE-Radar-arm64-<version>.apk`, published as a GitHub release | A Termux binary (`install.sh`, source build) |
+| Ships | An installable `HSE-BLE-Radar-arm64-<version>.apk`, attached to a GitHub release (release policy: pre-releases only; see the README's "Releasing") | Monolith: a Termux binary (`install.sh`, source build). Current `huntsman-recon`: a source build or a CI artifact |
 | Owns | BLE/Wi-Fi reading rules, advertisement decoding, identity across address rotation, device history, signal/proximity math, the self-updater | Modules, scan engine, correlator rules, storage, the HTTP API and UI, the installer |
 | Does not own | Any OSINT module, scan engine, or Termux tooling | A copy of any of the four reading rules it takes from the radar |
 

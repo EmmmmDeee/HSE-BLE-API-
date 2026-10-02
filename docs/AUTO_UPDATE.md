@@ -63,7 +63,9 @@ A release announces itself in one place: `release_manifest.txt` attached to
 the repository's latest GitHub release, at
 `UpdateCheckService.RELEASE_MANIFEST_URL`
 (`https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt`,
-a stable URL that redirects to the asset). `ReleaseManifestSource.java` GETs
+a URL that redirects to that asset of GitHub's "latest" release; GitHub
+never picks a pre-release as latest, so while only pre-releases exist the URL
+answers `404`). `ReleaseManifestSource.java` GETs
 it on the service's worker thread (network I/O may not run on the main
 thread) with 10 s connect and read timeouts and a 16 KiB cap, never throws,
 and reports the HTTP status, a `MANIFEST_FETCH_*` failure kind and a
@@ -222,24 +224,36 @@ decision — the download, the verification, the installer, the install —
 against a stand-in release host on every pull request ("Verifying it"
 below). The steps are listed under "Releasing" in the README.
 
-Publishing is automated so a user only ever installs the APK. The `release`
+**Release policy:** pre-releases only, as `main-<sha7>` plus a rolling
+`latest`. A stable (non-pre-release) release is made only with the owner's
+explicit approval and is never automatic. The workflow described next does
+not yet follow that policy (see "Current state" below).
+
+The `release`
 workflow (`.github/workflows/release.yml`) runs after `gates` succeeds on a
 push to this repository's `main` (never for a pull request, even a fork's
 branch named `main`), or when dispatched manually from `main` with `gates`
 already passed on that commit; it publishes only the current tip of `main`
 (a re-run of an older gates run publishes nothing), and refreshing an existing
-release moves its tag to the published commit. It it reads the authoritative identity with `cargo xtask release-plan`
+release moves its tag to the published commit (a force-push of the tag). It reads the authoritative identity with `cargo xtask release-plan`
 (tag `v<version>`, the committed APK's name, the manifest filename — the same
 values the build and the artifact URL derive from), generates
 `release_manifest.txt` with `cargo xtask release-manifest`, and creates or
-refreshes the `v<version>` GitHub release — marked latest — carrying the
+refreshes the `v<version>` GitHub release, requesting `--latest`, carrying the
 committed APK and that manifest. It re-publishes the exact committed bytes
 (no rebuild, no re-sign), so no signing key or other secret is required or
-embedded; only the default `GITHUB_TOKEN` creates the release. Because the
-release is marked latest, `releases/latest/download/release_manifest.txt`
-resolves to the manifest of the shipped build, so the in-app check concludes
-"up to date" against a real artifact instead of the `404` a repository
-without releases returns.
+embedded; only the default `GITHUB_TOKEN` creates the release.
+
+Current state (observed 2026-10-03 at `8a0ab6e`): the only release,
+`v1.0.0`, is flagged as a pre-release, and its tag has been moved to
+`8a0ab6e`. GitHub has no "latest" release, so
+`releases/latest/download/release_manifest.txt` answers `404`, and the in-app
+check falls back to the bundled manifest ("no release published"). Moving to
+the pre-release policy needs a reviewed change to `release.yml` (pre-release
+tags `main-<sha7>` and a rolling `latest`, no `--latest`) and to
+`UpdateCheckService.RELEASE_MANIFEST_URL` (for example
+`releases/download/latest/release_manifest.txt`, because `releases/latest/`
+never resolves to a pre-release). Neither change is made in this document.
 
 ## Verifying it
 
