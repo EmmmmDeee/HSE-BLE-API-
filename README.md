@@ -528,10 +528,18 @@ the artifact in order (on the first end-to-end run: handed to the installer
 deleted on every exit. It needs
 `/dev/kvm`, the SDK's `emulator`, `platform-tools` and the pinned image
 (`cargo xtask android-sdk-install --emulator` installs them: licenses
-accepted, `sdkmanager` retried, every package and the tools checked)
-and a JDK; CI's `android-emulator` job runs it on every pull request and
+accepted, `sdkmanager` retried, every package and the tools checked, and
+the emulator pinned to 37.2.12: kept only when its `package.xml` and
+`source.properties` name 37.2.12 and the SHA-256 of seven of its files
+matches the pinned archive, else replaced by that archive, fetched over
+HTTPS only, its size and SHA-256 checked before it is unpacked and swapped
+in) and a JDK; CI's `android-emulator` job runs it on every pull request and
 every push to `main` (2 min 33 s on the first green run; 4 min 00 s with
-the virtual advertiser, decision #95).
+the virtual advertiser, decision #95). The emulator is launched with
+`-feature -WiFiPacketStream`, so the survey sees its own virtio-wifi access
+point (`00:13:10:85:fe:01`, globally administered, `TRACKABLE`) rather than
+netsimd's locally administered one; the run fails if netsimd's Wi-Fi comes
+up anyway.
 
 ## Parity report
 
@@ -572,7 +580,7 @@ cargo xtask verify-android-unit    # the app's unit tests (android/app/src/test)
 cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator, then the app upgrading itself against a stand-in github.com (needs KVM + SDK emulator + target/android-apk/proof from build-update-proof)
 cargo xtask build-update-proof     # the current version and its successor on one key + the successor's release manifest, under target/android-apk/proof (needs SDK/NDK)
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
-cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)
+cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked, the emulator verified against (or replaced by) its pinned archive (what CI runs)
 cargo xtask check-app-version      # the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME, no artifact of another version remains (a gates step)
 cargo xtask release-plan           # the release identity (tag, apk, manifest, version) as key=value lines, after checking the committed APK; what the release workflow reads
 cargo xtask release-manifest [--url <artifact url>] [--out <path>]   # the manifest a release publishes: the committed APK's version, exact size and SHA-256
