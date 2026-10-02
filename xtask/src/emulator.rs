@@ -481,6 +481,52 @@ impl UpdateLog {
         }
     }
 
+    /// The verdict on the first launch's check, judged on the accumulated
+    /// log (never on the latest dump alone): `Ok(None)` while no decision is
+    /// logged; once one is, its decision ordinal, how many distinct
+    /// update-check lines the log holds, and the fetch's outcome — or why the
+    /// check fails: no `Remote manifest` line, that line after the decision,
+    /// or a fetched URL other than `release_manifest_url`.
+    pub fn verdict(
+        &self,
+        release_manifest_url: &str,
+    ) -> Result<Option<(i64, usize, String)>, String> {
+        let log = self.text();
+        let Some(decision) = update_decision_logged(&log) else {
+            return Ok(None);
+        };
+        // Distinct entries: a dump appended whole may repeat lines already
+        // held (each carries its timestamp, pid and tid, so a repeat is the
+        // same entry).
+        let lines = self
+            .lines
+            .iter()
+            .filter(|line| line.contains("UpdateCheckService") || line.contains("UpdateManager"))
+            .map(String::as_str)
+            .collect::<BTreeSet<&str>>()
+            .len();
+        // The fetch's line must be there, before the decision, and name
+        // the production source `UpdateCheckService.RELEASE_MANIFEST_URL`
+        // (read from the Java source, its authority): a check that
+        // assessed without fetching, or fetched elsewhere, fails here.
+        let (url, remote) = remote_manifest_outcome(&log).ok_or_else(|| {
+            format!(
+                "the update check reached its decision without logging its remote manifest fetch (the fetch path did not run); its log:\n{log}"
+            )
+        })?;
+        if !fetch_precedes_decision(&log) {
+            return Err(format!(
+                "the update check logged its decision before its remote manifest fetch; its log:\n{log}"
+            ));
+        }
+        if url != release_manifest_url {
+            return Err(format!(
+                "the update check fetched `{url}`, not UpdateCheckService.RELEASE_MANIFEST_URL `{release_manifest_url}`"
+            ));
+        }
+        Ok(Some((decision, lines, remote)))
+    }
+
     fn describe(&self) -> String {
         format!(
             "{} line(s) accumulated over {} logcat dump(s){}",
@@ -1619,9 +1665,14 @@ fn exercise(
     report.push(format!("adb root: {root}"));
     // Defence in depth for lines read long after they were written (the
     // update step below): a larger ring buffer than the emulator's 2M.
-    let _ = adb.shell_lenient(&format!("logcat -G {LOGCAT_BUFFER_SIZE}"));
+    // Best-effort: a refused resize is reported (its exit status and stderr
+    // included), never fatal — the accumulated read is the fix, not this.
+    let resize = match adb.shell(&format!("logcat -G {LOGCAT_BUFFER_SIZE}")) {
+        Ok(_) => "Ok".to_string(),
+        Err(error) => format!("Err({error})"),
+    };
     report.push(format!(
-        "logcat -G {LOGCAT_BUFFER_SIZE}: {}",
+        "logcat -G {LOGCAT_BUFFER_SIZE}: {resize}; {}",
         logcat_buffer_sizes(adb)
     ));
     let _ = adb.shell_lenient("input keyevent 82");
@@ -2087,42 +2138,15 @@ fn exercise(
     // bundled manifest, and finished — no service record and no "Checking
     // for updates..." notification left. Both are awaited, and every dump is
     // a fallible command, so a failed adb call never reads as "nothing left".
-    // The log judged is the one accumulated since the documents (the ring
+    // The log judged is the one accumulated since the launch (the ring
     // buffer may have rotated the early lines out by now), with this step's
     // dumps added to it.
     let release_manifest_url = release_manifest_url(config)?;
     let decision_awaited = Instant::now();
     let (decision, update_lines, remote) = loop {
         update_log.absorb(&adb.shell(UPDATE_LOG_COMMAND)?);
-        let log_text = update_log.text();
-        let log = log_text.as_str();
-        if let Some(decision) = update_decision_logged(log) {
-            let lines = log
-                .lines()
-                .filter(|line| {
-                    line.contains("UpdateCheckService") || line.contains("UpdateManager")
-                })
-                .count();
-            // The fetch's line must be there, before the decision, and name
-            // the production source `UpdateCheckService.RELEASE_MANIFEST_URL`
-            // (read from the Java source, its authority): a check that
-            // assessed without fetching, or fetched elsewhere, fails here.
-            let (url, remote) = remote_manifest_outcome(log).ok_or_else(|| {
-                format!(
-                    "the update check reached its decision without logging its remote manifest fetch (the fetch path did not run); its log:\n{log}"
-                )
-            })?;
-            if !fetch_precedes_decision(log) {
-                return Err(format!(
-                    "the update check logged its decision before its remote manifest fetch; its log:\n{log}"
-                ));
-            }
-            if url != release_manifest_url {
-                return Err(format!(
-                    "the update check fetched `{url}`, not UpdateCheckService.RELEASE_MANIFEST_URL `{release_manifest_url}`"
-                ));
-            }
-            break (decision, lines, remote);
+        if let Some(verdict) = update_log.verdict(&release_manifest_url)? {
+            break verdict;
         }
         if decision_awaited.elapsed() > PROMOTION_TIMEOUT {
             // Whether a check ran at all tells a lost log from a check that
@@ -2139,10 +2163,11 @@ fn exercise(
                 Err(error) => format!("GET /api/updates failed: {error}"),
             };
             return Err(format!(
-                "the update check did not reach a decision within {}s; {record}; logcat -g: {}; its log ({}):\n{log}",
+                "the update check did not reach a decision within {}s; {record}; logcat -g: {}; its log ({}):\n{}",
                 PROMOTION_TIMEOUT.as_secs(),
                 logcat_buffer_sizes(adb),
-                update_log.describe()
+                update_log.describe(),
+                update_log.text()
             ));
         }
         thread::sleep(Duration::from_millis(500));
@@ -3384,5 +3409,71 @@ mod tests {
             r#"GET /api/updates carries no last_check_ms: {"next_check_ms":0}"#
         );
         assert!(!update_check_record("").contains("evicted"));
+    }
+
+    #[test]
+    fn the_update_verdict_is_judged_on_the_accumulated_log() {
+        const URL: &str = "https://github.com/o/r/releases/latest/download/release_manifest.txt";
+        let created =
+            "10-01 18:18:43.990  3225  3225 D UpdateCheckService: UpdateCheckService created";
+        let fetched = format!(
+            "10-01 18:18:44.512  3225  3301 I UpdateCheckService: Remote manifest {URL}: HTTP 404 -> using the bundled manifest; no retry"
+        );
+        let decided =
+            "10-01 18:18:44.530  3225  3301 D UpdateCheckService: Update decision: 0 (available=1)";
+        let destroyed =
+            "10-01 18:18:44.600  3225  3225 D UpdateCheckService: UpdateCheckService destroyed";
+        let log_of = |dumps: &[&str]| {
+            let mut log = UpdateLog::default();
+            for dump in dumps {
+                log.absorb(dump);
+            }
+            log
+        };
+        // The decision only in an early read; the last read empty (the ring
+        // buffer rotated everything out): the verdict is still reached.
+        let early = format!("{created}\n{fetched}\n{decided}\n");
+        let log = log_of(&[&early, "", ""]);
+        assert_eq!(
+            log.verdict(URL),
+            Ok(Some((
+                0,
+                3,
+                "HTTP 404 -> using the bundled manifest; no retry".to_string()
+            )))
+        );
+        // The last read alone would hold no decision.
+        assert_eq!(log_of(&[""]).verdict(URL), Ok(None));
+        assert_eq!(log_of(&[&format!("{destroyed}\n")]).verdict(URL), Ok(None));
+        // The fetch in one read, the decision in a later one.
+        let log = log_of(&[&format!("{created}\n{fetched}\n"), &format!("{decided}\n")]);
+        assert_eq!(
+            log.verdict(URL).map(|v| v.map(|(d, n, _)| (d, n))),
+            Ok(Some((0, 3)))
+        );
+        // Every assertion holds on the accumulated log as on one dump: no
+        // fetch line, the fetch after the decision, or another URL fails.
+        let no_fetch = log_of(&[&format!("{created}\n{decided}\n"), ""]).verdict(URL);
+        assert!(
+            no_fetch
+                .unwrap_err()
+                .contains("without logging its remote manifest fetch")
+        );
+        let late = log_of(&[&format!("{decided}\n"), &format!("{fetched}\n")]).verdict(URL);
+        assert!(
+            late.unwrap_err()
+                .contains("decision before its remote manifest fetch")
+        );
+        let elsewhere = log_of(&[&early, ""]).verdict("https://example.invalid/m.txt");
+        assert!(
+            elsewhere
+                .unwrap_err()
+                .contains("not UpdateCheckService.RELEASE_MANIFEST_URL")
+        );
+        // A dump that shares no tail with the held log is appended whole and
+        // may repeat entries already held: the count is of distinct lines.
+        let log = log_of(&[&early, &format!("{fetched}\n{destroyed}\n{decided}\n")]);
+        assert_eq!(log.lines.len(), 6);
+        assert_eq!(log.verdict(URL).map(|v| v.map(|(_, n, _)| n)), Ok(Some(4)));
     }
 }
