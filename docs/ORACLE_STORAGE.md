@@ -28,18 +28,31 @@ checks it by hand).
 4. The manifest agrees with the gate's own independent pins (APK, archive,
    native oracle), so editing the manifest cannot bless a changed oracle.
 5. `migration/critically-enhanced-v0.3.0/SHA256SUMS` (the checked-in
-   reconstruction's own manifest) verifies, and its copies of the canonical
-   files are byte-identical to them: every `./oracle/` entry carries a
-   canonical digest, and `./git-history.bundle` carries exactly
-   `oracle/git-history.bundle`'s digest. Those are copies, never a second,
-   divergent oracle.
+   reconstruction's own manifest) verifies, and each of its copies of the
+   canonical files is byte-identical to its own counterpart. The gate maps
+   every copy explicitly (`SNAPSHOT_ORACLE_COPIES` in `xtask/src/main.rs`):
+
+   | Snapshot copy | Canonical counterpart |
+   |---|---|
+   | `./oracle/BLE-Radar-v0.3.0-original.apk` | `oracle/BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk` |
+   | `./oracle/classes.dex` | `oracle/classes.dex` |
+   | `./oracle/libbleradar_core.so` | `oracle/libbleradar_core.so` |
+   | `./git-history.bundle` | `oracle/git-history.bundle` |
+
+   Each copy must be listed, its file must match its line, and its line must
+   carry exactly its counterpart's digest from `oracle/SHA256SUMS`. Another
+   canonical file's digest does not count. Any other entry under `./oracle/`,
+   or with a canonical file's name elsewhere in the snapshot, is an unmapped
+   copy and fails. Those are copies, never a second, divergent oracle.
 
 Each branch was falsified before merging: a byte appended to `classes.dex`, a
 stray unpinned file in `oracle/`, an unpinned subdirectory, an unpinned
 symlink, a byte appended to the snapshot's oracle copy, the snapshot's history
-bundle changed together with its own manifest line, the APK removed, and the
-archive's manifest line edited to a different digest each fail the gate with a
-message naming the file; restoring the tree passes it again.
+bundle changed together with its own manifest line, the snapshot's APK copy
+replaced by the bytes of `classes.dex` together with its own manifest line, the
+APK removed, and the archive's manifest line edited to a different digest each
+fail the gate with a message naming the file; restoring the tree passes it
+again.
 
 ## What moved, and why it was safe
 

@@ -56,6 +56,21 @@ const MIGRATION_ZIP_SHA256: &str =
 /// The checked-in v0.3.0 snapshot's own manifest (`./`-relative names), whose
 /// `./oracle/` entries are copies of the canonical oracles.
 const MIGRATION_SNAPSHOT_MANIFEST_PATH: &str = "migration/critically-enhanced-v0.3.0/SHA256SUMS";
+/// Every copy of a canonical oracle inside the v0.3.0 snapshot, mapped
+/// explicitly to its own counterpart: `(path relative to the snapshot
+/// directory, file name in [`ORACLE_DIR`])`. `check-oracle-integrity` requires
+/// each copy to be listed in the snapshot manifest with exactly its
+/// counterpart's digest, and rejects any other entry under the snapshot's
+/// `oracle/`, so a copy can never carry a different oracle's bytes.
+const SNAPSHOT_ORACLE_COPIES: &[(&str, &str)] = &[
+    (
+        "oracle/BLE-Radar-v0.3.0-original.apk",
+        "BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk",
+    ),
+    ("oracle/classes.dex", "classes.dex"),
+    ("oracle/libbleradar_core.so", "libbleradar_core.so"),
+    ("git-history.bundle", "git-history.bundle"),
+];
 /// Zip entry of the immutable v0.3.0 native oracle inside [`MIGRATION_ZIP_PATH`].
 const ORACLE_SO_ZIP_ENTRY: &str = "oracle/libbleradar_core.so";
 /// SHA-256 of that oracle `.so`, pinned so `oracle-differential` refuses to run
@@ -677,9 +692,10 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
         failures.extend(violations);
     }
 
-    // The v0.3.0 snapshot's manifest still verifies, and its copies of the
-    // canonical files (`./oracle/*`, `./git-history.bundle`) are
-    // byte-identical to them, never a divergent second copy.
+    // The v0.3.0 snapshot's manifest still verifies, and each of its copies
+    // of the canonical files (`./oracle/*`, `./git-history.bundle`) is
+    // byte-identical to its own mapped counterpart, never a divergent second
+    // copy and never another oracle's bytes.
     let snapshot_manifest = root.join(MIGRATION_SNAPSHOT_MANIFEST_PATH);
     let snapshot_dir = snapshot_manifest
         .parent()
@@ -689,6 +705,7 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
     failures.extend(snapshot_manifest_violations(
         MIGRATION_SNAPSHOT_MANIFEST_PATH,
         &snapshot_text,
+        SNAPSHOT_ORACLE_COPIES,
         &canonical_entries,
         |name| hash_file_if_present(&snapshot_dir.join(name)),
     ));
@@ -704,7 +721,7 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
     println!(
         "Oracle integrity verified: APK matches docs/INPUT_SHA256.txt; migration archive matches its recorded baseline; \
          every file in {ORACLE_DIR}/ matches {ORACLE_DIR}/{ORACLE_MANIFEST_NAME}; \
-         {MIGRATION_SNAPSHOT_MANIFEST_PATH} verifies and its copies of canonical files are identical."
+         {MIGRATION_SNAPSHOT_MANIFEST_PATH} verifies and each copy of a canonical file is identical to its own counterpart."
     );
     Ok(())
 }
@@ -859,15 +876,19 @@ fn oracle_manifest_violations(
 /// Verifies the v0.3.0 snapshot's own manifest without touching the
 /// filesystem: it parses and is not empty, and every listed file exists with
 /// its listed digest. The snapshot's copies of canonical files must be
-/// byte-identical to them, so it never holds a divergent second oracle: an
-/// entry whose file name is a canonical file's name (`./git-history.bundle`)
-/// must carry that file's digest, and every entry under `oracle/` (where the
-/// APK is named differently) must carry the digest of some canonical file.
+/// byte-identical to them, so it never holds a divergent second oracle:
+/// - every `(copy, counterpart)` in `copies` is listed, and with exactly the
+///   digest `canonical` records for that counterpart (never merely the digest
+///   of some other canonical file);
+/// - any other entry under `oracle/`, or whose file name is a canonical
+///   file's name, is an unmapped copy and fails.
+///
 /// `canonical` is the canonical manifest's `(digest, name)` entries. Returns
 /// every violation found.
 fn snapshot_manifest_violations(
     label: &str,
     manifest_text: &str,
+    copies: &[(&str, &str)],
     canonical: &[(String, String)],
     hash_of: impl Fn(&str) -> Option<String>,
 ) -> Vec<String> {
@@ -888,22 +909,39 @@ fn snapshot_manifest_violations(
             )),
             Some(_) => {}
         }
-        let same_name = canonical
-            .iter()
-            .find(|(_, canonical_name)| canonical_name == file_name_of(relative));
-        if let Some((canonical_digest, canonical_name)) = same_name {
-            if canonical_digest != digest {
+        match copies.iter().find(|(copy, _)| *copy == relative) {
+            Some((_, counterpart)) => {
+                match canonical.iter().find(|(_, name)| name == counterpart) {
+                    None => violations.push(format!(
+                        "{label}: {name} is a copy of {ORACLE_DIR}/{counterpart}, which {ORACLE_DIR}/ does not pin"
+                    )),
+                    Some((canonical_digest, _)) if canonical_digest != digest => {
+                        violations.push(format!(
+                            "{label}: {name} is listed as {digest}, but its canonical counterpart {ORACLE_DIR}/{counterpart} is {canonical_digest}"
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+            None if relative.starts_with("oracle/")
+                || canonical
+                    .iter()
+                    .any(|(_, canonical_name)| canonical_name == file_name_of(relative)) =>
+            {
                 violations.push(format!(
-                    "{label}: {name} is listed as {digest}, but {ORACLE_DIR}/{canonical_name} is {canonical_digest}"
+                    "{label}: {name} is not a mapped copy of a canonical oracle in {ORACLE_DIR}/"
                 ));
             }
-        } else if relative.starts_with("oracle/")
-            && !canonical
-                .iter()
-                .any(|(canonical_digest, _)| canonical_digest == digest)
-        {
+            None => {}
+        }
+    }
+    for (copy, counterpart) in copies {
+        let listed = entries
+            .iter()
+            .any(|(_, name)| name.strip_prefix("./").unwrap_or(name) == *copy);
+        if !listed {
             violations.push(format!(
-                "{label}: {name} is not a copy of any canonical oracle in {ORACLE_DIR}/"
+                "{label}: does not list ./{copy}, the copy of {ORACLE_DIR}/{counterpart}"
             ));
         }
     }
@@ -6326,6 +6364,13 @@ mod tests {
         );
     }
 
+    fn digest_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(d, n)| ((*d).to_string(), (*n).to_string()))
+            .collect()
+    }
+
     #[test]
     fn snapshot_manifest_requires_matching_files_and_canonical_copies() {
         let text = format!(
@@ -6337,41 +6382,158 @@ mod tests {
             ("oracle/other.so", DIGEST_B),
             ("git-history.bundle", DIGEST_B),
         ];
-        let canonical = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
-            pairs
-                .iter()
-                .map(|(d, n)| ((*d).to_string(), (*n).to_string()))
-                .collect()
-        };
-        assert!(
+        let copies = [
+            ("oracle/copy.apk", "a.apk"),
+            ("oracle/other.so", "b.so"),
+            ("git-history.bundle", "git-history.bundle"),
+        ];
+        assert_eq!(
             snapshot_manifest_violations(
                 "s",
                 &text,
-                &canonical(&[(DIGEST_A, "a.apk"), (DIGEST_B, "git-history.bundle")]),
+                &copies,
+                &digest_pairs(&[
+                    (DIGEST_A, "a.apk"),
+                    (DIGEST_B, "b.so"),
+                    (DIGEST_B, "git-history.bundle")
+                ]),
                 fake_hashes(&files)
-            )
-            .is_empty()
+            ),
+            Vec::<String>::new()
         );
         let errors = snapshot_manifest_violations(
             "s",
             &text,
-            &canonical(&[(DIGEST_A, "a.apk"), (DIGEST_A, "git-history.bundle")]),
+            &copies,
+            &digest_pairs(&[(DIGEST_A, "a.apk"), (DIGEST_A, "git-history.bundle")]),
             fake_hashes(&files[..2]),
         );
         assert_eq!(
             errors,
             vec![
                 "s: listed file is missing: ./oracle/other.so".to_string(),
-                "s: ./oracle/other.so is not a copy of any canonical oracle in oracle/".to_string(),
+                "s: ./oracle/other.so is a copy of oracle/b.so, which oracle/ does not pin"
+                    .to_string(),
                 "s: listed file is missing: ./git-history.bundle".to_string(),
                 format!(
-                    "s: ./git-history.bundle is listed as {DIGEST_B}, but oracle/git-history.bundle is {DIGEST_A}"
+                    "s: ./git-history.bundle is listed as {DIGEST_B}, but its canonical counterpart oracle/git-history.bundle is {DIGEST_A}"
                 ),
             ]
         );
         assert_eq!(
-            snapshot_manifest_violations("s", "", &[], |_| None),
+            snapshot_manifest_violations("s", "", &[], &[], |_| None),
             vec!["s: missing or empty manifest".to_string()]
+        );
+    }
+
+    #[test]
+    fn snapshot_manifest_rejects_the_apk_copy_carrying_the_dex_bytes_with_its_line_updated() {
+        // Review finding M1: the snapshot's APK copy replaced by the bytes of
+        // classes.dex, and its own manifest line updated to match. Its digest
+        // is a canonical oracle's digest, just not the APK's, so it must fail.
+        const DEX: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        const SO: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let canonical = digest_pairs(&[
+            (DIGEST_A, "BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk"),
+            (DEX, "classes.dex"),
+            (SO, "libbleradar_core.so"),
+            (DIGEST_B, "git-history.bundle"),
+        ]);
+        let manifest = |apk_copy: &str| {
+            format!(
+                "{apk_copy}  ./oracle/BLE-Radar-v0.3.0-original.apk\n{DEX}  ./oracle/classes.dex\n{SO}  ./oracle/libbleradar_core.so\n{DIGEST_B}  ./git-history.bundle\n"
+            )
+        };
+        let files = |apk_copy: &'static str| {
+            [
+                ("oracle/BLE-Radar-v0.3.0-original.apk", apk_copy),
+                ("oracle/classes.dex", DEX),
+                ("oracle/libbleradar_core.so", SO),
+                ("git-history.bundle", DIGEST_B),
+            ]
+        };
+        let intact = files(DIGEST_A);
+        assert_eq!(
+            snapshot_manifest_violations(
+                "s",
+                &manifest(DIGEST_A),
+                SNAPSHOT_ORACLE_COPIES,
+                &canonical,
+                fake_hashes(&intact)
+            ),
+            Vec::<String>::new()
+        );
+        let swapped = files(DEX);
+        assert_eq!(
+            snapshot_manifest_violations(
+                "s",
+                &manifest(DEX),
+                SNAPSHOT_ORACLE_COPIES,
+                &canonical,
+                fake_hashes(&swapped)
+            ),
+            vec![format!(
+                "s: ./oracle/BLE-Radar-v0.3.0-original.apk is listed as {DEX}, but its canonical counterpart oracle/BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk is {DIGEST_A}"
+            )]
+        );
+    }
+
+    #[test]
+    fn snapshot_manifest_rejects_unmapped_oracle_copies_and_a_dropped_copy() {
+        // An extra copy carrying a real canonical digest is still not one of
+        // the mapped copies, and dropping a mapped copy together with its
+        // manifest line does not make it optional.
+        let text = format!(
+            "{DIGEST_A}  ./oracle/evil.so\n{DIGEST_B}  ./docs/git-history.bundle\n{DIGEST_A}  ./README.md\n"
+        );
+        let files = [
+            ("oracle/evil.so", DIGEST_A),
+            ("docs/git-history.bundle", DIGEST_B),
+            ("README.md", DIGEST_A),
+        ];
+        let errors = snapshot_manifest_violations(
+            "s",
+            &text,
+            &[("oracle/a.apk", "a.apk")],
+            &digest_pairs(&[(DIGEST_A, "a.apk"), (DIGEST_B, "git-history.bundle")]),
+            fake_hashes(&files),
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "s: ./oracle/evil.so is not a mapped copy of a canonical oracle in oracle/"
+                    .to_string(),
+                "s: ./docs/git-history.bundle is not a mapped copy of a canonical oracle in oracle/"
+                    .to_string(),
+                "s: does not list ./oracle/a.apk, the copy of oracle/a.apk".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_snapshot_oracle_copy_maps_to_a_distinct_committed_canonical_oracle() {
+        let root = repo_root_from(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("repo root");
+        let text = fs::read_to_string(root.join(ORACLE_DIR).join(ORACLE_MANIFEST_NAME))
+            .expect("oracle/SHA256SUMS is committed");
+        let canonical = parse_sha256sums("oracle/SHA256SUMS", &text).expect("manifest parses");
+        let mut counterparts: Vec<&str> = SNAPSHOT_ORACLE_COPIES.iter().map(|(_, c)| *c).collect();
+        counterparts.sort_unstable();
+        counterparts.dedup();
+        assert_eq!(
+            counterparts.len(),
+            SNAPSHOT_ORACLE_COPIES.len(),
+            "two snapshot copies share one counterpart"
+        );
+        for counterpart in counterparts {
+            assert!(
+                canonical.iter().any(|(_, name)| name == counterpart),
+                "{counterpart} is not pinned by oracle/SHA256SUMS"
+            );
+        }
+        assert_eq!(
+            file_name_of(ORACLE_APK_PATH),
+            SNAPSHOT_ORACLE_COPIES[0].1,
+            "the snapshot's APK copy maps to the canonical APK"
         );
     }
 
