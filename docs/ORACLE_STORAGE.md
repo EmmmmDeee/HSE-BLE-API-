@@ -46,13 +46,18 @@ checks it by hand).
    canonical file's digest does not count. Any other entry under `./oracle/`,
    or with a canonical file's name elsewhere in the snapshot, is an unmapped
    copy and fails. Those are copies, never a second, divergent oracle.
+6. Every file in the snapshot is listed in its `SHA256SUMS`: a file, symlink
+   or anything else that is not listed fails, at any depth. Only the manifest
+   itself and the gitignored local build directory `target/` at the
+   snapshot's top level are skipped.
 
 Each branch was falsified before merging: a byte appended to `classes.dex`, a
 stray unpinned file in `oracle/`, an unpinned subdirectory, an unpinned
 symlink, a byte appended to the snapshot's oracle copy, the snapshot's history
 bundle changed together with its own manifest line, the snapshot's APK copy
 replaced by the bytes of `classes.dex` together with its own manifest line,
-`classes.dex` and its snapshot copy changed together with both manifest lines, the
+`classes.dex` and its snapshot copy changed together with both manifest lines,
+a stray unlisted `oracle/evil.so` in the snapshot, the
 APK removed, and the archive's manifest line edited to a different digest each
 fail the gate with a message naming the file; restoring the tree passes it
 again.

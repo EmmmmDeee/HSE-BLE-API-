@@ -56,6 +56,9 @@ const MIGRATION_ZIP_SHA256: &str =
 /// The checked-in v0.3.0 snapshot's own manifest (`./`-relative names), whose
 /// `./oracle/` entries are copies of the canonical oracles.
 const MIGRATION_SNAPSHOT_MANIFEST_PATH: &str = "migration/critically-enhanced-v0.3.0/SHA256SUMS";
+/// The snapshot's gitignored local build directory (`cargo build` inside the
+/// snapshot), the one top-level entry its file listing skips.
+const SNAPSHOT_BUILD_DIR: &str = "target";
 /// Every copy of a canonical oracle inside the v0.3.0 snapshot, mapped
 /// explicitly to its own counterpart: `(path relative to the snapshot
 /// directory, file name in [`ORACLE_DIR`])`. `check-oracle-integrity` requires
@@ -698,9 +701,11 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
         .expect("the snapshot manifest path has a parent directory")
         .to_path_buf();
     let snapshot_text = fs::read_to_string(&snapshot_manifest).unwrap_or_default();
+    let snapshot_listing = list_tree_file_names(&snapshot_dir, &[SNAPSHOT_BUILD_DIR])?;
     failures.extend(snapshot_manifest_violations(
         MIGRATION_SNAPSHOT_MANIFEST_PATH,
         &snapshot_text,
+        &snapshot_listing,
         SNAPSHOT_ORACLE_COPIES,
         &canonical_entries,
         |name| hash_file_if_present(&snapshot_dir.join(name)),
@@ -717,7 +722,7 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
     println!(
         "Oracle integrity verified: APK matches docs/INPUT_SHA256.txt; migration archive matches its recorded baseline; \
          every file in {ORACLE_DIR}/ matches {ORACLE_DIR}/{ORACLE_MANIFEST_NAME}; \
-         {MIGRATION_SNAPSHOT_MANIFEST_PATH} verifies and each copy of a canonical file is identical to its own counterpart."
+         {MIGRATION_SNAPSHOT_MANIFEST_PATH} verifies, lists every file in the snapshot, and each copy of a canonical file is identical to its own counterpart."
     );
     Ok(())
 }
@@ -766,6 +771,34 @@ fn list_entry_names(dir: &Path) -> Result<Vec<String>, String> {
         let entry = entry.map_err(|e| format!("listing {}: {e}", dir.display()))?;
         names.push(entry.file_name().to_string_lossy().into_owned());
     }
+    names.sort();
+    Ok(names)
+}
+
+/// The `/`-separated path (relative to `dir`) of every non-directory entry
+/// under `dir`, recursively and sorted: regular files, symlinks (never
+/// followed, so a symlinked directory is one entry) and anything else alike.
+/// Top-level entries named in `skip` are left out entirely.
+fn list_tree_file_names(dir: &Path, skip: &[&str]) -> Result<Vec<String>, String> {
+    fn walk(dir: &Path, prefix: &str, skip: &[&str], out: &mut Vec<String>) -> Result<(), String> {
+        let listing_error = |e: std::io::Error| format!("listing {}: {e}", dir.display());
+        for entry in fs::read_dir(dir).map_err(listing_error)? {
+            let entry = entry.map_err(listing_error)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if prefix.is_empty() && skip.contains(&name.as_str()) {
+                continue;
+            }
+            let path = format!("{prefix}{name}");
+            if entry.file_type().map_err(listing_error)?.is_dir() {
+                walk(&entry.path(), &format!("{path}/"), skip, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut names = Vec::new();
+    walk(dir, "", skip, &mut names)?;
     names.sort();
     Ok(names)
 }
@@ -894,13 +927,16 @@ fn oracle_manifest_violations(
 ///   digest `canonical` records for that counterpart (never merely the digest
 ///   of some other canonical file);
 /// - any other entry under `oracle/`, or whose file name is a canonical
-///   file's name, is an unmapped copy and fails.
+///   file's name, is an unmapped copy and fails;
+/// - every file in the snapshot (`listing`, paths relative to it; it may
+///   include the manifest itself) is listed, so nothing unpinned sits in it.
 ///
 /// `canonical` is the canonical manifest's `(digest, name)` entries. Returns
 /// every violation found.
 fn snapshot_manifest_violations(
     label: &str,
     manifest_text: &str,
+    listing: &[String],
     copies: &[(&str, &str)],
     canonical: &[(String, String)],
     hash_of: impl Fn(&str) -> Option<String>,
@@ -955,6 +991,17 @@ fn snapshot_manifest_violations(
         if !listed {
             violations.push(format!(
                 "{label}: does not list ./{copy}, the copy of {ORACLE_DIR}/{counterpart}"
+            ));
+        }
+    }
+    let manifest_name = file_name_of(label);
+    for path in listing {
+        let listed = entries
+            .iter()
+            .any(|(_, name)| name.strip_prefix("./").unwrap_or(name) == path);
+        if path != manifest_name && !listed {
+            violations.push(format!(
+                "{label}: ./{path} is in the snapshot but not listed"
             ));
         }
     }
@@ -6377,6 +6424,10 @@ mod tests {
         );
     }
 
+    fn listing_of(files: &[(&str, &str)]) -> Vec<String> {
+        files.iter().map(|(name, _)| (*name).to_string()).collect()
+    }
+
     fn digest_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
             .iter()
@@ -6404,6 +6455,7 @@ mod tests {
             snapshot_manifest_violations(
                 "s",
                 &text,
+                &listing_of(&files),
                 &copies,
                 &digest_pairs(&[
                     (DIGEST_A, "a.apk"),
@@ -6417,6 +6469,7 @@ mod tests {
         let errors = snapshot_manifest_violations(
             "s",
             &text,
+            &listing_of(&files[..2]),
             &copies,
             &digest_pairs(&[(DIGEST_A, "a.apk"), (DIGEST_A, "git-history.bundle")]),
             fake_hashes(&files[..2]),
@@ -6434,7 +6487,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            snapshot_manifest_violations("s", "", &[], &[], |_| None),
+            snapshot_manifest_violations("s", "", &[], &[], &[], |_| None),
             vec!["s: missing or empty manifest".to_string()]
         );
     }
@@ -6470,6 +6523,7 @@ mod tests {
             snapshot_manifest_violations(
                 "s",
                 &manifest(DIGEST_A),
+                &listing_of(&intact),
                 SNAPSHOT_ORACLE_COPIES,
                 &canonical,
                 fake_hashes(&intact)
@@ -6481,6 +6535,7 @@ mod tests {
             snapshot_manifest_violations(
                 "s",
                 &manifest(DEX),
+                &listing_of(&swapped),
                 SNAPSHOT_ORACLE_COPIES,
                 &canonical,
                 fake_hashes(&swapped)
@@ -6507,6 +6562,7 @@ mod tests {
         let errors = snapshot_manifest_violations(
             "s",
             &text,
+            &listing_of(&files),
             &[("oracle/a.apk", "a.apk")],
             &digest_pairs(&[(DIGEST_A, "a.apk"), (DIGEST_B, "git-history.bundle")]),
             fake_hashes(&files),
@@ -6521,6 +6577,58 @@ mod tests {
                 "s: does not list ./oracle/a.apk, the copy of oracle/a.apk".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn snapshot_manifest_rejects_an_unlisted_file_anywhere_in_the_snapshot() {
+        // Review finding L3: `sha256sum -c` semantics alone let an extra file
+        // such as `oracle/evil.so` sit in the snapshot unpinned.
+        let text = format!("{DIGEST_A}  ./README.md\n");
+        let files = [("README.md", DIGEST_A)];
+        let errors = snapshot_manifest_violations(
+            "dir/SHA256SUMS",
+            &text,
+            &names(&[
+                "README.md",
+                "SHA256SUMS",
+                "crates/x/src/extra.rs",
+                "oracle/evil.so",
+            ]),
+            &[],
+            &[],
+            fake_hashes(&files),
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "dir/SHA256SUMS: ./crates/x/src/extra.rs is in the snapshot but not listed"
+                    .to_string(),
+                "dir/SHA256SUMS: ./oracle/evil.so is in the snapshot but not listed".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tree_listing_recurses_never_follows_symlinks_and_skips_only_top_level_names() {
+        let dir = unique_temp_dir("tree_listing_recurses_and_skips_top_level_names");
+        fs::create_dir_all(dir.join("crates/a/target")).unwrap();
+        fs::create_dir_all(dir.join("target/debug")).unwrap();
+        fs::create_dir_all(dir.join("empty")).unwrap();
+        fs::write(dir.join("README.md"), b"r").unwrap();
+        fs::write(dir.join("crates/a/lib.rs"), b"l").unwrap();
+        fs::write(dir.join("crates/a/target/kept.bin"), b"k").unwrap();
+        fs::write(dir.join("target/debug/skipped.bin"), b"s").unwrap();
+        std::os::unix::fs::symlink(dir.join("crates"), dir.join("crates-link")).unwrap();
+        assert_eq!(
+            list_tree_file_names(&dir, &["target"]).unwrap(),
+            vec![
+                "README.md",
+                "crates-link",
+                "crates/a/lib.rs",
+                "crates/a/target/kept.bin",
+            ]
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
