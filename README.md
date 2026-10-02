@@ -518,10 +518,18 @@ the artifact in order (on the first end-to-end run: handed to the installer
 deleted on every exit. It needs
 `/dev/kvm`, the SDK's `emulator`, `platform-tools` and the pinned image
 (`cargo xtask android-sdk-install --emulator` installs them: licenses
-accepted, `sdkmanager` retried, every package and the tools checked)
-and a JDK; CI's `android-emulator` job runs it on every pull request and
+accepted, `sdkmanager` retried, every package and the tools checked, and
+the emulator pinned to 37.2.12: kept only when its `package.xml` and
+`source.properties` name 37.2.12 and the SHA-256 of seven of its files
+matches the pinned archive, else replaced by that archive, fetched over
+HTTPS only, its size and SHA-256 checked before it is unpacked and swapped
+in) and a JDK; CI's `android-emulator` job runs it on every pull request and
 every push to `main` (2 min 33 s on the first green run; 4 min 00 s with
-the virtual advertiser, decision #95).
+the virtual advertiser, decision #95). The emulator is launched with
+`-feature -WiFiPacketStream`, so the survey sees its own virtio-wifi access
+point (`00:13:10:85:fe:01`, globally administered, `TRACKABLE`) rather than
+netsimd's locally administered one; the run fails if netsimd's Wi-Fi comes
+up anyway.
 
 ## Parity report
 
@@ -555,7 +563,7 @@ cargo xtask verify-android-unit    # the app's unit tests (android/app/src/test)
 cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator, then the app upgrading itself against a stand-in github.com (needs KVM + SDK emulator + target/android-apk/proof from build-update-proof)
 cargo xtask build-update-proof     # the current version and its successor on one key + the successor's release manifest, under target/android-apk/proof (needs SDK/NDK)
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
-cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)
+cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked, the emulator verified against (or replaced by) its pinned archive (what CI runs)
 cargo xtask check-app-version      # the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME, no artifact of another version remains (a gates step)
 cargo xtask release-plan           # the release identity (tag, apk, manifest, version) as key=value lines, after checking the committed APK; what the release workflow reads
 cargo xtask release-manifest [--url <artifact url>] [--out <path>]   # the manifest a release publishes: the committed APK's version, exact size and SHA-256
@@ -578,8 +586,8 @@ BLERADAR_ADVANCEMENT_CAMPAIGN_SEQUENCES=50000 cargo test -p bleradar-core --rele
 ## Releasing
 
 The app checks `https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt`
-daily (`docs/AUTO_UPDATE.md`), so a release is a GitHub release carrying two
-assets — the APK and the manifest that describes it — and the version has one
+daily (`docs/AUTO_UPDATE.md`), so a stable release is a GitHub release (not a
+pre-release) carrying two assets — the APK and the manifest that describes it — and the version has one
 authority, `APP_VERSION_CODE`/`APP_VERSION_NAME` in `xtask/src/main.rs`:
 
 ```sh
@@ -590,15 +598,28 @@ git rm HSE-BLE-Radar-arm64-v<previous>.apk # one artifact is committed: check-ap
 cargo xtask check-app-version              # the bundled manifest, the artifact's name, no stale artifact (also a `gates` step)
 cargo xtask verify-android-live            # the built version read back; the package's entries reproduced by a second build
 git add HSE-BLE-Radar-arm64-v<version name>.apk
-# 2. merge to main — the `release` workflow tags v<version name>, generates the
-#    manifest and publishes the GitHub release itself
+# 2. merge to main — the `release` workflow publishes that commit as the
+#    pre-releases main-<sha7> and `latest` (never a stable release)
+# 3. cut the stable release by hand, from a main commit `gates` passed on:
+cargo xtask release-plan                                 # tag v<version name>, the APK and manifest names
+cargo xtask release-manifest --out release_manifest.txt  # url = the asset on the v<version name> release
+scan="$(mktemp -d)" && unzip -q -d "$scan" HSE-BLE-Radar-arm64-v<version name>.apk
+bash scripts/scan-for-keys.sh HSE-BLE-Radar-arm64-v<version name>.apk "$scan"  # must report 0 findings
+gh release create v<version name> HSE-BLE-Radar-arm64-v<version name>.apk release_manifest.txt \
+  --target <commit> --title "HSE BLE Radar <version name>" --latest
 ```
 
-Publishing is automated: once the change is on `main` and `gates` passes, the
-`release` workflow publishes the committed APK and its manifest as the latest
-`v<version name>` release, so a user only ever downloads and installs the APK
-— see "Publishing" in `docs/AUTO_UPDATE.md` for exactly when it runs and what
-it refuses.
+Every main build is published automatically, as pre-releases only: once a
+commit is on `main` and `gates` passes, the `release` workflow publishes the
+committed APK (with a `release_manifest.txt` pointing at that pre-release's
+own asset, the zero-finding `key-scan-report.txt` and `SHA256SUMS`) as the
+immutable `main-<sha7>` pre-release and moves the rolling `latest`
+pre-release to it, so a tester only ever downloads and installs the APK. It
+never creates, edits or re-tags a stable release and never marks anything
+latest, and GitHub's `releases/latest/download/` URL skips pre-releases, so
+installed apps are updated only by a stable release cut by hand (step 3) —
+see "Publishing a release" in `docs/AUTO_UPDATE.md` for exactly when the
+workflow runs and what it refuses.
 
 `release-manifest` refuses a non-`https` URL, and `verify-api-live` serves
 the manifest it generates to the real core as the accepted-manifest scenario,
