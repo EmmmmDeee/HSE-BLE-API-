@@ -39,6 +39,12 @@ before storing. A blank `failed_test_ids` entry is not a failure.
 The ledger is not serialized: there is no stored flag to load, and the
 Navigator export carries only the derived status.
 
+Removing the two public `corroboration_ok` / `regression_ok` fields is a
+source-breaking change (any struct literal or field access naming them stops
+compiling), so `bleradar-core` went from 0.6.10 to 0.7.0: for a 0.x crate a
+breaking change bumps the minor version (`docs/PACKAGING_ASSISTANT.md`,
+`docs/AUTONOMOUS_DECISIONS.md` decision 117).
+
 ## Statuses
 
 | Status | Meaning |
