@@ -410,6 +410,149 @@ pub fn update_decision_logged(logcat: &str) -> Option<i64> {
         .find_map(|digits| digits.parse().ok())
 }
 
+/// The dump of the update check's own tags, as every read of them issues it.
+const UPDATE_LOG_COMMAND: &str = "logcat -d -s UpdateCheckService:* UpdateManager:*";
+
+/// How long the proof waits, right after the documents, for the first
+/// launch's check to log its decision before it moves on (the fetch has two
+/// 10 s timeouts); a later decision is still caught by the phase snapshots
+/// and the final read.
+const EARLY_DECISION_WAIT: Duration = Duration::from_secs(30);
+
+/// The ring-buffer size asked of `logcat -G`. The emulator sets 2M at boot,
+/// and with `androidboot.logcat=*:V` the Bluetooth stack's lines through the
+/// adapter cycle and the beacon's prune can rotate the app's first lines out
+/// of `main` before the update step reads them (PR #45, run 36905308887).
+const LOGCAT_BUFFER_SIZE: &str = "16M";
+
+/// Appends the entries of a `logcat -d` dump that `accumulated` does not hold
+/// yet. Successive dumps are windows onto one log: a later one starts with
+/// whatever of the earlier one survived the ring buffer and continues with
+/// what was written since, so the longest tail of `accumulated` that the dump
+/// starts with is already held and only the rest is new. A dump that shares
+/// nothing (the buffer rotated everything held so far out) is appended whole.
+/// `--------- beginning of <buffer>` banners are not entries and are dropped.
+pub fn merge_log_dump(accumulated: &mut Vec<String>, dump: &str) {
+    let fresh: Vec<&str> = dump
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with("--------- "))
+        .collect();
+    let held = (0..=accumulated.len())
+        .map(|start| accumulated.len() - start)
+        .find(|&overlap| {
+            overlap <= fresh.len()
+                && accumulated[accumulated.len() - overlap..]
+                    .iter()
+                    .zip(&fresh)
+                    .all(|(old, new)| old == new)
+        })
+        .unwrap_or(0);
+    accumulated.extend(fresh[held..].iter().map(|line| line.to_string()));
+}
+
+/// The first launch's update-check lines, accumulated over every dump the
+/// proof takes of them, so a line read once is kept even after the ring
+/// buffer has rotated it out.
+#[derive(Debug, Default)]
+pub struct UpdateLog {
+    lines: Vec<String>,
+    dumps: usize,
+    failed_dumps: usize,
+}
+
+impl UpdateLog {
+    /// Merges one dump of [`UPDATE_LOG_COMMAND`] into the accumulated log.
+    pub fn absorb(&mut self, dump: &str) {
+        merge_log_dump(&mut self.lines, dump);
+        self.dumps += 1;
+    }
+
+    /// The accumulated entries, one per line, in the order logcat wrote them.
+    pub fn text(&self) -> String {
+        self.lines.iter().map(|line| format!("{line}\n")).collect()
+    }
+
+    /// A best-effort dump between phases: a failed adb call is counted, never
+    /// absorbed (its error text is not a log line), and never fails the run.
+    fn snapshot(&mut self, adb: &Adb) {
+        match adb.shell(UPDATE_LOG_COMMAND) {
+            Ok(dump) => self.absorb(&dump),
+            Err(_) => self.failed_dumps += 1,
+        }
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{} line(s) accumulated over {} logcat dump(s){}",
+            self.lines.len(),
+            self.dumps,
+            if self.failed_dumps == 0 {
+                String::new()
+            } else {
+                format!(" ({} failed)", self.failed_dumps)
+            }
+        )
+    }
+}
+
+/// What `logcat -g` reports of the ring buffers' sizes, on one line (or that
+/// it printed nothing): the report says how much history the log could hold.
+fn logcat_buffer_sizes(adb: &Adb) -> String {
+    let sizes = adb.shell_lenient("logcat -g");
+    let sizes: Vec<&str> = sizes
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if sizes.is_empty() {
+        "(logcat -g printed nothing)".to_string()
+    } else {
+        sizes.join("; ")
+    }
+}
+
+/// Milliseconds since the Unix epoch as ISO 8601 UTC
+/// (`2026-10-01T18:18:44.000Z`), with the proleptic Gregorian calendar.
+pub fn utc_from_unix_ms(ms: i64) -> String {
+    let (secs, millis) = (ms.div_euclid(1000), ms.rem_euclid(1000));
+    let (days, time) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Days to a civil date (H. Hinnant's `civil_from_days`).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        time / 3600,
+        time % 3600 / 60,
+        time % 60
+    )
+}
+
+/// What a `GET /api/updates` body says about the first launch's check when
+/// its log holds no decision. `UpdateCheckService` records `last_check_ms`
+/// as a check begins (past its throttle, before the fetch), so a recorded
+/// time means a check did run on this install — a log without its decision
+/// then lost lines to the ring buffer, or the check has not finished — while
+/// `0` means no check ever began, so no line is missing.
+pub fn update_check_record(updates: &str) -> String {
+    match json_integer(updates, "last_check_ms") {
+        Some(ms) if ms > 0 => format!(
+            "GET /api/updates records a check begun at {} (last_check_ms {ms}, written as a check begins, past its throttle): a check did run, so a log without its decision lost lines to the ring buffer (evicted) or the check has not finished: {updates}",
+            utc_from_unix_ms(ms)
+        ),
+        Some(ms) => format!(
+            "GET /api/updates records no check (last_check_ms {ms}): no check began on this install, so no line of one is missing from the log: {updates}"
+        ),
+        None => format!("GET /api/updates carries no last_check_ms: {updates}"),
+    }
+}
+
 /// The `ps` lines (after the header) about emulator-side processes — the
 /// launcher or QEMU, netsim, adb — excluding this command's own process
 /// tree, whose arguments name the subcommand.
@@ -1474,6 +1617,13 @@ fn exercise(
     println!("== adb root ==");
     let root = become_root(adb)?;
     report.push(format!("adb root: {root}"));
+    // Defence in depth for lines read long after they were written (the
+    // update step below): a larger ring buffer than the emulator's 2M.
+    let _ = adb.shell_lenient(&format!("logcat -G {LOGCAT_BUFFER_SIZE}"));
+    report.push(format!(
+        "logcat -G {LOGCAT_BUFFER_SIZE}: {}",
+        logcat_buffer_sizes(adb)
+    ));
     let _ = adb.shell_lenient("input keyevent 82");
     // The adapter transition is asynchronous: wait for the enabled state so a
     // start is never refused for an adapter that was still coming up.
@@ -1510,6 +1660,10 @@ fn exercise(
         "API: http://127.0.0.1:{GUEST_API_PORT}/ in the guest answered {:.1}s after the launch (adb forward tcp:{port})",
         api_after.as_secs_f64()
     ));
+    // The first launch's update check starts with the activity: its lines
+    // are read from here on (see the early read after the documents).
+    let mut update_log = UpdateLog::default();
+    update_log.snapshot(adb);
 
     println!("== the documents ==");
     let index = get(port, "/")?;
@@ -1592,6 +1746,33 @@ fn exercise(
     )?;
     report.push(format!("GET /api/updates: {}", body_text(&updates)));
 
+    // The first launch's update check (judged after the kill -9 below) logs
+    // within seconds of the launch, but the Bluetooth phases log enough to
+    // rotate those lines out of the ring buffer before then. They are read
+    // now, while the log holds seconds of history, and at every phase after,
+    // and judged on what was accumulated.
+    println!("== the update check the first launch started: its log, read early ==");
+    let early = Instant::now();
+    loop {
+        update_log.snapshot(adb);
+        if update_decision_logged(&update_log.text()).is_some()
+            || early.elapsed() >= EARLY_DECISION_WAIT
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    report.push(format!(
+        "update check, read early: {} {:.1}s after the documents, {}",
+        update_log.describe(),
+        early.elapsed().as_secs_f64(),
+        if update_decision_logged(&update_log.text()).is_some() {
+            "the decision among them"
+        } else {
+            "no decision yet (read again at every phase)"
+        }
+    ));
+
     println!("== scan control ==");
     let start_text = start_scan(port)?;
     report.push(format!("POST /api/scan/start: 200 {start_text}"));
@@ -1608,6 +1789,7 @@ fn exercise(
             "scanning: status {status}; RadarScanService isForeground=true with \"{SCANNING_TEXT}\" {:.1}s after the start",
             promoted.as_secs_f64()
         ));
+        update_log.snapshot(adb);
 
         println!("== the Wi-Fi survey: the platform's scan results through the Rust core ==");
         // Wi-Fi and location are on by default on the emulator image; they are
@@ -1656,6 +1838,7 @@ fn exercise(
             "GET /api/wifi: active with an access point {:.1}s after the scan started, every rule key present, the history rule held per row, {EMULATOR_WIFI_BSSID} TRACKABLE from the emulator's own virtio-wifi backend (no netsim Wi-Fi in its log): {survey}",
             waited.as_secs_f64()
         ));
+        update_log.snapshot(adb);
 
         println!("== a virtual advertiser: a second controller on netsimd's HCI socket ==");
         // The guest's Bluetooth controller is virtual (netsimd, started by
@@ -1760,7 +1943,9 @@ fn exercise(
             after.as_secs_f64()
         ));
 
+        update_log.snapshot(adb);
         adapter_phase(adb, port, report)?;
+        update_log.snapshot(adb);
 
         beacon.remove()?;
         let removed = Instant::now();
@@ -1795,6 +1980,7 @@ fn exercise(
             "beacon removed: the row was pruned {:.1}s later (the core's freshness policy, on the runtime)",
             pruned.as_secs_f64()
         ));
+        update_log.snapshot(adb);
 
         let stop = post(port, "/api/scan/stop")?;
         let stop_text = body_text(&stop);
@@ -1830,6 +2016,7 @@ fn exercise(
         // Wait for that start's own promotion so the kill below tests the
         // sticky restart, not a race with a start command still queued.
         wait_for_service_state(adb, SCANNING_TEXT)?;
+        update_log.snapshot(adb);
 
         println!("== kill -9 the app process: START_STICKY must resume the scan ==");
         let pid = app_pid(adb)?;
@@ -1896,12 +2083,17 @@ fn exercise(
     // bundled manifest, and finished — no service record and no "Checking
     // for updates..." notification left. Both are awaited, and every dump is
     // a fallible command, so a failed adb call never reads as "nothing left".
+    // The log judged is the one accumulated since the documents (the ring
+    // buffer may have rotated the early lines out by now), with this step's
+    // dumps added to it.
     let release_manifest_url = release_manifest_url(config)?;
     let decision_awaited = Instant::now();
     let (decision, update_lines, remote) = loop {
-        let update_log = adb.shell("logcat -d -s UpdateCheckService:* UpdateManager:*")?;
-        if let Some(decision) = update_decision_logged(&update_log) {
-            let lines = update_log
+        update_log.absorb(&adb.shell(UPDATE_LOG_COMMAND)?);
+        let log_text = update_log.text();
+        let log = log_text.as_str();
+        if let Some(decision) = update_decision_logged(log) {
+            let lines = log
                 .lines()
                 .filter(|line| {
                     line.contains("UpdateCheckService") || line.contains("UpdateManager")
@@ -1911,14 +2103,14 @@ fn exercise(
             // the production source `UpdateCheckService.RELEASE_MANIFEST_URL`
             // (read from the Java source, its authority): a check that
             // assessed without fetching, or fetched elsewhere, fails here.
-            let (url, remote) = remote_manifest_outcome(&update_log).ok_or_else(|| {
+            let (url, remote) = remote_manifest_outcome(log).ok_or_else(|| {
                 format!(
-                    "the update check reached its decision without logging its remote manifest fetch (the fetch path did not run); its log:\n{update_log}"
+                    "the update check reached its decision without logging its remote manifest fetch (the fetch path did not run); its log:\n{log}"
                 )
             })?;
-            if !fetch_precedes_decision(&update_log) {
+            if !fetch_precedes_decision(log) {
                 return Err(format!(
-                    "the update check logged its decision before its remote manifest fetch; its log:\n{update_log}"
+                    "the update check logged its decision before its remote manifest fetch; its log:\n{log}"
                 ));
             }
             if url != release_manifest_url {
@@ -1929,9 +2121,24 @@ fn exercise(
             break (decision, lines, remote);
         }
         if decision_awaited.elapsed() > PROMOTION_TIMEOUT {
+            // Whether a check ran at all tells a lost log from a check that
+            // never happened; the buffer sizes say how much the log could hold.
+            let record = match get(port, "/api/updates") {
+                Ok(response) if response.status == 200 => {
+                    update_check_record(&body_text(&response))
+                }
+                Ok(response) => format!(
+                    "GET /api/updates answered {}: {}",
+                    response.status,
+                    body_text(&response)
+                ),
+                Err(error) => format!("GET /api/updates failed: {error}"),
+            };
             return Err(format!(
-                "the update check did not reach a decision within {}s; its log:\n{update_log}",
-                PROMOTION_TIMEOUT.as_secs()
+                "the update check did not reach a decision within {}s; {record}; logcat -g: {}; its log ({}):\n{log}",
+                PROMOTION_TIMEOUT.as_secs(),
+                logcat_buffer_sizes(adb),
+                update_log.describe()
             ));
         }
         thread::sleep(Duration::from_millis(500));
@@ -3035,5 +3242,143 @@ mod tests {
         assert_eq!(check_survey_history(&tricky), Ok(()));
         assert!(access_point_rows(r#"{"access_points":[],"state":"idle"}"#).is_empty());
         assert!(check_survey_history(r#"{"access_points":[],"state":"active"}"#).is_err());
+    }
+
+    #[test]
+    fn successive_logcat_dumps_merge_into_one_log() {
+        let merged = |dumps: &[&str]| {
+            let mut log = UpdateLog::default();
+            for dump in dumps {
+                log.absorb(dump);
+            }
+            log.text()
+        };
+        let a = "10-01 18:18:43.990  3225  3225 D UpdateCheckService: UpdateCheckService created";
+        let b = "10-01 18:18:44.512  3225  3301 I UpdateCheckService: Remote manifest https://x/m.txt: HTTP 404 -> using the bundled manifest; no retry";
+        let c =
+            "10-01 18:18:44.530  3225  3301 D UpdateCheckService: Update decision: 0 (available=1)";
+        let d = "10-01 18:18:44.600  3225  3225 D UpdateCheckService: UpdateCheckService destroyed";
+        // An overlapping dump adds only what follows what is held.
+        assert_eq!(
+            merged(&[&format!("{a}\n{b}\n"), &format!("{a}\n{b}\n{c}\n")]),
+            format!("{a}\n{b}\n{c}\n")
+        );
+        // The same dump twice adds nothing.
+        assert_eq!(
+            merged(&[&format!("{a}\n{b}\n"), &format!("{a}\n{b}\n")]),
+            format!("{a}\n{b}\n")
+        );
+        // The oldest held lines rotated out: the surviving tail is not repeated.
+        assert_eq!(
+            merged(&[&format!("{a}\n{b}\n{c}\n"), &format!("{c}\n{d}\n")]),
+            format!("{a}\n{b}\n{c}\n{d}\n")
+        );
+        // Everything held rotated out: the later lines are kept after the
+        // earlier ones, which the buffer no longer has.
+        assert_eq!(
+            merged(&[&format!("{a}\n{b}\n"), &format!("{d}\n")]),
+            format!("{a}\n{b}\n{d}\n")
+        );
+        // Everything rotated out and nothing new: the read-once lines stay.
+        assert_eq!(
+            merged(&[&format!("{a}\n{b}\n{c}\n"), ""]),
+            format!("{a}\n{b}\n{c}\n")
+        );
+        // The buffer banners are not entries; blank lines are not either.
+        assert_eq!(
+            merged(&[
+                &format!("--------- beginning of main\n{a}\n\n"),
+                &format!("--------- beginning of system\n--------- beginning of main\n{a}\n{b}\n"),
+            ]),
+            format!("{a}\n{b}\n")
+        );
+        // Empty dumps (a quiet log, a banner only) hold nothing.
+        assert_eq!(merged(&["", "--------- beginning of main\n", "\n"]), "");
+        assert_eq!(merged(&["", &format!("{a}\n")]), format!("{a}\n"));
+        // The judged log carries the decision whichever dump held it.
+        let judged = merged(&[&format!("{a}\n{b}\n{c}\n"), &format!("{d}\n")]);
+        assert_eq!(update_decision_logged(&judged), Some(0));
+        assert!(fetch_precedes_decision(&judged));
+        // CRLF line ends (an older adb's shell) read as the same entries.
+        assert_eq!(
+            merged(&[&format!("{a}\r\n{b}\r\n"), &format!("{a}\n{b}\n{c}\n")]),
+            format!("{a}\n{b}\n{c}\n")
+        );
+        let mut log = UpdateLog::default();
+        log.absorb(&format!("{a}\n"));
+        log.absorb("");
+        assert_eq!(
+            log.describe(),
+            "1 line(s) accumulated over 2 logcat dump(s)"
+        );
+        log.failed_dumps = 1;
+        assert_eq!(
+            log.describe(),
+            "1 line(s) accumulated over 2 logcat dump(s) (1 failed)"
+        );
+    }
+
+    #[test]
+    fn unix_milliseconds_read_as_utc() {
+        // The check PR #45's run 36905308887 recorded.
+        assert_eq!(
+            utc_from_unix_ms(1_790_878_724_000),
+            "2026-10-01T18:18:44.000Z"
+        );
+        assert_eq!(utc_from_unix_ms(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(utc_from_unix_ms(1), "1970-01-01T00:00:00.001Z");
+        assert_eq!(utc_from_unix_ms(-1), "1969-12-31T23:59:59.999Z");
+        // Leap days: a year divisible by 4, and by 400.
+        assert_eq!(
+            utc_from_unix_ms(1_709_164_800_000),
+            "2024-02-29T00:00:00.000Z"
+        );
+        assert_eq!(
+            utc_from_unix_ms(951_782_400_000),
+            "2000-02-29T00:00:00.000Z"
+        );
+        assert_eq!(
+            utc_from_unix_ms(1_709_251_199_999),
+            "2024-02-29T23:59:59.999Z"
+        );
+        assert_eq!(
+            utc_from_unix_ms(1_709_251_200_000),
+            "2024-03-01T00:00:00.000Z"
+        );
+        // 2100 is not a leap year: 28 February is followed by 1 March.
+        assert_eq!(
+            utc_from_unix_ms(4_107_456_000_000),
+            "2100-02-28T00:00:00.000Z"
+        );
+        assert_eq!(
+            utc_from_unix_ms(4_107_542_400_000),
+            "2100-03-01T00:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn the_update_record_tells_a_lost_log_from_a_check_never_begun() {
+        let ran = update_check_record(
+            r#"{"last_check_ms":1790878724000,"next_check_ms":1790965124000,"retry_count":0}"#,
+        );
+        assert!(
+            ran.contains("a check begun at 2026-10-01T18:18:44.000Z"),
+            "{ran}"
+        );
+        assert!(ran.contains("last_check_ms 1790878724000"), "{ran}");
+        assert!(ran.contains("evicted"), "{ran}");
+        assert!(ran.ends_with(r#""retry_count":0}"#), "{ran}");
+        let never = update_check_record(r#"{"last_check_ms":0,"next_check_ms":0,"retry_count":0}"#);
+        assert!(
+            never.contains("records no check (last_check_ms 0)"),
+            "{never}"
+        );
+        assert!(!never.contains("evicted"), "{never}");
+        let missing = update_check_record(r#"{"next_check_ms":0}"#);
+        assert_eq!(
+            missing,
+            r#"GET /api/updates carries no last_check_ms: {"next_check_ms":0}"#
+        );
+        assert!(!update_check_record("").contains("evicted"));
     }
 }
