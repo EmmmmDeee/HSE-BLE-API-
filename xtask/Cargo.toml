@@ -1,9 +1,10 @@
 # `xtask` is deliberately its own workspace (matching the standard cargo-xtask
-# pattern) so it never joins the shipped crates' workspace or their dependency
-# graph, and never shows up in `cargo build/test/clippy --workspace` for the
-# shipped library crates (the root `Cargo.lock` has no `xtask`). Its own graph
-# holds only the in-repo `bleradar-core` (below) and no third-party crate. See
-# `docs/AUTONOMOUS_DECISIONS.md` decision 24.
+# pattern): it is not a member of the shipped crates' workspace, no shipped
+# crate depends on it, it never shows up in `cargo build/test/clippy
+# --workspace`, and the root `Cargo.lock` has no `xtask` entry. xtask's own
+# graph (`xtask/Cargo.lock`) holds exactly one dependency, the in-repo
+# `bleradar-core` path crate (below), and no third-party crate. See
+# `docs/AUTONOMOUS_DECISIONS.md` decisions 25 and 118.
 [workspace]
 
 [package]

@@ -1,4 +1,4 @@
-//! `cargo xtask` — dependency-free, Rust-native developer tooling for the
+//! `cargo xtask` — third-party-free, Rust-native developer tooling for the
 //! `bleradar-*` workspace.
 //!
 //! Replaces the `tools/*.py` and `tools/native_abi.sh` scripts with a single

@@ -39,7 +39,7 @@ Rust workspace:
 - `bleradar-core::tracking` — observations, selected-device lock state, histories, confidence, map points, GPS uncertainty and conservative spatial estimates.
 - `bleradar-compat` — complete ABI implementation/reachability/evidence census plus a source-parity registry distinguishing differential proof, source analogues, oracle-only behavior and blocked contracts.
 - root APK and retained migration archive — immutable oracle, including the archived extracted DEX and native core.
-- `xtask/` — dependency-free Rust-native APK/native inventory, parity-coverage generation, and gate runner (supersedes the former `tools/*.py`).
+- `xtask/` — third-party-free Rust-native APK/native inventory, parity-coverage generation, and gate runner (supersedes the former `tools/*.py`).
 
 ## Material improvements over the initial reconstruction
 

@@ -72,7 +72,7 @@ Code that works in principle but was never executed is incomplete. Features that
   so the app makes those safety decisions in verified Rust. See
   `docs/AUTO_UPDATE.md`.
 - `crates/bleradar-compat` — complete native ABI runtime/reachability census plus a separate source-replacement parity registry.
-- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, executed-oracle differential verification under `qemu-aarch64` (`oracle-differential`, see `docs/ORACLE_DIFFERENTIAL.md`), and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
+- `xtask/` — third-party-free Rust-native developer tooling (`cargo xtask`; its only dependency is the in-repo `bleradar-core` path crate): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, executed-oracle differential verification under `qemu-aarch64` (`oracle-differential`, see `docs/ORACLE_DIFFERENTIAL.md`), and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
 - `android/app/src/main` — the hand-built Android radar app that consumes `bleradar-core` through `crates/bleradar-jni`; its design record is `docs/ANDROID_APP.md`.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
 - `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, the generated capability supersession matrix (`docs/CAPABILITY_MATRIX.md`, rendered by `bleradar_core::registry`), and verification records. Host toolchain / PATH setup: `docs/DEVELOPMENT.md`.
@@ -542,10 +542,12 @@ the semantic source-parity/runtime registries.
 
 ## Developer tooling (`cargo xtask`)
 
-`xtask/` is a dependency-free, Rust-native replacement for the former
+`xtask/` is a third-party-free, Rust-native replacement for the former
 `tools/*.py`/`tools/native_abi.sh` scripts — no Python or `readelf` needed.
 It is a separate Cargo workspace, so it never joins `--workspace` scope or
-the root `Cargo.lock`.
+the root `Cargo.lock`. Its only dependency is the in-repo `bleradar-core`
+path crate (used by `cargo xtask capability`); it pulls in no third-party
+crate.
 
 ```sh
 cargo xtask                        # list subcommands
