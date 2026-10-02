@@ -17,6 +17,11 @@ publish = false
 name = "xtask"
 path = "src/main.rs"
 
+# The in-repo core only (no third-party crate): `cargo xtask capability` reads
+# the ATT&CK capability ledger's derived status straight from bleradar-core.
+[dependencies]
+bleradar-core = { path = "../crates/bleradar-core" }
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
