@@ -38,8 +38,8 @@ version. Release policy: only pre-releases (`main-<sha7>` plus a rolling
   release workflow's actual behaviour, the emulator and system-image pins,
   the full `cargo xtask` command list, the Java unit-test classes (7 classes,
   115 tests), the committed APK's size and entries, and the current state of
-  HSE's side of the repository boundary. References to the old emulator
-  revision were removed.
+  HSE's side of the repository boundary. Historical records keep the
+  emulator 37.1.11 they ran on, with a note on the current 37.2.12 pin.
 
 ### Fixed
 
