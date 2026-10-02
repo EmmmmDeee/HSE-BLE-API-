@@ -50,6 +50,9 @@ version. Release policy: only pre-releases (`main-<sha7>` plus a rolling
   survey (#40).
 - `android-emulator` on `main`, which went red when sdkmanager's emulator
   channel moved to 37.2 (#48).
+- `android-sdk-install` keeps the installed emulator only when it matches
+  the pinned 37.2.12 archive (version files and SHA-256). Otherwise it
+  swaps in that archive, fetched over HTTPS only (#49).
 
 ### Known issues
 
