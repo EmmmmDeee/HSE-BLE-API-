@@ -4,18 +4,20 @@ name: release
 # install exactly that build on Android with no Termux, checkout, shell, build or
 # configuration:
 #   * `main-<sha7>`: one pre-release per verified main commit (immutable once
-#     created: never re-pointed, never clobbered)
+#     created: never re-pointed, never clobbered; a re-run only re-validates it
+#     and re-uploads an asset that is missing)
 #   * `latest`: one rolling pre-release, deleted and re-created on the newest
 #     verified main commit
-# Both carry the committed APK and a release_manifest.txt whose `url` names
-# that pre-release's own asset.
+# Both carry the committed APK, a release_manifest.txt whose `url` names that
+# pre-release's own asset, key-scan-report.txt and SHA256SUMS.
 #
 # This workflow NEVER creates, edits, re-tags or uploads to a stable release
 # (v1.0.0 or any other), and never marks anything "Latest". Stable releases
-# are cut deliberately, outside this workflow. Because GitHub's
-# `releases/latest/download/` (the URL UpdateCheckService polls) resolves to
-# the newest *stable* release and ignores pre-releases, installed apps keep
-# reading the stable manifest and are never auto-updated to a main build.
+# are cut deliberately and manually ("Releasing" in README.md). Because
+# GitHub's `releases/latest/download/` (the URL UpdateCheckService polls)
+# resolves to the newest *stable* release and ignores pre-releases, installed
+# apps keep reading the stable manifest and are never auto-updated to a main
+# build.
 #
 # It runs only after the `gates` workflow succeeds on main, so nothing is ever
 # published that CI has not already built from a fresh checkout, exercised on a
@@ -23,6 +25,14 @@ name: release
 # It re-publishes the exact committed bytes (no rebuild, no re-sign), so no
 # signing key or any other secret is needed or embedded (only the default
 # GITHUB_TOKEN, to create the pre-releases).
+#
+# Token scoping: GITHUB_TOKEN permissions are per job, not per step, so the
+# work is split in two jobs. `prepare` checks out and runs repository code
+# (cargo xtask, the key scan) with a read-only token and no persisted git
+# credentials, and hands the staged assets over as an artifact. `publish` is
+# the only job with `contents: write`; it never checks out or executes
+# repository code, re-verifies the handed-over bytes by SHA-256 against what
+# `prepare` scanned, and passes GH_TOKEN only to its single publishing step.
 
 on:
   workflow_run:
@@ -32,9 +42,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  # To confirm a manually dispatched commit already passed `gates`.
-  actions: read
+  # Read-only by default; only the `publish` job below is granted write.
+  contents: read
 
 env:
   # Release-build marker: only artifacts produced on Actions with HSE_RELEASE=1 may be published.
@@ -45,7 +54,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  prepare:
     # A workflow_run only for a successful gates run on a push to this
     # repository's main (never a pull request, whose head branch — even one
     # named main, from a fork — is attacker-controlled); a manual dispatch only
@@ -58,6 +67,20 @@ jobs:
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # To confirm the commit already passed `gates`.
+      actions: read
+    outputs:
+      publish: ${{ steps.commit.outputs.publish }}
+      sha: ${{ steps.commit.outputs.sha }}
+      stable_tag: ${{ steps.plan.outputs.tag }}
+      apk: ${{ steps.plan.outputs.apk }}
+      manifest: ${{ steps.plan.outputs.manifest }}
+      version_name: ${{ steps.plan.outputs.version_name }}
+      main_tag: ${{ steps.pre.outputs.main_tag }}
+      rolling_tag: ${{ steps.pre.outputs.rolling_tag }}
+      apk_sha256: ${{ steps.scan.outputs.apk_sha256 }}
     steps:
       - name: Check out the exact commit gates verified
         uses: actions/checkout@v4
@@ -65,6 +88,8 @@ jobs:
           # For workflow_run, publish the precise commit CI passed on; for a
           # manual dispatch, main.
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
+          # No token in .git/config for the repository code run below.
+          persist-credentials: false
       - name: Publish only the verified tip of main
         id: commit
         env:
@@ -72,7 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           commit="$(git rev-parse HEAD)"
-          tip="$(git ls-remote origin refs/heads/main | cut -f1)"
+          tip="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
           if [ "$commit" != "$tip" ]; then
             # A re-run of an older gates run, or main moved on: the newer
             # commit's own gates run publishes it. Never republish the past.
@@ -98,105 +123,256 @@ jobs:
       - name: Generate the release manifest from the committed APK
         if: steps.commit.outputs.publish == 'true'
         run: cargo xtask release-manifest --out "${{ steps.plan.outputs.manifest }}"
-      - name: Refuse credentials in the publish environment
+      - name: Refuse credentials in the build environment
         if: steps.commit.outputs.publish == 'true'
         run: |
           set -euo pipefail
-          # Only GITHUB_TOKEN (as GH_TOKEN, scoped to the publish steps) may reach this job.
-          if env | grep -E '^(HUNTSMAN_[A-Z0-9_]*|[A-Z0-9_]*(API_KEY|_SECRET|_PASSWORD|KEYSTORE[A-Z0-9_]*))=' >/dev/null; then
-            echo "::error::a credential-like environment variable is set in the release job"; exit 1
+          # No token or secret may reach the steps that run repository code.
+          if env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|HUNTSMAN_[A-Z0-9_]*|[A-Z0-9_]*(API_KEY|_SECRET|_PASSWORD|KEYSTORE[A-Z0-9_]*))=' >/dev/null; then
+            echo "::error::a credential-like environment variable is set in the release build job"; exit 1
+          fi
+          if git config --get-regexp '^http\..*\.extraheader$' >/dev/null; then
+            echo "::error::checkout persisted git credentials"; exit 1
           fi
       - name: Resolve the pre-release identities
         if: steps.commit.outputs.publish == 'true'
         id: pre
         env:
           COMMIT: ${{ steps.commit.outputs.sha }}
-        run: |
-          set -euo pipefail
-          sha7="${COMMIT:0:7}"
-          echo "main_tag=main-${sha7}" >> "$GITHUB_OUTPUT"
-          echo "rolling_tag=latest" >> "$GITHUB_OUTPUT"
-          echo "sha7=${sha7}" >> "$GITHUB_OUTPUT"
-      - name: Never touch a stable release
-        if: steps.commit.outputs.publish == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MAIN_TAG: ${{ steps.pre.outputs.main_tag }}
-          ROLLING_TAG: ${{ steps.pre.outputs.rolling_tag }}
           STABLE_TAG: ${{ steps.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          for tag in "$MAIN_TAG" "$ROLLING_TAG"; do
+          sha7="${COMMIT:0:7}"
+          main_tag="main-${sha7}"
+          rolling_tag="latest"
+          for tag in "$main_tag" "$rolling_tag"; do
             case "$tag" in main-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]|latest) ;;
               *) echo "::error::refusing to publish to non-pre-release tag '$tag'"; exit 1;; esac
             [ "$tag" != "$STABLE_TAG" ] || { echo "::error::'$tag' is the stable tag"; exit 1; }
-            # An existing release under either name must already be a pre-release.
-            if pre="$(gh release view "$tag" --json isPrerelease --jq .isPrerelease 2>/dev/null)"; then
-              [ "$pre" = "true" ] || { echo "::error::release '$tag' exists and is NOT a pre-release; refusing"; exit 1; }
-            fi
           done
+          {
+            echo "main_tag=${main_tag}"
+            echo "rolling_tag=${rolling_tag}"
+            echo "sha7=${sha7}"
+          } >> "$GITHUB_OUTPUT"
       - name: Key check on the exact artifacts to publish (must be zero)
         if: steps.commit.outputs.publish == 'true'
+        id: scan
         env:
           APK: ${{ steps.plan.outputs.apk }}
           COMMIT: ${{ steps.commit.outputs.sha }}
         run: |
           set -euo pipefail
-          [ "${HSE_RELEASE:-}" = "1" ] && [ "${GITHUB_ACTIONS:-}" = "true" ] \
-            || { echo "::error::publishing requires a GitHub Actions build with HSE_RELEASE=1"; exit 1; }
+          if [ "${HSE_RELEASE:-}" != "1" ] || [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+            echo "::error::publishing requires a GitHub Actions build with HSE_RELEASE=1"; exit 1
+          fi
+          apk_sha256="$(sha256sum "$APK" | cut -d' ' -f1)"
           mkdir -p scan && (cd scan && unzip -q "../$APK")
           {
             echo "key-scan report"
             echo "artifact: $APK"
-            echo "artifact_sha256: $(sha256sum "$APK" | cut -d' ' -f1)"
+            echo "artifact_sha256: ${apk_sha256}"
             echo "commit: $COMMIT"
             echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             bash scripts/scan-for-keys.sh "$APK" scan 2>&1 && echo "result: PASS (0 findings)"
           } | tee key-scan-report.txt
           grep -qx "result: PASS (0 findings)" key-scan-report.txt
-      - name: Publish main-<sha7> and move the rolling `latest` pre-release
+          echo "apk_sha256=${apk_sha256}" >> "$GITHUB_OUTPUT"
+      - name: Stage the main-<sha7> and `latest` pre-release assets
         if: steps.commit.outputs.publish == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
           APK: ${{ steps.plan.outputs.apk }}
           MANIFEST: ${{ steps.plan.outputs.manifest }}
-          VERSION_NAME: ${{ steps.plan.outputs.version_name }}
-          COMMIT: ${{ steps.commit.outputs.sha }}
           MAIN_TAG: ${{ steps.pre.outputs.main_tag }}
           ROLLING_TAG: ${{ steps.pre.outputs.rolling_tag }}
         run: |
           set -euo pipefail
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download"
+          for tag in "$MAIN_TAG" "$ROLLING_TAG"; do
+            mkdir -p "out/$tag"
+            cargo xtask release-manifest --url "$base/$tag/$APK" --out "out/$tag/$MANIFEST"
+            cp "$APK" key-scan-report.txt "out/$tag/"
+            ( cd "out/$tag" && sha256sum "$APK" "$MANIFEST" key-scan-report.txt > SHA256SUMS )
+          done
+      - name: Hand the staged assets to the publish job
+        if: steps.commit.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prerelease-assets
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    # The only job with a write-scoped token. It checks out nothing and runs no
+    # repository code: it verifies the handed-over bytes, then calls `gh`.
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Receive the staged assets
+        uses: actions/download-artifact@v4
+        with:
+          name: prerelease-assets
+          path: out
+      - name: Verify the received assets are the scanned ones
+        env:
+          APK: ${{ needs.prepare.outputs.apk }}
+          MANIFEST: ${{ needs.prepare.outputs.manifest }}
+          COMMIT: ${{ needs.prepare.outputs.sha }}
+          APK_SHA256: ${{ needs.prepare.outputs.apk_sha256 }}
+          MAIN_TAG: ${{ needs.prepare.outputs.main_tag }}
+          ROLLING_TAG: ${{ needs.prepare.outputs.rolling_tag }}
+        run: |
+          set -euo pipefail
+          if [ "${HSE_RELEASE:-}" != "1" ] || [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+            echo "::error::publishing requires a GitHub Actions build with HSE_RELEASE=1"; exit 1
+          fi
+          if env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|HUNTSMAN_[A-Z0-9_]*|[A-Z0-9_]*(API_KEY|_SECRET|_PASSWORD|KEYSTORE[A-Z0-9_]*))=' >/dev/null; then
+            echo "::error::a credential-like environment variable is set in the release publish job"; exit 1
+          fi
+          [[ "$APK_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no scanned APK digest from prepare"; exit 1; }
+          for tag in "$MAIN_TAG" "$ROLLING_TAG"; do
+            dir="out/$tag"
+            for a in "$APK" "$MANIFEST" key-scan-report.txt SHA256SUMS; do
+              [ -f "$dir/$a" ] || { echo "::error::staged asset $dir/$a is missing"; exit 1; }
+            done
+            [ "$(sha256sum "$dir/$APK" | cut -d' ' -f1)" = "$APK_SHA256" ] \
+              || { echo "::error::$dir/$APK is not the APK the key scan passed"; exit 1; }
+            ( cd "$dir" && sha256sum --strict -c SHA256SUMS )
+            if ! { grep -qx "result: PASS (0 findings)" "$dir/key-scan-report.txt" &&
+                   grep -qx "artifact_sha256: $APK_SHA256" "$dir/key-scan-report.txt" &&
+                   grep -qx "commit: $COMMIT" "$dir/key-scan-report.txt"; }; then
+              echo "::error::$dir/key-scan-report.txt is not a zero-finding scan of this APK and commit"; exit 1
+            fi
+          done
+      - name: Publish main-<sha7> and move the rolling `latest` pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          APK: ${{ needs.prepare.outputs.apk }}
+          MANIFEST: ${{ needs.prepare.outputs.manifest }}
+          VERSION_NAME: ${{ needs.prepare.outputs.version_name }}
+          COMMIT: ${{ needs.prepare.outputs.sha }}
+          APK_SHA256: ${{ needs.prepare.outputs.apk_sha256 }}
+          MAIN_TAG: ${{ needs.prepare.outputs.main_tag }}
+          ROLLING_TAG: ${{ needs.prepare.outputs.rolling_tag }}
+          STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
+        run: |
+          set -euo pipefail
+          api="repos/${GITHUB_REPOSITORY}"
+          assets=("$APK" "$MANIFEST" key-scan-report.txt SHA256SUMS)
+          fail() { echo "::error::$*"; exit 1; }
           notes_for() {
             printf '%s\n\n%s\n\n%s' \
               "HSE BLE Radar ${VERSION_NAME} main build \`$1\` (commit ${COMMIT}). **Pre-release. Not a stable release.**" \
               "Install: download **${APK}** and open it on Android (allow installing from this source if prompted). Installed apps are not auto-updated to main builds. The in-app updater follows the stable release only." \
               "Published automatically after the \`gates\` workflow passed on this commit. The APK is the committed artifact, which CI proved reproduces from source (a fresh-checkout rebuild matching its entries) and exercised on a real Android runtime. \`${MANIFEST}\` carries its pinned size and SHA-256, with \`url\` pointing at this pre-release's own asset."
           }
-          # 1) main-<sha7>: created once, never moved or clobbered.
-          if gh release view "$MAIN_TAG" >/dev/null 2>&1; then
-            echo "$MAIN_TAG already published; leaving it as is."
+          # The commit a tag resolves to (peeling an annotated tag), or nothing if the tag does not exist.
+          tag_commit() {
+            local ref type sha
+            ref="$(gh api "$api/git/ref/tags/$1" --jq '.object.type + " " + .object.sha' 2>/dev/null)" || return 0
+            read -r type sha <<<"$ref"
+            if [ "$type" = "tag" ]; then sha="$(gh api "$api/git/tags/$sha" --jq .object.sha)"; fi
+            echo "$sha"
+          }
+          # Release JSON for a tag, or nothing if there is no release under it.
+          release_json() { gh release view "$1" --json isDraft,isPrerelease,targetCommitish,assets 2>/dev/null || true; }
+          # Download a pre-release's assets and require exactly the staged APK
+          # and manifest bytes, a SHA256SUMS that verifies, and a zero-finding
+          # key-scan report for this APK and commit.
+          verify_assets() {
+            local tag="$1" got="check/$1" a
+            rm -rf "$got" && mkdir -p "$got"
+            for a in "${assets[@]}"; do gh release download "$tag" --dir "$got" --pattern "$a"; done
+            cmp -s "$got/$APK" "out/$tag/$APK" || fail "$tag: $APK differs from the scanned APK"
+            cmp -s "$got/$MANIFEST" "out/$tag/$MANIFEST" || fail "$tag: $MANIFEST differs from the manifest for this APK and tag"
+            [ "$(awk '{print $2}' "$got/SHA256SUMS" | sort | tr '\n' ' ')" = "$(printf '%s\n' "$APK" "$MANIFEST" key-scan-report.txt | sort | tr '\n' ' ')" ] \
+              || fail "$tag: SHA256SUMS does not list exactly $APK, $MANIFEST and key-scan-report.txt"
+            ( cd "$got" && sha256sum --strict -c SHA256SUMS ) || fail "$tag: SHA256SUMS does not verify the uploaded assets"
+            if ! { grep -qx "result: PASS (0 findings)" "$got/key-scan-report.txt" &&
+                   grep -qx "artifact_sha256: $APK_SHA256" "$got/key-scan-report.txt" &&
+                   grep -qx "commit: $COMMIT" "$got/key-scan-report.txt"; }; then
+              fail "$tag: key-scan-report.txt is not a zero-finding scan of this APK and commit"
+            fi
+          }
+          # A published pre-release must be a non-draft pre-release whose tag resolves to COMMIT and carries every asset.
+          verify_release() {
+            local tag="$1" json got
+            json="$(release_json "$tag")"
+            [ -n "$json" ] || fail "$tag: no release after publishing"
+            [ "$(jq -r .isPrerelease <<<"$json")" = "true" ] || fail "$tag: not a pre-release"
+            [ "$(jq -r .isDraft <<<"$json")" = "false" ] || fail "$tag: still a draft"
+            got="$(tag_commit "$tag")"
+            [ "$got" = "$COMMIT" ] || fail "$tag: tag resolves to '${got:-nothing}', expected $COMMIT"
+            verify_assets "$tag"
+            echo "$tag verified: $(gh release view "$tag" --json url --jq .url)"
+          }
+          create_release() {
+            local tag="$1" title="$2" dir="out/$1"
+            gh release create "$tag" "$dir/$APK" "$dir/$MANIFEST" "$dir/key-scan-report.txt" "$dir/SHA256SUMS" \
+              --target "$COMMIT" --prerelease --latest=false --title "$title" --notes "$(notes_for "$tag")"
+          }
+
+          # 0) Never touch a stable release: an existing release under either name must already be a pre-release.
+          for tag in "$MAIN_TAG" "$ROLLING_TAG"; do
+            case "$tag" in main-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]|latest) ;;
+              *) fail "refusing to publish to non-pre-release tag '$tag'";; esac
+            [ "$tag" != "$STABLE_TAG" ] || fail "'$tag' is the stable tag"
+            json="$(release_json "$tag")"
+            if [ -n "$json" ]; then
+              [ "$(jq -r .isPrerelease <<<"$json")" = "true" ] || fail "release '$tag' exists and is NOT a pre-release; refusing"
+            fi
+          done
+
+          # 1) main-<sha7>: created once, never re-pointed or clobbered. An existing
+          #    one must target COMMIT; a missing asset (an interrupted publish) is
+          #    re-uploaded, an interrupted draft is completed, anything else fails.
+          json="$(release_json "$MAIN_TAG")"
+          if [ -z "$json" ]; then
+            create_release "$MAIN_TAG" "HSE BLE Radar ${VERSION_NAME} (main ${COMMIT:0:7})"
           else
-            mkdir -p "out/$MAIN_TAG"
-            cargo xtask release-manifest --url "$base/$MAIN_TAG/$APK" --out "out/$MAIN_TAG/$MANIFEST"
-            cp "$APK" key-scan-report.txt "out/$MAIN_TAG/"
-            ( cd "out/$MAIN_TAG" && sha256sum "$APK" "$MANIFEST" key-scan-report.txt > SHA256SUMS )
-            gh release create "$MAIN_TAG" "out/$MAIN_TAG/$APK" "out/$MAIN_TAG/$MANIFEST" "out/$MAIN_TAG/key-scan-report.txt" "out/$MAIN_TAG/SHA256SUMS" \
-              --target "$COMMIT" --prerelease --latest=false \
-              --title "HSE BLE Radar ${VERSION_NAME} (main ${COMMIT:0:7})" \
-              --notes "$(notes_for "$MAIN_TAG")"
+            draft="$(jq -r .isDraft <<<"$json")"
+            if [ "$draft" = "true" ]; then
+              target="$(jq -r .targetCommitish <<<"$json")"
+              [ "$target" = "$COMMIT" ] || fail "draft $MAIN_TAG targets '$target', expected $COMMIT; delete it to re-publish"
+            fi
+            got="$(tag_commit "$MAIN_TAG")"
+            # A draft has no tag until it is published; otherwise the tag must resolve to COMMIT.
+            if [ "$got" != "$COMMIT" ] && ! { [ -z "$got" ] && [ "$draft" = "true" ]; }; then
+              fail "$MAIN_TAG exists but its tag resolves to '${got:-nothing}', expected $COMMIT; it is never re-pointed, delete it to re-publish"
+            fi
+            for a in "${assets[@]}"; do
+              if ! jq -e --arg n "$a" 'any(.assets[]; .name == $n and ((.state // "uploaded") == "uploaded"))' <<<"$json" >/dev/null; then
+                echo "$MAIN_TAG is missing $a; re-uploading it."
+                gh release upload "$MAIN_TAG" "out/$MAIN_TAG/$a" \
+                  || fail "$MAIN_TAG: could not upload missing $a (a partial upload under that name?); delete the pre-release to re-publish"
+              fi
+            done
+            if [ "$draft" = "true" ]; then
+              echo "$MAIN_TAG is an unpublished draft; publishing it."
+              verify_assets "$MAIN_TAG"
+              gh release edit "$MAIN_TAG" --draft=false --prerelease --latest=false
+            fi
           fi
+          verify_release "$MAIN_TAG"
+
           # 2) rolling `latest`: delete the old pre-release + its tag, re-create it on this commit.
           #    (Guarded above: deletion only ever happens to a release that is already a pre-release.)
-          mkdir -p "out/$ROLLING_TAG"
-          cargo xtask release-manifest --url "$base/$ROLLING_TAG/$APK" --out "out/$ROLLING_TAG/$MANIFEST"
-          cp "$APK" key-scan-report.txt "out/$ROLLING_TAG/"
-          ( cd "out/$ROLLING_TAG" && sha256sum "$APK" "$MANIFEST" key-scan-report.txt > SHA256SUMS )
-          if gh release view "$ROLLING_TAG" >/dev/null 2>&1; then
-            gh release delete "$ROLLING_TAG" --yes --cleanup-tag
+          json="$(release_json "$ROLLING_TAG")"
+          if [ -n "$json" ]; then
+            if [ "$(jq -r .isDraft <<<"$json")" = "true" ]; then
+              gh release delete "$ROLLING_TAG" --yes
+            else
+              gh release delete "$ROLLING_TAG" --yes --cleanup-tag
+            fi
           fi
-          gh release create "$ROLLING_TAG" "out/$ROLLING_TAG/$APK" "out/$ROLLING_TAG/$MANIFEST" "out/$ROLLING_TAG/key-scan-report.txt" "out/$ROLLING_TAG/SHA256SUMS" \
-            --target "$COMMIT" --prerelease --latest=false \
-            --title "HSE BLE Radar ${VERSION_NAME} (latest main build)" \
-            --notes "$(notes_for "$ROLLING_TAG")"
-          echo "Published: $(gh release view "$MAIN_TAG" --json url --jq .url) and $(gh release view "$ROLLING_TAG" --json url --jq .url)"
+          # A leftover `latest` tag would make the new release reuse it instead of --target.
+          if [ -n "$(tag_commit "$ROLLING_TAG")" ]; then
+            gh api -X DELETE "$api/git/refs/tags/$ROLLING_TAG"
+          fi
+          create_release "$ROLLING_TAG" "HSE BLE Radar ${VERSION_NAME} (latest main build)"
+          verify_release "$ROLLING_TAG"
