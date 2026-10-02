@@ -831,7 +831,7 @@ impl SearchFamilyStatistics {
         match feedback.outcome() {
             SearchOutcome::Useful => self.useful = self.useful.saturating_add(1),
             SearchOutcome::Contradictory => {
-                self.contradictory = self.contradictory.saturating_add(1)
+                self.contradictory = self.contradictory.saturating_add(1);
             }
             SearchOutcome::NoResults => self.no_results = self.no_results.saturating_add(1),
             SearchOutcome::Weak => self.weak = self.weak.saturating_add(1),
@@ -1643,11 +1643,11 @@ impl ExecutionFeedbackAdaptiveOsintSearchEngine {
                         .unwrap_or(&seed.raw_query)
                         .to_owned();
                     if query_keys.contains_key(&key) || !pending_keys.insert(key) {
-                        suppressed_pivots.push(format!("{}: duplicate query", query));
+                        suppressed_pivots.push(format!("{query}: duplicate query"));
                         continue;
                     }
                     if pivots.len() + generated_pivots.len() >= limits.max_pivots {
-                        suppressed_pivots.push(format!("{}: pivot limit", query));
+                        suppressed_pivots.push(format!("{query}: pivot limit"));
                         continue;
                     }
                     let generated_id = format!("{}::pivot-{}", pivot.id(), *next_sequence);

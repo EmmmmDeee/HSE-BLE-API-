@@ -383,8 +383,7 @@ fn cmd_parity_report() -> Result<(), String> {
     let runtime_count = runtime_keys.len();
     if runtime_count != observed_count {
         return Err(format!(
-            "runtime contract census has {} entries, expected {observed_count}",
-            runtime_count
+            "runtime contract census has {runtime_count} entries, expected {observed_count}"
         ));
     }
     if dedup_sorted(runtime_keys) != observed_contracts {
@@ -1666,10 +1665,7 @@ fn pick_highest_version_dir(
         if !predicate(&path) {
             continue;
         }
-        let is_better = best
-            .as_ref()
-            .map(|(best_key, _)| key > *best_key)
-            .unwrap_or(true);
+        let is_better = best.as_ref().is_none_or(|(best_key, _)| key > *best_key);
         if is_better {
             best = Some((key, path));
         }
@@ -2309,10 +2305,7 @@ fn discover_platform_jar(sdk_root: &Path) -> Result<PathBuf, String> {
         if !jar.is_file() {
             continue;
         }
-        let is_better = best
-            .as_ref()
-            .map(|(best_n, _)| number > *best_n)
-            .unwrap_or(true);
+        let is_better = best.as_ref().is_none_or(|(best_n, _)| number > *best_n);
         if is_better {
             best = Some((number, jar));
         }
@@ -4111,7 +4104,7 @@ fn debugfs_dump(debugfs: &Path, image: &Path, source: &str, dest: &Path) -> Resu
             .arg(image);
         c
     })?;
-    let extracted = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    let extracted = fs::metadata(dest).map_or(0, |m| m.len());
     if extracted == 0 {
         return Err(format!(
             "debugfs could not extract {source} from {}",
@@ -5036,9 +5029,9 @@ mod tests {
         let app = root.join("android/app/src/main");
         let java = read_to_string(&app.join("java/com/hse/bleradar/DeviceHistory.java"))
             .expect("DeviceHistory.java");
-        let history = crate::emulator::java_static_final_string(&java, "FILE_NAME")
+        let history = emulator::java_static_final_string(&java, "FILE_NAME")
             .expect("DeviceHistory.FILE_NAME");
-        let wifi = crate::emulator::java_static_final_string(&java, "WIFI_FILE_NAME")
+        let wifi = emulator::java_static_final_string(&java, "WIFI_FILE_NAME")
             .expect("DeviceHistory.WIFI_FILE_NAME");
         assert!(
             java.contains("PERSISTED_FILES = {FILE_NAME, WIFI_FILE_NAME}"),

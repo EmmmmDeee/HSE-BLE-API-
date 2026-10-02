@@ -1551,7 +1551,7 @@ fn normalize_html_structure(raw_html: &str) -> String {
         let token = after_start[..end].trim_start_matches(['/', '!', '?']);
         let name: String = token
             .chars()
-            .take_while(|character| character.is_ascii_alphanumeric())
+            .take_while(char::is_ascii_alphanumeric)
             .collect::<String>()
             .to_ascii_lowercase();
         if !name.is_empty() {

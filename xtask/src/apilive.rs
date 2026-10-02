@@ -1369,7 +1369,7 @@ mod tests {
         );
         let mut short = HttpResponse {
             status: 200,
-            headers: ok.headers.clone(),
+            headers: ok.headers,
             body: b"{}}".to_vec(),
         };
         assert!(

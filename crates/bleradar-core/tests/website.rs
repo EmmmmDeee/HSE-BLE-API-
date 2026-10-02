@@ -654,7 +654,7 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
 
     // Pair 1: ArchivedState / ArchivedState -> DevelopmentRelationship, ContentReuse
     for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
-        let id = format!("archive-{}", site);
+        let id = format!("archive-{site}");
         engine
             .observe(
                 observation(
@@ -662,7 +662,7 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
                     site,
                     WebsiteFeatureKind::ArchivedState,
                     "val-1",
-                    source(&format!("{}-source", id), None),
+                    source(&format!("{id}-source"), None),
                     observed_at,
                 )
                 .with_factors(low)
@@ -677,7 +677,7 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
 
     // Pair 2: Certificate / Certificate -> OperationalRelationship, DevelopmentRelationship
     for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
-        let id = format!("cert-{}", site);
+        let id = format!("cert-{site}");
         engine
             .observe(
                 observation(
@@ -685,7 +685,7 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
                     site,
                     WebsiteFeatureKind::Certificate,
                     "val-2",
-                    source(&format!("{}-source", id), None),
+                    source(&format!("{id}-source"), None),
                     observed_at,
                 )
                 .with_factors(low)
@@ -700,7 +700,7 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
 
     // Pair 3: NormalizedText / NormalizedText -> ContentReuse, CommonTemplate
     for (site, observed_at) in [("site-a", 10), ("site-b", 20)] {
-        let id = format!("text-{}", site);
+        let id = format!("text-{site}");
         engine
             .observe(
                 observation(
@@ -708,7 +708,7 @@ fn coincidence_leads_when_multiple_disjoint_named_explanations_compete_without_c
                     site,
                     WebsiteFeatureKind::NormalizedText,
                     "val-3",
-                    source(&format!("{}-source", id), None),
+                    source(&format!("{id}-source"), None),
                     observed_at,
                 )
                 .with_factors(low)
