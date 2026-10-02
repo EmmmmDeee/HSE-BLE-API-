@@ -1229,9 +1229,11 @@ fn check_emulator_archive(pin: &EmulatorPin, archive: &[u8]) -> Result<(), Strin
 }
 
 /// Makes `<sdk>/emulator` the pinned revision (`PINNED_EMULATOR_REVISION`):
-/// kept when sdkmanager installed exactly that, else replaced by the pinned
-/// archive, downloaded from the SDK repository and verified first; what was
-/// done, for the log.
+/// kept when it passes `verify_installed_emulator` (the revision its
+/// `package.xml` and `source.properties` name, the SHA-256 of the pinned
+/// archive's files), else replaced by the pinned archive, downloaded from
+/// the SDK repository over HTTPS and verified first; what was done, for the
+/// log.
 fn install_pinned_emulator(sdk_root: &Path) -> Result<String, String> {
     install_emulator_pin(sdk_root, &PINNED_EMULATOR, |archive, dest| {
         let url = format!("{SDK_REPOSITORY_URL}/{archive}");
@@ -1257,39 +1259,122 @@ fn install_pinned_emulator(sdk_root: &Path) -> Result<String, String> {
     })
 }
 
+/// The two filesystem operations the emulator swap and its rollback use;
+/// a test injects failures through it.
+trait EmulatorFs {
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        fs::rename(from, to)
+    }
+    fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()> {
+        fs::remove_dir_all(dir)
+    }
+}
+
+/// The real filesystem.
+struct RealFs;
+impl EmulatorFs for RealFs {}
+
+/// The working directories beside `<sdk>/emulator`. `previous` holds the
+/// emulator that was installed before a swap and is removed only once an
+/// emulator at `dir` has verified; `staging` and `rejected` (an emulator that
+/// failed verification, moved out of the way) never hold the only usable
+/// copy and may always be removed.
+struct EmulatorDirs {
+    dir: PathBuf,
+    staging: PathBuf,
+    previous: PathBuf,
+    rejected: PathBuf,
+}
+
+impl EmulatorDirs {
+    fn new(sdk_root: &Path) -> Self {
+        Self {
+            dir: sdk_root.join("emulator"),
+            staging: sdk_root.join(".emulator-pin-staging"),
+            previous: sdk_root.join(".emulator-pin-previous"),
+            rejected: sdk_root.join(".emulator-pin-rejected"),
+        }
+    }
+
+    /// Removes `staging` and `rejected`, and `previous` too when
+    /// `dir_verified` (it is then not the only usable copy); what could not
+    /// be removed.
+    fn clean(&self, fs: &dyn EmulatorFs, dir_verified: bool) -> Vec<String> {
+        let mut removable = vec![&self.staging, &self.rejected];
+        if dir_verified {
+            removable.push(&self.previous);
+        }
+        removable
+            .into_iter()
+            .filter(|leftover| leftover.exists())
+            .filter_map(|leftover| {
+                fs.remove_dir_all(leftover)
+                    .err()
+                    .map(|e| format!("{} could not be removed: {e}", leftover.display()))
+            })
+            .collect()
+    }
+}
+
+/// `" (warning: …)"` for leftovers that could not be removed, else nothing.
+fn leftover_warning(leftovers: &[String]) -> String {
+    if leftovers.is_empty() {
+        String::new()
+    } else {
+        format!(" (warning: {})", leftovers.join("; "))
+    }
+}
+
 /// `install_pinned_emulator` for any pin, `fetch` writing the pin's archive
-/// to the path it is given. An installed emulator is kept only when it
-/// passes `verify_installed_emulator`. Otherwise the archive is verified,
-/// unpacked into a sibling staging directory and checked there, given the
-/// installed emulator's `package.xml`, swapped in (`swap_in_emulator`) and
-/// verified again. A failure before the swap leaves the installed emulator
-/// untouched; what the swap leaves is said in its error.
+/// to the path it is given.
 fn install_emulator_pin(
     sdk_root: &Path,
     pin: &EmulatorPin,
     fetch: impl FnOnce(&str, &Path) -> Result<(), String>,
 ) -> Result<String, String> {
-    let dir = sdk_root.join("emulator");
-    let staging = sdk_root.join(".emulator-pin-staging");
-    let previous = sdk_root.join(".emulator-pin-previous");
-    // A run whose rollback failed left the only copy of the old emulator at
-    // `previous`: it is put back before anything else, never deleted.
-    if previous.exists() && !dir.exists() {
-        fs::rename(&previous, &dir).map_err(|e| {
+    install_emulator_pin_with(sdk_root, pin, fetch, &RealFs)
+}
+
+/// `install_emulator_pin` through `fs`. An emulator left at `previous` by an
+/// earlier run is put back first unless the one at `dir` verifies. An
+/// installed emulator is kept only when it passes `verify_installed_emulator`.
+/// Otherwise the archive is verified, unpacked into a staging directory and
+/// checked there, given the installed emulator's `package.xml`, swapped in
+/// (`swap_in_emulator`, the old one moved to `previous`) and verified again;
+/// one that does not verify is moved to `rejected` and `previous` put back.
+/// `previous` is removed only beside a verified emulator, so the old copy
+/// survives every failure, across runs; what is where is said in the error.
+fn install_emulator_pin_with(
+    sdk_root: &Path,
+    pin: &EmulatorPin,
+    fetch: impl FnOnce(&str, &Path) -> Result<(), String>,
+    fs: &dyn EmulatorFs,
+) -> Result<String, String> {
+    let dirs = EmulatorDirs::new(sdk_root);
+    // An earlier run that could not finish its rollback left the old
+    // emulator at `previous`, with nothing or an unverified emulator at
+    // `dir`: it is put back before anything else.
+    if dirs.previous.exists()
+        && !(dirs.dir.exists() && verify_installed_emulator(sdk_root, pin).is_ok())
+    {
+        let restored = restore_previous_emulator(&dirs, fs).map_err(|e| {
             format!(
-                "restoring the previous emulator from {} to {}: {e}",
-                previous.display(),
-                dir.display()
+                "an earlier run left the previous emulator at {}, and {e}",
+                dirs.previous.display()
             )
         })?;
-        println!(
-            "== restored the previous emulator from {} ==",
-            previous.display()
-        );
+        println!("== {restored} (left by an earlier run) ==");
     }
     let installed = installed_emulator_revision(sdk_root);
     let mismatch = match verify_installed_emulator(sdk_root, pin) {
-        Ok(verified) => return Ok(format!("emulator {}: kept, {verified}", pin.revision)),
+        Ok(verified) => {
+            let leftovers = dirs.clean(fs, true);
+            return Ok(format!(
+                "emulator {}: kept, {verified}{}",
+                pin.revision,
+                leftover_warning(&leftovers)
+            ));
+        }
         Err(mismatch) => mismatch,
     };
     println!(
@@ -1297,25 +1382,29 @@ fn install_emulator_pin(
         installed.as_deref().unwrap_or("none"),
         pin.revision
     );
-    // `previous` can only be here beside `dir` now: a stale copy.
-    for stale in [&staging, &previous] {
-        if stale.exists() {
-            fs::remove_dir_all(stale).map_err(|e| format!("removing {}: {e}", stale.display()))?;
-        }
+    // `previous` was put back above, so only removable leftovers remain;
+    // they must go before the swap reuses their names.
+    let stale = dirs.clean(fs, false);
+    if !stale.is_empty() || dirs.previous.exists() {
+        return Err(format!(
+            "the emulator pin's working directories are not clear: {}",
+            if stale.is_empty() {
+                format!("{} still exists", dirs.previous.display())
+            } else {
+                stale.join("; ")
+            }
+        ));
     }
-    fs::create_dir_all(&staging).map_err(|e| format!("creating {}: {e}", staging.display()))?;
-    let swapped = stage_emulator_pin(sdk_root, &staging, pin, fetch).and_then(|unpacked| {
-        swap_in_emulator(&unpacked, &dir, &previous, |from, to| fs::rename(from, to))
+    std::fs::create_dir_all(&dirs.staging)
+        .map_err(|e| format!("creating {}: {e}", dirs.staging.display()))?;
+    let swapped = stage_emulator_pin(sdk_root, &dirs.staging, pin, fetch).and_then(|unpacked| {
+        swap_in_emulator(&unpacked, &dirs.dir, &dirs.previous, |from, to| {
+            fs.rename(from, to)
+        })
     });
-    // Leftovers are named, never silently left behind.
-    let mut leftovers = Vec::new();
-    if staging.exists()
-        && let Err(e) = fs::remove_dir_all(&staging)
-    {
-        leftovers.push(format!("{} could not be removed: {e}", staging.display()));
-    }
     if let Err(mut error) = swapped {
         // What the swap left is in its error; `previous`, if there, is kept.
+        let leftovers = dirs.clean(fs, false);
         if !leftovers.is_empty() {
             error.push_str(&format!("; {}", leftovers.join("; ")));
         }
@@ -1325,54 +1414,67 @@ fn install_emulator_pin(
     let verified = match verify_installed_emulator(sdk_root, pin) {
         Ok(verified) => verified,
         Err(e) => {
+            let restored = restore_previous_emulator(&dirs, fs).unwrap_or_else(|kept| kept);
+            let leftovers = dirs.clean(fs, false);
             return Err(format!(
-                "the swapped-in emulator does not verify: {e}; {}",
-                restore_previous_emulator(&dir, &previous)
+                "the swapped-in emulator does not verify: {e}; {restored}{}",
+                leftover_warning(&leftovers)
             ));
         }
     };
-    if previous.exists()
-        && let Err(e) = fs::remove_dir_all(&previous)
-    {
-        leftovers.push(format!("{} could not be removed: {e}", previous.display()));
-    }
+    let leftovers = dirs.clean(fs, true);
     Ok(format!(
         "emulator {}: the pinned archive {}, verified, in place of {}; {verified}{}",
         pin.revision,
         pin.archive,
         installed.as_deref().unwrap_or("none"),
-        if leftovers.is_empty() {
-            String::new()
-        } else {
-            format!(" (warning: {})", leftovers.join("; "))
-        }
+        leftover_warning(&leftovers)
     ))
 }
 
-/// Puts the emulator kept at `previous` back at `dir` in place of one that
-/// did not verify; what is where afterwards.
-fn restore_previous_emulator(dir: &Path, previous: &Path) -> String {
+/// Puts the emulator kept at `previous` back at `dir`, moving whatever is at
+/// `dir` (an emulator that did not verify) to `rejected` first. `Ok` once the
+/// previous emulator is at `dir`; otherwise what is where, with `previous`
+/// never removed.
+fn restore_previous_emulator(dirs: &EmulatorDirs, fs: &dyn EmulatorFs) -> Result<String, String> {
+    let (dir, previous, rejected) = (&dirs.dir, &dirs.previous, &dirs.rejected);
     if !previous.exists() {
-        return format!(
+        return Err(format!(
             "there was no previous emulator to restore, so the unverified one stays at {}",
             dir.display()
-        );
+        ));
     }
-    if let Err(e) = fs::remove_dir_all(dir) {
-        return format!(
-            "removing the unverified emulator at {} failed ({e}); the previous emulator is at {}",
+    if dir.exists() {
+        if rejected.exists() {
+            fs.remove_dir_all(rejected).map_err(|e| {
+                format!(
+                    "clearing {} failed ({e}); the unverified emulator stays at {} and the previous one is kept at {}",
+                    rejected.display(),
+                    dir.display(),
+                    previous.display()
+                )
+            })?;
+        }
+        fs.rename(dir, rejected).map_err(|e| {
+            format!(
+                "moving the unverified emulator from {} to {} failed ({e}); the previous one is kept at {}",
+                dir.display(),
+                rejected.display(),
+                previous.display()
+            )
+        })?;
+    }
+    fs.rename(previous, dir).map_err(|e| {
+        format!(
+            "restoring the previous emulator failed ({e}): {} is missing and the previous emulator is kept at {}",
             dir.display(),
             previous.display()
-        );
-    }
-    match fs::rename(previous, dir) {
-        Ok(()) => format!("the previous emulator was restored to {}", dir.display()),
-        Err(e) => format!(
-            "restoring the previous emulator failed ({e}): {} is missing and the previous emulator is at {}",
-            dir.display(),
-            previous.display()
-        ),
-    }
+        )
+    })?;
+    Ok(format!(
+        "the previous emulator was restored to {}",
+        dir.display()
+    ))
 }
 
 /// Moves the emulator at `dir` aside to `previous` and `unpacked` into its
@@ -4892,6 +4994,273 @@ mod tests {
         }
     }
 
+    /// A filesystem whose `rename` fails onto the listed names and whose
+    /// `remove_dir_all` fails on the listed names (file names under the SDK).
+    struct FaultyFs {
+        rename_onto: &'static [&'static str],
+        remove: &'static [&'static str],
+    }
+
+    impl FaultyFs {
+        fn named(path: &Path, names: &[&str]) -> bool {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| names.contains(&name))
+        }
+    }
+
+    impl EmulatorFs for FaultyFs {
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            if Self::named(to, self.rename_onto) {
+                return Err(std::io::Error::other("injected rename failure"));
+            }
+            fs::rename(from, to)
+        }
+        fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()> {
+            if Self::named(dir, self.remove) {
+                return Err(std::io::Error::other("injected removal failure"));
+            }
+            fs::remove_dir_all(dir)
+        }
+    }
+
+    /// An installed emulator 37.3.2 marked `old`, as sdkmanager left it.
+    fn old_emulator(sdk: &Path) {
+        let old = sdk.join("emulator");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("source.properties"), "Pkg.Revision=37.3.2\n").unwrap();
+        fs::write(
+            old.join("package.xml"),
+            "<localPackage path=\"emulator\"><revision><major>37</major><minor>3</minor><micro>2</micro></revision></localPackage>",
+        )
+        .unwrap();
+        fs::write(old.join("old-marker"), "old").unwrap();
+    }
+
+    #[test]
+    fn a_rejected_emulator_never_costs_the_previous_one_across_runs() {
+        let sdk = sdk_fixture("emulator-two-runs");
+        old_emulator(&sdk);
+        let props: &[u8] = b"Pkg.Revision=9.8.7\nPkg.Path=emulator\n";
+        let good = stored_zip(&[
+            ("emulator/source.properties", props),
+            ("emulator/emulator", b"#!/bin/sh\n"),
+        ]);
+        let digest = sha256::to_hex(&sha256::sha256(&good));
+        let props_digest = sha256::to_hex(&sha256::sha256(props));
+        let launcher_digest = sha256::to_hex(&sha256::sha256(b"#!/bin/sh\n"));
+        let files = [
+            ("emulator", launcher_digest.as_str()),
+            ("source.properties", props_digest.as_str()),
+        ];
+        let pin = EmulatorPin {
+            revision: "9.8.7",
+            archive: "fake.zip",
+            size: good.len(),
+            sha256: &digest,
+            files: &files,
+        };
+        // The archive verifies but unpacks to a launcher the pin does not name.
+        let wrong = [("emulator", "0".repeat(64))];
+        let wrong: Vec<(&str, &str)> = wrong.iter().map(|(f, d)| (*f, d.as_str())).collect();
+        let unverified = EmulatorPin {
+            files: &wrong,
+            ..pin
+        };
+        let serve = |bytes: Vec<u8>| {
+            move |_: &str, dest: &Path| fs::write(dest, &bytes).map_err(|e| e.to_string())
+        };
+
+        // Run 1: the swapped-in emulator does not verify and cannot be moved
+        // out of the way either. The old one stays at .emulator-pin-previous.
+        let stuck = FaultyFs {
+            rename_onto: &[".emulator-pin-rejected"],
+            remove: &[],
+        };
+        let error =
+            install_emulator_pin_with(&sdk, &unverified, serve(good.clone()), &stuck).unwrap_err();
+        assert!(
+            error.contains("the swapped-in emulator does not verify"),
+            "{error}"
+        );
+        assert!(error.contains("the previous one is kept at"), "{error}");
+        assert!(
+            sdk.join("emulator/emulator").is_file(),
+            "the unverified one is at emulator/"
+        );
+        assert!(sdk.join(".emulator-pin-previous/old-marker").is_file());
+
+        // Run 2 (same pin), offline: the old emulator is restored before
+        // anything else, the unverified one moved to .emulator-pin-rejected
+        // and then removed; the failed fetch leaves the old one in place.
+        let error =
+            install_emulator_pin(&sdk, &unverified, |_, _| Err("offline".to_string())).unwrap_err();
+        assert_eq!(error, "offline");
+        assert!(sdk.join("emulator/old-marker").is_file());
+        assert_eq!(installed_emulator_revision(&sdk).as_deref(), Some("37.3.2"));
+        for gone in [
+            ".emulator-pin-previous",
+            ".emulator-pin-rejected",
+            ".emulator-pin-staging",
+        ] {
+            assert!(!sdk.join(gone).exists(), "{gone}");
+        }
+
+        // Same start, but the rejected emulator cannot be removed after the
+        // restore: the old one is still restored, and the leftover named.
+        fs::rename(sdk.join("emulator"), sdk.join(".emulator-pin-previous")).unwrap();
+        fs::create_dir_all(sdk.join("emulator")).unwrap();
+        fs::write(
+            sdk.join("emulator/source.properties"),
+            "Pkg.Revision=0.0.1\n",
+        )
+        .unwrap();
+        let sticky = FaultyFs {
+            rename_onto: &[],
+            remove: &[".emulator-pin-rejected"],
+        };
+        let error =
+            install_emulator_pin_with(&sdk, &pin, |_, _| Err("offline".to_string()), &sticky)
+                .unwrap_err();
+        assert!(error.contains("are not clear"), "{error}");
+        assert!(
+            error.contains(".emulator-pin-rejected could not be removed"),
+            "{error}"
+        );
+        assert_eq!(installed_emulator_revision(&sdk).as_deref(), Some("37.3.2"));
+        assert!(!sdk.join(".emulator-pin-previous").exists());
+
+        // Run 3, online: the pinned archive replaces the restored emulator.
+        let done = install_emulator_pin(&sdk, &pin, serve(good)).unwrap();
+        assert!(done.contains("in place of 37.3.2"), "{done}");
+        for gone in [
+            ".emulator-pin-previous",
+            ".emulator-pin-rejected",
+            ".emulator-pin-staging",
+        ] {
+            assert!(!sdk.join(gone).exists(), "{gone}");
+        }
+
+        // A kept emulator clears what earlier runs left beside it, the
+        // previous copy included, since a verified one is in place; one that
+        // cannot be removed is named.
+        for leftover in [
+            ".emulator-pin-previous",
+            ".emulator-pin-rejected",
+            ".emulator-pin-staging",
+        ] {
+            fs::create_dir_all(sdk.join(leftover).join("x")).unwrap();
+        }
+        let kept = install_emulator_pin(&sdk, &pin, |_, _| panic!("no fetch")).unwrap();
+        assert!(kept.contains("kept"), "{kept}");
+        assert!(!kept.contains("warning"), "{kept}");
+        for gone in [
+            ".emulator-pin-previous",
+            ".emulator-pin-rejected",
+            ".emulator-pin-staging",
+        ] {
+            assert!(!sdk.join(gone).exists(), "{gone}");
+        }
+        fs::create_dir_all(sdk.join(".emulator-pin-staging")).unwrap();
+        let stubborn = FaultyFs {
+            rename_onto: &[],
+            remove: &[".emulator-pin-staging"],
+        };
+        let kept =
+            install_emulator_pin_with(&sdk, &pin, |_, _| panic!("no fetch"), &stubborn).unwrap();
+        assert!(kept.contains("(warning: "), "{kept}");
+        assert!(
+            kept.contains(".emulator-pin-staging could not be removed"),
+            "{kept}"
+        );
+        let _ = fs::remove_dir_all(&sdk);
+    }
+
+    #[test]
+    fn restoring_the_previous_emulator_reports_each_failure() {
+        let setup = |label: &str, with_dir: bool| {
+            let sdk = sdk_fixture(label);
+            fs::create_dir_all(sdk.join(".emulator-pin-previous")).unwrap();
+            fs::write(sdk.join(".emulator-pin-previous/old-marker"), "old").unwrap();
+            if with_dir {
+                fs::create_dir_all(sdk.join("emulator")).unwrap();
+                fs::write(sdk.join("emulator/new-marker"), "new").unwrap();
+            }
+            let dirs = EmulatorDirs::new(&sdk);
+            (sdk, dirs)
+        };
+        let fine = FaultyFs {
+            rename_onto: &[],
+            remove: &[],
+        };
+
+        // Nothing kept to restore.
+        let sdk = sdk_fixture("restore-none");
+        fs::create_dir_all(sdk.join("emulator")).unwrap();
+        let error = restore_previous_emulator(&EmulatorDirs::new(&sdk), &fine).unwrap_err();
+        assert!(error.contains("no previous emulator to restore"), "{error}");
+        assert!(sdk.join("emulator").is_dir());
+
+        // A stale rejected emulator that cannot be cleared: nothing moves.
+        let (sdk, dirs) = setup("restore-clear", true);
+        fs::create_dir_all(&dirs.rejected).unwrap();
+        let sticky = FaultyFs {
+            rename_onto: &[],
+            remove: &[".emulator-pin-rejected"],
+        };
+        let error = restore_previous_emulator(&dirs, &sticky).unwrap_err();
+        assert!(error.contains("clearing"), "{error}");
+        assert!(sdk.join("emulator/new-marker").is_file());
+        assert!(sdk.join(".emulator-pin-previous/old-marker").is_file());
+
+        // The unverified emulator cannot be moved aside: nothing moves.
+        let (sdk, dirs) = setup("restore-aside", true);
+        let stuck = FaultyFs {
+            rename_onto: &[".emulator-pin-rejected"],
+            remove: &[],
+        };
+        let error = restore_previous_emulator(&dirs, &stuck).unwrap_err();
+        assert!(error.contains("moving the unverified emulator"), "{error}");
+        assert!(sdk.join("emulator/new-marker").is_file());
+        assert!(sdk.join(".emulator-pin-previous/old-marker").is_file());
+
+        // The previous emulator cannot be moved back: it is kept, and the
+        // error says emulator/ is missing.
+        let (sdk, dirs) = setup("restore-back", true);
+        let jammed = FaultyFs {
+            rename_onto: &["emulator"],
+            remove: &[],
+        };
+        let error = restore_previous_emulator(&dirs, &jammed).unwrap_err();
+        assert!(
+            error.contains("is missing and the previous emulator is kept at"),
+            "{error}"
+        );
+        assert!(!sdk.join("emulator").exists());
+        assert!(sdk.join(".emulator-pin-previous/old-marker").is_file());
+        assert!(sdk.join(".emulator-pin-rejected/new-marker").is_file());
+
+        // Restored, with and without an unverified emulator in the way.
+        for (label, with_dir) in [("restore-ok", true), ("restore-empty", false)] {
+            let (sdk, dirs) = setup(label, with_dir);
+            let done = restore_previous_emulator(&dirs, &fine).unwrap();
+            assert!(done.contains("restored"), "{done}");
+            assert!(sdk.join("emulator/old-marker").is_file());
+            assert!(!dirs.previous.exists());
+            assert_eq!(dirs.rejected.join("new-marker").is_file(), with_dir);
+        }
+        for label in [
+            "restore-none",
+            "restore-clear",
+            "restore-aside",
+            "restore-back",
+            "restore-ok",
+            "restore-empty",
+        ] {
+            let _ = fs::remove_dir_all(sdk_fixture(label));
+        }
+    }
+
     #[test]
     fn a_pinned_emulator_is_swapped_in_only_when_verified_and_unpacked() {
         let sdk = sdk_fixture("emulator-swap");
@@ -4910,6 +5279,7 @@ mod tests {
             );
             assert!(!sdk.join(".emulator-pin-staging").exists());
             assert!(!sdk.join(".emulator-pin-previous").exists());
+            assert!(!sdk.join(".emulator-pin-rejected").exists());
         };
         let good = stored_zip(&[
             (
