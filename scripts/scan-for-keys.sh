@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scan-for-keys.sh <path>... — fail (exit 1) if any artifact or log contains a key-like string.
-# Used by main-build.yml after the build. It reports only the location and rule; it never prints the matched value.
+# Used by .github/workflows/release.yml on the exact artifact it publishes. It reports only the location and rule; it never prints the matched value.
 set -uo pipefail
 hits=0
 report() { echo "::error file=$1::key-like content ($2) — value withheld"; hits=$((hits+1)); }
