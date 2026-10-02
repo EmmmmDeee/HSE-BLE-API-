@@ -36,9 +36,27 @@ use std::process::{Command, ExitCode};
 /// `cargo deny`, `cargo audit` tolerates a plain, non-git directory).
 const AUDIT_DB_PATH: &str = "vendor/rustsec-advisory-db/advisory-db-3157b0e258782691";
 
-/// The committed migration archive that retains the immutable native oracles.
-const MIGRATION_ZIP_NAME: &str = "BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip";
-/// Zip entry of the immutable v0.3.0 native oracle inside [`MIGRATION_ZIP_NAME`].
+/// The one canonical directory (relative to the repo root) holding every
+/// immutable v0.3.0 input: the original APK, the byte-pinned migration archive,
+/// the native oracle and DEX extracted from it, and the recovery history.
+const ORACLE_DIR: &str = "oracle";
+/// The SHA-256 manifest (`sha256sum` format, names relative to [`ORACLE_DIR`])
+/// that pins every file in [`ORACLE_DIR`]; `check-oracle-integrity` verifies it.
+const ORACLE_MANIFEST_NAME: &str = "SHA256SUMS";
+/// The original v0.3.0 APK oracle (relative to the repo root).
+const ORACLE_APK_PATH: &str = "oracle/BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk";
+/// The committed migration archive that retains the immutable native oracles
+/// (relative to the repo root). Byte-identical to the archive once committed at
+/// the root as `BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip`;
+/// only its path changed (no space, no ` (1)`), its SHA-256 pin did not.
+const MIGRATION_ZIP_PATH: &str = "oracle/BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0.zip";
+/// SHA-256 of [`MIGRATION_ZIP_PATH`], the archive's recorded baseline.
+const MIGRATION_ZIP_SHA256: &str =
+    "07d2d80ce7e6c43f4c6ccc2496d30faafb77342e7bf196b894d32c7528cf3f76";
+/// The checked-in v0.3.0 snapshot's own manifest (`./`-relative names), whose
+/// `./oracle/` entries are copies of the canonical oracles.
+const MIGRATION_SNAPSHOT_MANIFEST_PATH: &str = "migration/critically-enhanced-v0.3.0/SHA256SUMS";
+/// Zip entry of the immutable v0.3.0 native oracle inside [`MIGRATION_ZIP_PATH`].
 const ORACLE_SO_ZIP_ENTRY: &str = "oracle/libbleradar_core.so";
 /// SHA-256 of that oracle `.so`, pinned so `oracle-differential` refuses to run
 /// against anything but the recorded immutable binary.
@@ -578,10 +596,9 @@ fn cmd_check_dependency_policy() -> Result<(), String> {
 /// oracle no longer matches its recorded SHA-256.
 fn cmd_check_oracle_integrity() -> Result<(), String> {
     let root = repo_root()?;
-    let apk_path = root.join("BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk");
+    let apk_path = root.join(ORACLE_APK_PATH);
     let input_sha_path = root.join("docs/INPUT_SHA256.txt");
-    let zip_path = root.join("BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip");
-    const ZIP_BASELINE: &str = "07d2d80ce7e6c43f4c6ccc2496d30faafb77342e7bf196b894d32c7528cf3f76";
+    let zip_path = root.join(MIGRATION_ZIP_PATH);
 
     let apk_name = apk_path.file_name().unwrap().to_string_lossy().into_owned();
     let input_sha_name = input_sha_path
@@ -612,17 +629,69 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
         None
     };
     let zip_result = evaluate_oracle_hash(
-        Some(ZIP_BASELINE),
+        Some(MIGRATION_ZIP_SHA256),
         actual_zip_sha.as_deref(),
         String::new(), // unreachable: the zip's expected hash is a constant, never unparsable
         format!("missing oracle archive: {zip_name}"),
         &zip_name,
     );
 
-    let failures: Vec<String> = [apk_result, zip_result]
+    let mut failures: Vec<String> = [apk_result, zip_result]
         .into_iter()
         .filter_map(Result::err)
         .collect();
+
+    // Every file in the canonical oracle directory is pinned by its manifest,
+    // and the manifest agrees with the gate's own independent pins.
+    let oracle_dir = root.join(ORACLE_DIR);
+    let manifest_path = oracle_dir.join(ORACLE_MANIFEST_NAME);
+    let listing = list_entry_names(&oracle_dir)?;
+    let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_default();
+    let pins: Vec<(&str, String)> = [
+        expected_apk_sha
+            .clone()
+            .map(|h| (file_name_of(ORACLE_APK_PATH), h)),
+        Some((
+            file_name_of(MIGRATION_ZIP_PATH),
+            MIGRATION_ZIP_SHA256.to_string(),
+        )),
+        Some((
+            file_name_of(ORACLE_SO_ZIP_ENTRY),
+            ORACLE_SO_SHA256.to_string(),
+        )),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let canonical = oracle_manifest_violations(
+        &format!("{ORACLE_DIR}/{ORACLE_MANIFEST_NAME}"),
+        &manifest_text,
+        &listing,
+        &pins,
+        |name| hash_file_if_present(&oracle_dir.join(name)),
+    );
+    // The snapshot cross-check below needs the canonical digests even when a
+    // canonical violation was found, so it reports its own findings, not noise.
+    let canonical_entries = parse_sha256sums("", &manifest_text).unwrap_or_default();
+    if let Err(violations) = canonical {
+        failures.extend(violations);
+    }
+
+    // The v0.3.0 snapshot's manifest still verifies, and its copies of the
+    // canonical files (`./oracle/*`, `./git-history.bundle`) are
+    // byte-identical to them, never a divergent second copy.
+    let snapshot_manifest = root.join(MIGRATION_SNAPSHOT_MANIFEST_PATH);
+    let snapshot_dir = snapshot_manifest
+        .parent()
+        .expect("the snapshot manifest path has a parent directory")
+        .to_path_buf();
+    let snapshot_text = fs::read_to_string(&snapshot_manifest).unwrap_or_default();
+    failures.extend(snapshot_manifest_violations(
+        MIGRATION_SNAPSHOT_MANIFEST_PATH,
+        &snapshot_text,
+        &canonical_entries,
+        |name| hash_file_if_present(&snapshot_dir.join(name)),
+    ));
 
     if !failures.is_empty() {
         println!("Oracle integrity violation — immutable behavioral oracles must never change:");
@@ -633,9 +702,212 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
     }
 
     println!(
-        "Oracle integrity verified: APK matches docs/INPUT_SHA256.txt; migration archive matches its recorded baseline."
+        "Oracle integrity verified: APK matches docs/INPUT_SHA256.txt; migration archive matches its recorded baseline; \
+         every file in {ORACLE_DIR}/ matches {ORACLE_DIR}/{ORACLE_MANIFEST_NAME}; \
+         {MIGRATION_SNAPSHOT_MANIFEST_PATH} verifies and its copies of canonical files are identical."
     );
     Ok(())
+}
+
+/// The last path component of a `/`-separated repo-relative path.
+fn file_name_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// SHA-256 (lowercase hex) of a regular file, or `None` when it is absent,
+/// unreadable, or not a regular file. A symlink is never followed: a pinned
+/// oracle must be the bytes themselves, not a pointer to them.
+fn hash_file_if_present(path: &Path) -> Option<String> {
+    let is_regular = fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file());
+    if !is_regular {
+        return None;
+    }
+    fs::read(path)
+        .ok()
+        .map(|bytes| sha256::to_hex(&sha256::sha256(&bytes)))
+}
+
+/// The names of every entry directly inside `dir` (regular files,
+/// directories, symlinks and anything else alike), sorted, so nothing in an
+/// oracle directory escapes the manifest by not being a plain file.
+fn list_entry_names(dir: &Path) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("listing {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("listing {}: {e}", dir.display()))?;
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Parses a `sha256sum`-format manifest strictly: every non-empty line is a
+/// 64-character lowercase-hex digest, two spaces (or a space and the binary
+/// marker `*`), then a relative name that is neither absolute nor climbs out
+/// with `..`. A name listed twice is rejected. Returns `(digest, name)` pairs
+/// in file order, or every malformed line (1-based) as a message.
+fn parse_sha256sums(label: &str, text: &str) -> Result<Vec<(String, String)>, Vec<String>> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut errors = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed = line.split_at_checked(64).and_then(|(digest, rest)| {
+            let digest_ok = digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            let name = rest
+                .strip_prefix("  ")
+                .or_else(|| rest.strip_prefix(" *"))?;
+            (digest_ok && !name.is_empty()).then(|| (digest.to_string(), name.to_string()))
+        });
+        let Some((digest, name)) = parsed else {
+            errors.push(format!(
+                "{label}:{number}: not `<sha256>  <name>`: {line:?}"
+            ));
+            continue;
+        };
+        let relative = name.strip_prefix("./").unwrap_or(&name);
+        if relative.starts_with('/') || relative.split('/').any(|part| part == "..") {
+            errors.push(format!(
+                "{label}:{number}: name escapes the manifest's directory: {name:?}"
+            ));
+            continue;
+        }
+        if entries.iter().any(|(_, seen)| *seen == name) {
+            errors.push(format!("{label}:{number}: {name} is listed more than once"));
+            continue;
+        }
+        entries.push((digest, name));
+    }
+    if errors.is_empty() {
+        Ok(entries)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Verifies the canonical oracle directory against its manifest without
+/// touching the filesystem (`hash_of` supplies a file's digest, `None` when it
+/// is missing), so every failure branch is unit-testable:
+/// - the manifest parses, lists only plain names (no subdirectories), and is
+///   not empty;
+/// - every listed file exists as a regular file with exactly the listed
+///   digest;
+/// - every entry in the directory (`listing`: files, subdirectories and
+///   symlinks alike; it may include the manifest itself) is listed, so nothing
+///   unpinned can sit beside the oracles;
+/// - every independent pin `(name, digest)` the gate already holds is listed
+///   with that same digest, so the manifest cannot be edited to bless a
+///   changed oracle.
+///
+/// Returns the parsed entries on success, or every violation found.
+fn oracle_manifest_violations(
+    label: &str,
+    manifest_text: &str,
+    listing: &[String],
+    pins: &[(&str, String)],
+    hash_of: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, String)>, Vec<String>> {
+    let entries = parse_sha256sums(label, manifest_text)?;
+    let mut violations = Vec::new();
+    if entries.is_empty() {
+        violations.push(format!("{label}: missing or empty manifest"));
+    }
+    let manifest_name = file_name_of(label);
+    for (digest, name) in &entries {
+        if name.contains('/') {
+            violations.push(format!(
+                "{label}: {name} is not a plain file name in this directory"
+            ));
+            continue;
+        }
+        match hash_of(name) {
+            None => violations.push(format!(
+                "{label}: listed oracle is missing or not a regular file: {name}"
+            )),
+            Some(actual) if actual != *digest => violations.push(format!(
+                "{label}: {name}: expected {digest}, observed {actual}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for name in listing {
+        if name != manifest_name && !entries.iter().any(|(_, listed)| listed == name) {
+            violations.push(format!(
+                "{label}: {name} is in the oracle directory but not pinned"
+            ));
+        }
+    }
+    for (name, pinned) in pins {
+        match entries.iter().find(|(_, listed)| listed == name) {
+            None => violations.push(format!("{label}: does not list the pinned oracle {name}")),
+            Some((digest, _)) if digest != pinned => violations.push(format!(
+                "{label}: lists {name} as {digest}, but the gate pins {pinned}"
+            )),
+            Some(_) => {}
+        }
+    }
+    if violations.is_empty() {
+        Ok(entries)
+    } else {
+        Err(violations)
+    }
+}
+
+/// Verifies the v0.3.0 snapshot's own manifest without touching the
+/// filesystem: it parses and is not empty, and every listed file exists with
+/// its listed digest. The snapshot's copies of canonical files must be
+/// byte-identical to them, so it never holds a divergent second oracle: an
+/// entry whose file name is a canonical file's name (`./git-history.bundle`)
+/// must carry that file's digest, and every entry under `oracle/` (where the
+/// APK is named differently) must carry the digest of some canonical file.
+/// `canonical` is the canonical manifest's `(digest, name)` entries. Returns
+/// every violation found.
+fn snapshot_manifest_violations(
+    label: &str,
+    manifest_text: &str,
+    canonical: &[(String, String)],
+    hash_of: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let entries = match parse_sha256sums(label, manifest_text) {
+        Ok(entries) => entries,
+        Err(errors) => return errors,
+    };
+    let mut violations = Vec::new();
+    if entries.is_empty() {
+        violations.push(format!("{label}: missing or empty manifest"));
+    }
+    for (digest, name) in &entries {
+        let relative = name.strip_prefix("./").unwrap_or(name);
+        match hash_of(relative) {
+            None => violations.push(format!("{label}: listed file is missing: {name}")),
+            Some(actual) if actual != *digest => violations.push(format!(
+                "{label}: {name}: expected {digest}, observed {actual}"
+            )),
+            Some(_) => {}
+        }
+        let same_name = canonical
+            .iter()
+            .find(|(_, canonical_name)| canonical_name == file_name_of(relative));
+        if let Some((canonical_digest, canonical_name)) = same_name {
+            if canonical_digest != digest {
+                violations.push(format!(
+                    "{label}: {name} is listed as {digest}, but {ORACLE_DIR}/{canonical_name} is {canonical_digest}"
+                ));
+            }
+        } else if relative.starts_with("oracle/")
+            && !canonical
+                .iter()
+                .any(|(canonical_digest, _)| canonical_digest == digest)
+        {
+            violations.push(format!(
+                "{label}: {name} is not a copy of any canonical oracle in {ORACLE_DIR}/"
+            ));
+        }
+    }
+    violations
 }
 
 /// Evaluates one oracle file's SHA-256 against its expected value, without
@@ -4329,7 +4601,7 @@ fn ndk_aarch64_clang(ndk_root: &Path) -> Result<PathBuf, String> {
 /// into `workdir` (via `jar`, part of the JDK the live tier already needs) and
 /// refuses to proceed unless it matches the pinned immutable-oracle SHA-256.
 fn extract_and_pin_oracle_so(root: &Path, workdir: &Path) -> Result<PathBuf, String> {
-    let zip = root.join(MIGRATION_ZIP_NAME);
+    let zip = root.join(MIGRATION_ZIP_PATH);
     if !zip.is_file() {
         return Err(format!("missing migration archive: {}", zip.display()));
     }
@@ -5920,6 +6192,245 @@ mod tests {
                 "bleradar-jni".to_string(),
             ])
         );
+    }
+
+    const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn fake_hashes<'a>(files: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            files
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, h)| (*h).to_string())
+        }
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_sha256sums_reads_text_and_binary_mode_lines() {
+        let text = format!("{DIGEST_A}  a.apk\n\n{DIGEST_B} *./oracle/b.so\n");
+        assert_eq!(
+            parse_sha256sums("m", &text),
+            Ok(vec![
+                (DIGEST_A.to_string(), "a.apk".to_string()),
+                (DIGEST_B.to_string(), "./oracle/b.so".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_sha256sums_rejects_malformed_escaping_and_duplicate_lines() {
+        let upper = DIGEST_A.to_ascii_uppercase();
+        let text = format!(
+            "{upper}  a\n{DIGEST_A} a\nshort  a\n{DIGEST_A}  ../x\n{DIGEST_A}  /etc/x\n{DIGEST_A}  a\n{DIGEST_B}  a\n"
+        );
+        let errors = parse_sha256sums("m", &text).unwrap_err();
+        assert_eq!(errors.len(), 6, "{errors:#?}");
+        assert!(errors[0].starts_with("m:1: not"));
+        assert!(errors[1].starts_with("m:2: not"));
+        assert!(errors[2].starts_with("m:3: not"));
+        assert!(errors[3].contains("escapes"));
+        assert!(errors[4].contains("escapes"));
+        assert!(errors[5].contains("m:7: a is listed more than once"));
+    }
+
+    #[test]
+    fn oracle_manifest_passes_when_every_file_is_pinned_and_matches() {
+        let text = format!("{DIGEST_A}  a.apk\n{DIGEST_B}  b.so\n");
+        let files = [("a.apk", DIGEST_A), ("b.so", DIGEST_B)];
+        let result = oracle_manifest_violations(
+            "oracle/SHA256SUMS",
+            &text,
+            &names(&["SHA256SUMS", "a.apk", "b.so"]),
+            &[("a.apk", DIGEST_A.to_string())],
+            fake_hashes(&files),
+        );
+        assert_eq!(result.map(|e| e.len()), Ok(2));
+    }
+
+    #[test]
+    fn oracle_manifest_fails_on_a_changed_a_missing_and_an_unpinned_file() {
+        let text = format!("{DIGEST_A}  a.apk\n{DIGEST_B}  gone.zip\n");
+        let files = [("a.apk", DIGEST_B), ("extra.bin", DIGEST_A)];
+        let errors = oracle_manifest_violations(
+            "oracle/SHA256SUMS",
+            &text,
+            &names(&["SHA256SUMS", "a.apk", "extra.bin"]),
+            &[],
+            fake_hashes(&files),
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                format!("oracle/SHA256SUMS: a.apk: expected {DIGEST_A}, observed {DIGEST_B}"),
+                "oracle/SHA256SUMS: listed oracle is missing or not a regular file: gone.zip"
+                    .to_string(),
+                "oracle/SHA256SUMS: extra.bin is in the oracle directory but not pinned"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_manifest_cannot_be_edited_to_bless_a_changed_oracle() {
+        // The file and its manifest line agree, but both moved off the gate's
+        // independent pin: that is a changed oracle, not a valid manifest.
+        let text = format!("{DIGEST_B}  a.apk\n");
+        let files = [("a.apk", DIGEST_B)];
+        let errors = oracle_manifest_violations(
+            "oracle/SHA256SUMS",
+            &text,
+            &names(&["SHA256SUMS", "a.apk"]),
+            &[
+                ("a.apk", DIGEST_A.to_string()),
+                ("lib.so", DIGEST_A.to_string()),
+            ],
+            fake_hashes(&files),
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                format!(
+                    "oracle/SHA256SUMS: lists a.apk as {DIGEST_B}, but the gate pins {DIGEST_A}"
+                ),
+                "oracle/SHA256SUMS: does not list the pinned oracle lib.so".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_manifest_rejects_an_empty_manifest_and_nested_names() {
+        let errors =
+            oracle_manifest_violations("oracle/SHA256SUMS", "", &[], &[], |_| None).unwrap_err();
+        assert_eq!(
+            errors,
+            vec!["oracle/SHA256SUMS: missing or empty manifest".to_string()]
+        );
+        let text = format!("{DIGEST_A}  sub/a.apk\n");
+        let errors = oracle_manifest_violations("oracle/SHA256SUMS", &text, &[], &[], |_| {
+            Some(DIGEST_A.to_string())
+        })
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                "oracle/SHA256SUMS: sub/a.apk is not a plain file name in this directory"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_manifest_requires_matching_files_and_canonical_copies() {
+        let text = format!(
+            "{DIGEST_A}  ./README.md\n{DIGEST_A}  ./oracle/copy.apk\n{DIGEST_B}  ./oracle/other.so\n{DIGEST_B}  ./git-history.bundle\n"
+        );
+        let files = [
+            ("README.md", DIGEST_A),
+            ("oracle/copy.apk", DIGEST_A),
+            ("oracle/other.so", DIGEST_B),
+            ("git-history.bundle", DIGEST_B),
+        ];
+        let canonical = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(d, n)| ((*d).to_string(), (*n).to_string()))
+                .collect()
+        };
+        assert!(
+            snapshot_manifest_violations(
+                "s",
+                &text,
+                &canonical(&[(DIGEST_A, "a.apk"), (DIGEST_B, "git-history.bundle")]),
+                fake_hashes(&files)
+            )
+            .is_empty()
+        );
+        let errors = snapshot_manifest_violations(
+            "s",
+            &text,
+            &canonical(&[(DIGEST_A, "a.apk"), (DIGEST_A, "git-history.bundle")]),
+            fake_hashes(&files[..2]),
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "s: listed file is missing: ./oracle/other.so".to_string(),
+                "s: ./oracle/other.so is not a copy of any canonical oracle in oracle/".to_string(),
+                "s: listed file is missing: ./git-history.bundle".to_string(),
+                format!(
+                    "s: ./git-history.bundle is listed as {DIGEST_B}, but oracle/git-history.bundle is {DIGEST_A}"
+                ),
+            ]
+        );
+        assert_eq!(
+            snapshot_manifest_violations("s", "", &[], |_| None),
+            vec!["s: missing or empty manifest".to_string()]
+        );
+    }
+
+    #[test]
+    fn oracle_listing_and_hashing_reject_directories_and_symlinks() {
+        let dir = unique_temp_dir("oracle_listing_rejects_directories_and_symlinks");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.bin"), b"abc").unwrap();
+        std::os::unix::fs::symlink(dir.join("a.bin"), dir.join("link.bin")).unwrap();
+        let listing = list_entry_names(&dir).unwrap();
+        assert_eq!(listing, vec!["a.bin", "link.bin", "sub"]);
+        assert_eq!(
+            hash_file_if_present(&dir.join("a.bin")),
+            Some(sha256::to_hex(&sha256::sha256(b"abc")))
+        );
+        assert_eq!(hash_file_if_present(&dir.join("link.bin")), None);
+        assert_eq!(hash_file_if_present(&dir.join("sub")), None);
+        let digest = sha256::to_hex(&sha256::sha256(b"abc"));
+        let text = format!("{digest}  a.bin\n{digest}  link.bin\n");
+        let errors = oracle_manifest_violations("o/SHA256SUMS", &text, &listing, &[], |name| {
+            hash_file_if_present(&dir.join(name))
+        })
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                "o/SHA256SUMS: listed oracle is missing or not a regular file: link.bin"
+                    .to_string(),
+                "o/SHA256SUMS: sub is in the oracle directory but not pinned".to_string(),
+            ]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn committed_oracle_paths_are_canonical_and_pinned_by_the_committed_manifest() {
+        for path in [ORACLE_APK_PATH, MIGRATION_ZIP_PATH] {
+            assert!(
+                path.starts_with("oracle/"),
+                "{path} is outside the canonical oracle directory"
+            );
+            assert!(
+                !path.contains(' ') && !path.contains("(1)"),
+                "{path:?} is not a clean file name"
+            );
+        }
+        let root = repo_root_from(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("repo root");
+        let text = fs::read_to_string(root.join(ORACLE_DIR).join(ORACLE_MANIFEST_NAME))
+            .expect("oracle/SHA256SUMS is committed");
+        let entries = parse_sha256sums("oracle/SHA256SUMS", &text).expect("manifest parses");
+        for (name, pinned) in [
+            (file_name_of(MIGRATION_ZIP_PATH), MIGRATION_ZIP_SHA256),
+            (file_name_of(ORACLE_SO_ZIP_ENTRY), ORACLE_SO_SHA256),
+        ] {
+            assert!(
+                entries.iter().any(|(d, n)| n == name && d == pinned),
+                "oracle/SHA256SUMS does not pin {name} at {pinned}"
+            );
+        }
     }
 
     #[test]
