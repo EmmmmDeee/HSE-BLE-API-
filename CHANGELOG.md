@@ -12,7 +12,7 @@ This changelog starts at #30. For earlier history, see
 
 ## [Unreleased]
 
-Changes merged to `main` after the `v1.0.0` pre-release (see `[1.0.0]` below
+Changes merged to `main` after the `v1.0.0` release (see `[1.0.0]` below
 for what that release contains).
 
 ### Added
@@ -40,7 +40,13 @@ for what that release contains).
   (`PINNED_EMULATOR_FILES`) matches the pinned archive. Otherwise it fetches
   the pinned archive over HTTPS only, checks the archive's size and SHA-256,
   swaps it in and verifies the result again. If the swap or that check fails,
-  the previous emulator is restored and the error says what is where (#49).
+  the previous emulator is restored, or else left at `.emulator-pin-previous`
+  and named in the error (#49).
+- The `release` workflow retries each release-asset download in
+  `verify_assets` up to 3 times (5 s, then 15 s backoff), after a transient
+  HTTP 500 on an asset download failed run 37055587714. Verification stays
+  strict: only the download is retried, every checksum and content check
+  still fails at once, and the job fails if all three attempts fail (#56).
 - The emulator proof judges the first launch's update check on that check's
   log lines accumulated from the launch on, so the logcat ring buffer can no
   longer rotate them out before they are read. The guest's logcat buffers are
@@ -55,15 +61,16 @@ for what that release contains).
 
 ## [1.0.0] - 2026-09-29
 
-Published on 2026-09-29 (UTC) as a GitHub pre-release, from #36's merge
-commit `98c4b08`. Until #50, the release workflow re-pointed the `v1.0.0` tag
-and replaced its assets on later `main` builds, since the app version
-stayed 1.0.0. Its last move was to `8a0ab6e` (#44), and the release's APK
-asset (598,755 bytes, SHA-256 `4e97dbd3…07d7`) is byte-identical to the APK
-committed at `8a0ab6e`. The published `v1.0.0` therefore contains everything
-through #44: #30–#44 and #48 below. Since #50 the workflow no longer touches
-`v1.0.0`. Main builds are published as `main-<sha7>` pre-releases (the first
-was `main-49b0c97`) and the rolling `latest` pre-release.
+Published on 2026-09-29 (UTC) as a stable release marked Latest, from `98c4b08`; converted to a pre-release on 2026-10-01 (18:24–18:34 UTC), after which `releases/latest` answers 404.
+`98c4b08` is #36's merge commit. Until #50, the release workflow re-pointed
+the `v1.0.0` tag and replaced its assets on later `main` builds, since the app
+version stayed 1.0.0. Its last move was to `8a0ab6e` (#44), on 2026-10-01 just
+before the conversion, and the release's APK asset (598,755 bytes, SHA-256
+`4e97dbd3…07d7`) is byte-identical to the APK committed at `8a0ab6e`. The
+published `v1.0.0` therefore contains everything through #44: #30–#44 and #48
+below. Since #50 the workflow no longer touches `v1.0.0`. Main builds are
+published as `main-<sha7>` pre-releases (the first was `main-49b0c97`) and the
+rolling `latest` pre-release.
 
 ### Added
 
