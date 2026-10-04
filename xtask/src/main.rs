@@ -788,12 +788,20 @@ fn snapshot_tree_listing(snapshot_dir: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-/// The paths (relative to `dir`) of every file in git's index under
-/// `dir/sub`, whatever `.gitignore` says. Fails closed: a `git` that cannot
-/// run or answer is an error, never an empty list.
+/// The paths (relative to `dir`) of every file git tracks under `dir/sub`,
+/// whatever `.gitignore` says. "Tracked" means present in git's index (what
+/// `git ls-files` lists), not in `HEAD`: a file staged but not yet committed
+/// counts.
+///
+/// Needs `git` on `PATH` and `dir` inside a git checkout; git finds the
+/// repository from `dir` alone (see [`git_in`]). Fails closed: when `git`
+/// cannot be run (not on `PATH`) or exits non-zero (`dir` is not in a git
+/// checkout: status 128, "not a git repository"), the result is an error
+/// that fails `check-oracle-integrity`, never an empty list. Inside a
+/// checkout of a different repository, git answers from that repository's
+/// index.
 fn git_tracked_file_names(dir: &Path, sub: &str) -> Result<Vec<String>, String> {
-    let output = Command::new("git")
-        .current_dir(dir)
+    let output = git_in(dir)
         .args(["ls-files", "-z", "--", sub])
         .output()
         .map_err(|e| format!("git ls-files in {}: {e}", dir.display()))?;
@@ -811,6 +819,27 @@ fn git_tracked_file_names(dir: &Path, sub: &str) -> Result<Vec<String>, String> 
         .filter(|name| !name.is_empty())
         .map(|name| String::from_utf8_lossy(name).into_owned())
         .collect())
+}
+
+/// Variables in the caller's environment that make git read another
+/// repository, work tree or index than the one it finds from its working
+/// directory. With any of them pointing elsewhere (another repository, or an
+/// index file that does not exist), `git ls-files` answers with an empty list
+/// and exit status 0, which would let a tracked file go unlisted. Other `GIT_*`
+/// variables are left alone: `ls-files` does not read objects, and a bad
+/// `GIT_OBJECT_DIRECTORY` or `GIT_CEILING_DIRECTORIES` only makes git fail,
+/// which already fails closed.
+const GIT_REDIRECT_ENV_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+
+/// A `git` command run in `dir`, with [`GIT_REDIRECT_ENV_VARS`] removed from
+/// the environment it inherits, so it finds the repository from `dir`.
+fn git_in(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(dir);
+    for var in GIT_REDIRECT_ENV_VARS {
+        command.env_remove(var);
+    }
+    command
 }
 
 /// The `/`-separated path (relative to `dir`) of every non-directory entry
@@ -6658,24 +6687,87 @@ mod tests {
         fs::write(snap.join("README.md"), b"r").unwrap();
         fs::write(snap.join("target/debug/build-output.bin"), b"b").unwrap();
         fs::write(snap.join("target/forced.bin"), b"f").unwrap();
-        let git = |args: &[&str]| {
-            let out = Command::new("git")
-                .current_dir(&dir)
-                .args(args)
-                .output()
-                .expect("git runs");
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        git(&["init", "-q"]);
-        git(&["add", "-f", "snap/target/forced.bin"]);
+        git_ok(&dir, &["init", "-q"]);
+        git_ok(&dir, &["add", "-f", "snap/target/forced.bin"]);
         assert_eq!(
             snapshot_tree_listing(&snap).unwrap(),
             vec!["README.md", "target/forced.bin"]
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Runs `git args` in `dir` and requires it to succeed. Built by
+    /// [`git_in`], so a test run from a git hook (which sets `GIT_DIR` and
+    /// `GIT_INDEX_FILE`) never writes to the repository running the hook.
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = git_in(dir).args(args).output().expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Set only in the child process that
+    /// `snapshot_listing_ignores_git_redirects_inherited_from_the_environment`
+    /// re-runs itself as: the snapshot directory the child lists.
+    const HOSTILE_GIT_ENV_CHILD_SNAPSHOT: &str = "XTASK_TEST_HOSTILE_GIT_ENV_SNAPSHOT";
+
+    #[test]
+    fn snapshot_listing_ignores_git_redirects_inherited_from_the_environment() {
+        // Review nit N4: git honours GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE
+        // from the caller's environment. Pointed at another repository or
+        // work tree, or at an index that does not exist, `git ls-files`
+        // answered with an empty list and exit 0, so a force-added file under
+        // the snapshot's `target/` went unlisted and the gate passed. The
+        // inherited environment can only be set safely in a new process, so
+        // this test re-runs itself (and only itself) with each variable set.
+        if let Some(snap) = env::var_os(HOSTILE_GIT_ENV_CHILD_SNAPSHOT) {
+            assert_eq!(
+                snapshot_tree_listing(Path::new(&snap)).unwrap(),
+                vec!["README.md", "target/forced.bin"]
+            );
+            return;
+        }
+        let dir = unique_temp_dir("snapshot_listing_ignores_git_redirects");
+        let repo = dir.join("repo");
+        let snap = repo.join("snap");
+        let decoy = dir.join("decoy");
+        fs::create_dir_all(snap.join("target")).unwrap();
+        fs::create_dir_all(&decoy).unwrap();
+        fs::write(repo.join(".gitignore"), b"/snap/target\n").unwrap();
+        fs::write(snap.join("README.md"), b"r").unwrap();
+        fs::write(snap.join("target/forced.bin"), b"f").unwrap();
+        git_ok(&repo, &["init", "-q"]);
+        git_ok(&repo, &["add", "-f", "snap/target/forced.bin"]);
+        git_ok(&decoy, &["init", "-q"]);
+        let decoy_git_dir = decoy.join(".git");
+        let missing_index = dir.join("no-such-index");
+        let hostile = [
+            ("GIT_INDEX_FILE", missing_index.as_path()),
+            ("GIT_DIR", decoy_git_dir.as_path()),
+            ("GIT_WORK_TREE", decoy.as_path()),
+        ];
+        let mut cases: Vec<Vec<(&str, &Path)>> = hostile.iter().map(|&var| vec![var]).collect();
+        cases.push(hostile.to_vec());
+        for case in cases {
+            let out = Command::new(env::current_exe().expect("test binary path"))
+                .args([
+                    "tests::snapshot_listing_ignores_git_redirects_inherited_from_the_environment",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(HOSTILE_GIT_ENV_CHILD_SNAPSHOT, &snap)
+                .envs(case.iter().copied())
+                .output()
+                .expect("the test binary re-runs");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "with {case:?} in the environment:\n{stdout}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 
