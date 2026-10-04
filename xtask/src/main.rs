@@ -701,7 +701,7 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
         .expect("the snapshot manifest path has a parent directory")
         .to_path_buf();
     let snapshot_text = fs::read_to_string(&snapshot_manifest).unwrap_or_default();
-    let snapshot_listing = list_tree_file_names(&snapshot_dir, &[SNAPSHOT_BUILD_DIR])?;
+    let snapshot_listing = snapshot_tree_listing(&snapshot_dir)?;
     failures.extend(snapshot_manifest_violations(
         MIGRATION_SNAPSHOT_MANIFEST_PATH,
         &snapshot_text,
@@ -773,6 +773,44 @@ fn list_entry_names(dir: &Path) -> Result<Vec<String>, String> {
     }
     names.sort();
     Ok(names)
+}
+
+/// Every file the snapshot's manifest must account for: what is on disk,
+/// with the gitignored local build directory [`SNAPSHOT_BUILD_DIR`] skipped,
+/// plus every file git tracks under that directory. The skip is for local
+/// build output only; a file force-added there (`git add -f`) is committed
+/// content and must be listed like any other.
+fn snapshot_tree_listing(snapshot_dir: &Path) -> Result<Vec<String>, String> {
+    let mut names = list_tree_file_names(snapshot_dir, &[SNAPSHOT_BUILD_DIR])?;
+    names.extend(git_tracked_file_names(snapshot_dir, SNAPSHOT_BUILD_DIR)?);
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// The paths (relative to `dir`) of every file in git's index under
+/// `dir/sub`, whatever `.gitignore` says. Fails closed: a `git` that cannot
+/// run or answer is an error, never an empty list.
+fn git_tracked_file_names(dir: &Path, sub: &str) -> Result<Vec<String>, String> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["ls-files", "-z", "--", sub])
+        .output()
+        .map_err(|e| format!("git ls-files in {}: {e}", dir.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files in {} failed ({}): {}",
+            dir.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect())
 }
 
 /// The `/`-separated path (relative to `dir`) of every non-directory entry
@@ -6606,6 +6644,39 @@ mod tests {
                 "dir/SHA256SUMS: ./oracle/evil.so is in the snapshot but not listed".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn snapshot_listing_skips_build_output_but_counts_files_git_tracks_in_the_build_dir() {
+        // A file force-added under the snapshot's gitignored `target/`
+        // (`git add -f`) is committed content, not build output: it must be
+        // in the listing, so an unlisted one fails `check-oracle-integrity`.
+        let dir = unique_temp_dir("snapshot_listing_counts_tracked_build_dir_files");
+        let snap = dir.join("snap");
+        fs::create_dir_all(snap.join("target/debug")).unwrap();
+        fs::write(dir.join(".gitignore"), b"/snap/target\n").unwrap();
+        fs::write(snap.join("README.md"), b"r").unwrap();
+        fs::write(snap.join("target/debug/build-output.bin"), b"b").unwrap();
+        fs::write(snap.join("target/forced.bin"), b"f").unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-f", "snap/target/forced.bin"]);
+        assert_eq!(
+            snapshot_tree_listing(&snap).unwrap(),
+            vec!["README.md", "target/forced.bin"]
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

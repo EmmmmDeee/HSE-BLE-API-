@@ -49,7 +49,8 @@ checks it by hand).
 6. Every file in the snapshot is listed in its `SHA256SUMS`: a file, symlink
    or anything else that is not listed fails, at any depth. Only the manifest
    itself and the gitignored local build directory `target/` at the
-   snapshot's top level are skipped.
+   snapshot's top level are skipped, and of `target/` only what git does not
+   track: a file force-added there (`git add -f`) must be listed too.
 
 Each branch was falsified before merging: a byte appended to `classes.dex`, a
 stray unpinned file in `oracle/`, an unpinned subdirectory, an unpinned
