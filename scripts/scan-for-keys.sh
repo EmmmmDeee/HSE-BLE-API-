@@ -3,12 +3,23 @@
 # Used by .github/workflows/release.yml on the exact artifact it publishes. It reports only the location and rule; it never prints the matched value.
 # Fails closed (exit 2, and never prints "0 finding(s)") when it cannot actually scan: no path given, a
 # path that does not exist, a required tool (strings, python3, …) missing, a file it cannot read or
-# decode, or zero files scanned in total. A scan that silently scanned nothing must not pass as clean.
+# decode, a grep/strings/python3 call that errors (grep: status >= 2) rather than answering, or zero
+# files scanned in total. A scan that silently scanned nothing must not pass as clean.
 set -uo pipefail
 hits=0
 scanned=0
 die() { echo "::error::scan-for-keys: $1 — refusing to report a result (fail closed)" >&2; exit 2; }
 report() { echo "::error file=$1::key-like content ($2) — value withheld"; hits=$((hits+1)); }
+# matches <file> <rule> <regex>: report <rule> if <regex> matches $data outside the allow-list.
+# grep's status 1 means "no match"; anything >= 2 is an error and must never be read as "no finding",
+# so each grep runs on its own (no pipeline, whose status would hide the first grep's error).
+matches() {
+  local m rc
+  m=$(grep -Eo -- "$3" <<<"$data"); rc=$?
+  case $rc in 0) ;; 1) return 0 ;; *) die "grep failed (status $rc) matching rule '$2' on '$1'" ;; esac
+  grep -Evq -- "$ALLOW_RE" <<<"$m"; rc=$?
+  case $rc in 0) report "$1" "$2" ;; 1) ;; *) die "grep failed (status $rc) applying the allow-list on '$1'" ;; esac
+}
 # 0) Preconditions: every tool the scan depends on, and every path it was asked to scan.
 for tool in find grep cat strings python3 mktemp; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool '$tool' not found on PATH"
@@ -34,15 +45,21 @@ ALLOW_RE='insert_[a-z0-9_]+_here|AKIAIOSFODNN7EXAMPLE|<value>|\$\{?[A-Z_]+'
 list=$(mktemp) || die "cannot create a temporary file"
 trap 'rm -f "$list"' EXIT
 find "$@" -type f -print0 >"$list" || die "find failed on the given paths"
-while IFS= read -r -d '' f; do
+# The list is read once, in find's order (no sort, no second pass), on fd 3 so nothing in the loop body
+# can consume entries from it; every entry either counts as scanned or exits 2.
+while IFS= read -r -d '' -u 3 f; do
   [ -r "$f" ] || die "cannot read '$f'"
-  # binaries: scan the printable strings; text: scan as-is
-  if grep -Iq . "$f" 2>/dev/null; then text=1; src=(cat -- "$f"); else text=0; src=(strings -n 8 -- "$f"); fi
+  # binaries: scan the printable strings; text: scan as-is. grep -I: 0 = text, 1 = binary or empty,
+  # >= 2 = error, which fails closed instead of silently skipping the text-only entropy check.
+  grep -Iq . "$f"; rc=$?
+  case $rc in
+    0) text=1; src=(cat -- "$f") ;;
+    1) text=0; src=(strings -n 8 -- "$f") ;;
+    *) die "grep failed (status $rc) classifying '$f' as text or binary" ;;
+  esac
   data=$("${src[@]}") || die "'${src[0]}' failed on '$f'"
-  for p in "${PATTERNS[@]}"; do
-    if grep -Eo -- "$p" <<<"$data" | grep -Evq -- "$ALLOW_RE"; then report "$f" "$p"; fi
-  done
-  if grep -Eo -- "$NAME_RE" <<<"$data" | grep -Evq -- "$ALLOW_RE"; then report "$f" "HUNTSMAN_* credential assignment"; fi
+  for p in "${PATTERNS[@]}"; do matches "$f" "$p" "$p"; done
+  matches "$f" "HUNTSMAN_* credential assignment" "$NAME_RE"
   # 3) Value digests of the credentials that earlier builds shipped (src/util/keys/constants.rs COMPROMISED_EMBEDDED_DIGESTS):
   #    a regression that re-embeds one shows up as its digest. (Done in the cargo test
   #    `no_credential_is_embedded_in_the_build`; here we add a high-entropy heuristic for text logs/artifacts only.)
@@ -61,7 +78,7 @@ PY2
     while read -r ent; do [ -n "$ent" ] && report "$f" "high-entropy string (H=$ent)"; done <<<"$ents"
   fi
   scanned=$((scanned+1))
-done <"$list"
+done 3<"$list"
 [ "$scanned" -gt 0 ] || die "zero files were scanned"
 echo "files scanned: $scanned"
 echo "key scan: $hits finding(s)"
