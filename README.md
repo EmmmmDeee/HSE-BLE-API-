@@ -554,6 +554,7 @@ cargo xtask                        # list subcommands
 cargo xtask parity-report          # regenerate docs/PARITY_COVERAGE.md
 cargo xtask check-dependency-policy
 cargo xtask check-oracle-integrity
+cargo xtask capability             # read-only: the seed_v0() capability ledger's derived status and corroboration/regression health per technique, counts_by_status() and verified_count() (bleradar-core); writes only stdout
 cargo xtask apk-inventory <apk>
 cargo xtask native-abi <lib.so>
 cargo xtask dex-classes <classes.dex>
