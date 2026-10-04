@@ -42,11 +42,26 @@ for what that release contains).
   swaps it in and verifies the result again. If the swap or that check fails,
   the previous emulator is restored, or else left at `.emulator-pin-previous`
   and named in the error (#49).
-- The `release` workflow retries each release-asset download in
-  `verify_assets` up to 3 times (5 s, then 15 s backoff), after a transient
-  HTTP 500 on an asset download failed run 37055587714. Verification stays
-  strict: only the download is retried, every checksum and content check
-  still fails at once, and the job fails if all three attempts fail (#56).
+- The `release` workflow tries each release-asset download in
+  `verify_assets` up to 3 times in total (2 retries, 5 s and then 15 s
+  apart), after a transient HTTP 500 on an asset download failed run
+  37055587714. Verification stays strict: only the download is retried, every
+  checksum and content check still fails at once, and the job fails if all
+  three attempts fail (#56).
+- `scripts/scan-for-keys.sh`, the release key scan, fails closed. It exits 2
+  and prints no finding count when it cannot actually scan: a required tool
+  (`find`, `grep`, `cat`, `strings`, `python3`, `mktemp`) is missing, no path
+  is given or a given path does not exist, a file cannot be read, a `find`,
+  `grep`, `cat`, `strings` or `python3` call errors, or zero files were
+  scanned. Before, each of these could end in `key scan: 0 finding(s)` and
+  exit 0. Rule matches no longer run through a `grep -Eo | grep -Evq`
+  pipeline: once the matches passed 64 KiB, the second grep's early exit
+  killed the first with SIGPIPE and `pipefail` read that as no finding, so a
+  log with 3000 copies of a token passed. Each grep now runs on its own and
+  its exit status is checked. Files are listed NUL-delimited, so a path with
+  spaces or newlines is no longer skipped, and a clean scan also prints
+  `files scanned: N`. `scripts/test-scan-for-keys.sh` checks this behaviour as
+  a step of the `gates` job (#55).
 - The emulator proof judges the first launch's update check on that check's
   log lines accumulated from the launch on, so the logcat ring buffer can no
   longer rotate them out before they are read. The guest's logcat buffers are
@@ -61,7 +76,9 @@ for what that release contains).
 
 ## [1.0.0] - 2026-09-29
 
-Published on 2026-09-29 (UTC) as a stable release marked Latest, from `98c4b08`; converted to a pre-release on 2026-10-01 (18:24–18:34 UTC), after which `releases/latest` answers 404.
+Published on 2026-09-29 (UTC) as a stable release marked Latest, from
+`98c4b08`; converted to a pre-release on 2026-10-01 (18:24–18:34 UTC), after
+which `releases/latest` answers 404.
 `98c4b08` is #36's merge commit. Until #50, the release workflow re-pointed
 the `v1.0.0` tag and replaced its assets on later `main` builds, since the app
 version stayed 1.0.0. Its last move was to `8a0ab6e` (#44), on 2026-10-01 just
