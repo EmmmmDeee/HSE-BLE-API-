@@ -81,7 +81,12 @@ for what that release contains).
   exits 2. Links that stay inside the roots are followed and scanned as their
   targets, and a file reached through several links is scanned and reported
   once. Before, every symlink was skipped silently, so a linked token file
-  passed as `0 finding(s)`. `realpath` is now a required tool (#57).
+  passed as `0 finding(s)`. `realpath` is now a required tool. A finding
+  names the path it was reached by, followed by `(resolved: <path>)` when a
+  symlink was crossed (a root given as a symlink keeps its own name), and
+  never the matched value. A relative root is passed on as `./<root>`, so a
+  root named `-L`, `-H` or `-P` is scanned as a path instead of being parsed
+  as a `find` option, which walked `.` instead (#57).
 - The emulator proof judges the first launch's update check on that check's
   log lines accumulated from the launch on, so the logcat ring buffer can no
   longer rotate them out before they are read. The guest's logcat buffers are

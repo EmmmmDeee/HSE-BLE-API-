@@ -5,6 +5,8 @@
 # could silently scan nothing (missing tool, missing path, nothing to scan, a grep or strings call that
 # errors instead of answering, a broken or looping symlink) exits 2 without "0 finding(s)", and so does
 # a symlink that resolves outside every scanned root (it must never be followed or read).
+# No case may print a planted value; a finding names its path, plus " (resolved: <target>)" when it was
+# reached through a symlink. Roots named -L, -H and -P are scanned as paths, never parsed as find options.
 # Symlink fixtures live only inside this script's mktemp dir, and every case runs under timeout: a scan
 # that wanders off (a link to / once walked the whole filesystem) fails the case instead of hanging.
 set -uo pipefail
@@ -13,7 +15,8 @@ scanner="$here/scan-for-keys.sh"
 bash_bin=$(command -v bash)
 timeout_bin=$(command -v timeout) || { echo "test-scan-for-keys: 'timeout' not found on PATH"; exit 1; }
 limit=60   # seconds per case; the symlink cases below run under 10
-work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+work=$(mktemp -d) || exit 1; trap 'rm -rf "$work"' EXIT
+work=$(cd "$work" && pwd -P) || exit 1   # physical, so the expected "(resolved: …)" paths below are exact
 fail=0
 token="gh""p_$(printf 'A1b2C3d4E5%.0s' 1 2 3 4)"   # GitHub-token shape, 40 chars after the prefix
 # 34 distinct alphanumerics (H ~ 5.1 bits/char): caught only by the text-only entropy check, no token rule.
@@ -28,7 +31,17 @@ run() {
   if [ "$got" -eq 124 ] || [ "$got" -eq 137 ]; then echo "FAIL $name: timed out after ${limit}s (exit $got), want $want"; fail=1; return 1; fi
   if [ "$got" -ne "$want" ]; then echo "FAIL $name: exit $got, want $want"; printf '    %s\n' "$out"; fail=1; return 1; fi
   if [ "$want" -eq 2 ] && grep -q "finding(s)" <<<"$out"; then echo "FAIL $name: a scanner error still printed a finding count"; fail=1; return 1; fi
+  if grep -qF -e "$token" -e "$highent" <<<"$out"; then echo "FAIL $name: the output contains a planted value"; fail=1; return 1; fi
   echo "ok   $name (exit $got)"
+}
+# has <name> <text>... / lacks <name> <text>...: the last run's output must contain every <text> / none.
+has() {
+  local name=$1 t; shift
+  for t in "$@"; do grep -qF -- "$t" <<<"$out" || { echo "FAIL $name: output lacks '$t'"; printf '    %s\n' "$out"; fail=1; }; done
+}
+lacks() {
+  local name=$1 t; shift
+  for t in "$@"; do ! grep -qF -- "$t" <<<"$out" || { echo "FAIL $name: output has '$t'"; printf '    %s\n' "$out"; fail=1; }; done
 }
 # A PATH holding only the scanner's tools, minus the one named.
 path_without() {
@@ -99,6 +112,16 @@ echo "token=$token" >"$work/inlink/root/real/secret.log"; ln -s real "$work/inli
 echo "token=$token" >"$work/argroot/real/inner/secret.log"; ln -s ../real/inner "$work/argroot/real/peer"
 ln -s argroot/real "$work/rootlink"
 echo "token=$token" >"$work/dedup/root/data/secret.log"; ln -s data "$work/dedup/root/l1"; ln -s data "$work/dedup/root/l2"
+# A link in one root to a token file in another: links/ is walked first, so the finding is the link's.
+mkdir -p "$work/show/links" "$work/show/data"
+echo "token=$token" >"$work/show/data/secret.log"; ln -s ../data/secret.log "$work/show/links/link.log"
+# Roots named like find's options, scanned from dash/cwd: walking "." instead would reach out.log, a
+# link outside it (exit 2), and sib/, next to decoy tokens in the parent and a sibling directory.
+mkdir -p "$work/dash/cwd/-L" "$work/dash/cwd/-H" "$work/dash/cwd/-P" "$work/dash/sibling"
+echo "token=$token" >"$work/dash/cwd/-L/secret.log"
+echo "nothing secret" >"$work/dash/cwd/-H/clean.txt"; echo "nothing secret" >"$work/dash/cwd/-P/clean.txt"
+echo "token=$token" >"$work/dash/decoy.log"; echo "token=$token" >"$work/dash/sibling/decoy.log"
+ln -s ../decoy.log "$work/dash/cwd/out.log"; ln -s ../sibling "$work/dash/cwd/sib"
 
 if run "clean tree passes" 0 "" "$work/clean"; then
   if ! { grep -qx "key scan: 0 finding(s)" <<<"$out" && grep -qx "files scanned: 2" <<<"$out"; }; then
@@ -158,6 +181,38 @@ if run "a file reached through 2 links is scanned once" 1 "" "$work/dedup/root";
     echo "FAIL dedup report (want 2 files, 1 finding):"; printf '    %s\n' "$out"; fail=1
   fi
 fi
+# A finding names the path it was walked by, and the resolved path when a symlink was crossed.
+if run "a symlink's finding names the link and its resolved target" 1 "" "$work/show/links" "$work/show/data"; then
+  has "link finding" "$work/show/links/link.log (resolved: $work/show/data/secret.log): key-like content" "key scan: 1 finding(s)"
+fi
+if run "a finding reached through no symlink names the path alone" 1 "" "$work/text"; then
+  has "plain finding" "::error file=$work/text/log.txt::$work/text/log.txt: key-like content"
+  lacks "plain finding" "(resolved:"
+fi
+# rootlink -> argroot/real holds inner/secret.log and peer -> ../real/inner: either may be walked first.
+if run "a symlink root's finding names the link path and its target" 1 "" "$work/rootlink"; then
+  grep -qF -e "$work/rootlink/inner/secret.log (resolved: $work/argroot/real/inner/secret.log): key-like" \
+    -e "$work/rootlink/peer/secret.log (resolved: $work/argroot/real/inner/secret.log): key-like" <<<"$out" ||
+    { echo "FAIL symlink-root finding (want rootlink/…/secret.log (resolved: …/argroot/real/inner/secret.log)):"; printf '    %s\n' "$out"; fail=1; }
+fi
+# Relative roots are walked as ./<root> and reported as given.
+prev=$PWD; cd "$work/dash/cwd" || exit 1
+if run "a root named -L is a path: its token is found, . is not walked" 1 "" -L; then
+  has "-L root" "::error file=-L/secret.log::-L/secret.log: key-like content" "files scanned: 1" "key scan: 1 finding(s)"
+  lacks "-L root" "decoy" "out.log" "(resolved:"
+fi
+if run "roots named -H and -P are paths, not find options" 0 "" -H -P; then
+  has "-H -P roots" "files scanned: 2" "key scan: 0 finding(s)"
+fi
+if run "roots named -L, -H and -P together scan only themselves" 1 "" -L -H -P; then
+  has "-L -H -P roots" "files scanned: 3" "key scan: 1 finding(s)"
+  lacks "-L -H -P roots" "decoy" "out.log"
+fi
+if run "a root given as ./-L is reported as given" 1 "" ./-L; then
+  has "./-L root" "::error file=./-L/secret.log::./-L/secret.log: key-like content"
+fi
+run "an empty path argument fails closed (never walks .)" 2 "" ""
+cd "$prev" || exit 1
 
 [ "$fail" -eq 0 ] && echo "scan-for-keys: all cases passed" || echo "scan-for-keys: FAILED"
 exit "$fail"
