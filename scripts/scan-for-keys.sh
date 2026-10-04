@@ -3,13 +3,34 @@
 # Used by .github/workflows/release.yml on the exact artifact it publishes. It reports only the location and rule; it never prints the matched value.
 # Fails closed (exit 2, and never prints "0 finding(s)") when it cannot actually scan: no path given, a
 # path that does not exist, a required tool (strings, python3, …) missing, a file it cannot read or
-# decode, a grep/strings/python3 call that errors (grep: status >= 2) rather than answering, or zero
-# files scanned in total. A scan that silently scanned nothing must not pass as clean.
+# decode, a grep/strings/python3 call that errors (grep: status >= 2) rather than answering, a broken
+# or looping symlink, a symlink that resolves outside every scanned root, or zero files scanned in total.
+# A scan that silently scanned nothing, or scanned something it was not given, must not pass as clean.
+# Symlinks are contained: every root is resolved with realpath -e, then every symlink under the roots is
+# listed without following it and resolved; one that is broken, loops or resolves outside every root
+# exits 2 before anything is followed. Only then are links followed (find -L), so a linked file or
+# directory inside the roots is scanned as its target, once per resolved path however many links reach it.
+# Output: one line per finding, "::error file=<reported>::<location>: key-like content (<rule>) — value
+# withheld". <reported> is the path as walked from the root as given (a root given as a symlink keeps its
+# own name). <location> is <reported> alone when that path, made absolute without expanding any symlink
+# (realpath -s), is the resolved path; otherwise, i.e. whenever a symlink was crossed on the way, it is
+# "<reported> (resolved: <realpath -e of it>)". A file reached through several paths is reported once,
+# under the first path the walk reached it by. The matched value itself is never printed.
+# A relative root is handed to find, realpath and test as "./<root>", so a root named -L, -H, -P, ! or (
+# is a path, never an option or an expression; that "./" is stripped again from every reported path.
+# Binaries are scanned as 7-bit strings plus UTF-16LE and UTF-16BE strings: compiled Android XML
+# (AndroidManifest.xml, <meta-data android:value=…>) keeps its string pool in UTF-16LE.
 set -uo pipefail
+# One byte = one character for grep's classes and ranges, whatever the runner's locale.
+export LC_ALL=C
 hits=0
 scanned=0
 die() { echo "::error::scan-for-keys: $1 — refusing to report a result (fail closed)" >&2; exit 2; }
-report() { echo "::error file=$1::key-like content ($2) — value withheld"; hits=$((hits+1)); }
+# report <reported> <rule>: one finding for the file being scanned, located as described in the header.
+report() {
+  [ -n "$where" ] || locate
+  echo "::error file=$1::$where: key-like content ($2) — value withheld"; hits=$((hits+1))
+}
 # matches <file> <rule> <regex>: report <rule> if <regex> matches $data outside the allow-list.
 # grep's status 1 means "no match"; anything >= 2 is an error and must never be read as "no finding",
 # so each grep runs on its own (no pipeline, whose status would hide the first grep's error).
@@ -21,12 +42,54 @@ matches() {
   case $rc in 0) report "$1" "$2" ;; 1) ;; *) die "grep failed (status $rc) applying the allow-list on '$1'" ;; esac
 }
 # 0) Preconditions: every tool the scan depends on, and every path it was asked to scan.
-for tool in find grep cat strings python3 mktemp; do
+for tool in find grep cat strings python3 mktemp realpath; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool '$tool' not found on PATH"
 done
 python3 -c 'import math,re,sys,collections' >/dev/null 2>&1 || die "python3 cannot run the entropy check"
 [ "$#" -gt 0 ] || die "no path to scan was given"
-for p in "$@"; do [ -e "$p" ] || die "path '$p' does not exist"; done
+# walk: each root as handed to find, realpath and test — absolute unchanged, relative as ./<root>.
+walk=()
+for p in "$@"; do
+  case $p in /*) q=$p ;; *) q=./$p ;; esac
+  { [ -n "$p" ] && [ -e "$q" ]; } || die "path '$p' does not exist"
+  walk+=("$q")
+done
+tmpd=$(mktemp -d) || die "cannot create a temporary directory"
+trap 'rm -rf -- "$tmpd"' EXIT
+# resolve <path>: set $resolved to realpath -e of <path>, or return 1 if it is broken or loops.
+# NUL-delimited through a file and read -d '', never $(…), which would drop a trailing newline of the path.
+resolve() {
+  resolved=
+  realpath -e -z -- "$1" >"$tmpd/resolved" || return 1
+  IFS= read -r -d '' resolved <"$tmpd/resolved" || return 1
+  [ -n "$resolved" ]
+}
+# Each root as resolved: containment is judged against these. A root that is itself a symlink is walked
+# under its own name (find -H / -L follow a link given as a starting point) and contains its target.
+roots=()
+for q in "${walk[@]}"; do
+  resolve "$q" || die "cannot resolve path '${q#./}' (broken or looping symlink?)"
+  roots+=("$resolved")
+done
+# inside <resolved path>: whole path segments only, so /a/root-evil is not inside /a/root. A root that
+# resolves to / contains everything (and "$r/" would be '//', which nothing starts with).
+inside() {
+  local r
+  for r in "${roots[@]}"; do
+    [ "$r" = / ] && return 0
+    [ "$1" = "$r" ] && return 0
+    case $1 in "$r"/*) return 0 ;; esac
+  done
+  return 1
+}
+# Symlink pre-pass, before anything is followed: list every link under the roots without following it
+# (find -H: only a root given as a link, already resolved above, is followed) and resolve each. A link to / or /proc/self/environ, a ../.. escape or a link to a prefix
+# sibling (root-evil next to root) exits 2 here instead of being walked or read.
+find -H "${walk[@]}" -type l -print0 >"$tmpd/links" || die "find failed listing the symlinks under the given paths"
+while IFS= read -r -d '' -u 3 l; do
+  resolve "$l" || die "symlink '${l#./}' is broken or loops"
+  inside "$resolved" || die "symlink '${l#./}' resolves to '$resolved', outside every scanned root"
+done 3<"$tmpd/links"
 # 1) Known provider token shapes.
 PATTERNS=(
   '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}'  # OpenAI-style (word boundary: not 'xtask-sdk-…')
@@ -42,31 +105,56 @@ PATTERNS=(
 NAME_RE='HUNTSMAN_[A-Z0-9_]*(KEY|TOKEN|SECRET|USER|ID|GUID)[\"'"'"' ]*[:=][\"'"'"' ]*[A-Za-z0-9_./+-]{12,}'
 ALLOW_RE='insert_[a-z0-9_]+_here|AKIAIOSFODNN7EXAMPLE|<value>|\$\{?[A-Z_]+'
 # NUL-delimited, so a path with spaces or newlines is scanned whole instead of being word-split and skipped.
-list=$(mktemp) || die "cannot create a temporary file"
-trap 'rm -f "$list"' EXIT
-find "$@" -type f -print0 >"$list" || die "find failed on the given paths"
+# -L follows the (now vetted) symlinks inside directories; find itself fails on a symlink or directory
+# loop. Under -L only a dangling symlink is still -type l: it is listed so the loop exits 2 on it.
+find -L "${walk[@]}" \( -type f -o -type l \) -print0 >"$tmpd/list" || die "find failed on the given paths"
 # The list is read once, in find's order (no sort, no second pass), on fd 3 so nothing in the loop body
-# can consume entries from it; every entry either counts as scanned or exits 2.
+# can consume entries from it; every entry either counts as scanned, is skipped as a file already
+# scanned under another path (same resolved path), or exits 2.
+# locate: set $where, the current file's location in a finding: <reported>, or "<reported> (resolved:
+# <path>)" when realpath -s of the walked path (absolute, no symlink expanded) is not its resolved path.
+locate() {
+  local lexical
+  realpath -s -z -- "$f" >"$tmpd/lexical" || die "cannot make '$rep' absolute"
+  IFS= read -r -d '' lexical <"$tmpd/lexical" || die "cannot make '$rep' absolute"
+  if [ "$lexical" = "$src" ]; then where=$rep; else where="$rep (resolved: $src)"; fi
+}
+declare -A seen=()
 while IFS= read -r -d '' -u 3 f; do
-  [ -r "$f" ] || die "cannot read '$f'"
+  rep=${f#./} where=   # reported as given: without the ./ a relative root is walked under
+  if [ -L "$f" ] && [ ! -e "$f" ]; then die "broken symlink '$rep'"; fi
+  # Defence in depth: every file the walk reaches must resolve inside the roots too. It is then read
+  # through that resolved path, and a file reached through N links is scanned (and reported) once.
+  resolve "$f" || die "cannot resolve '$rep' (broken or looping symlink?)"
+  inside "$resolved" || die "'$rep' resolves to '$resolved', outside every scanned root"
+  [ -z "${seen[$resolved]+x}" ] || continue
+  seen[$resolved]=1
+  src=$resolved
+  [ -f "$src" ] || die "'$rep' is not a regular file"
+  [ -r "$src" ] || die "cannot read '$rep'"
   # binaries: scan the printable strings; text: scan as-is. grep -I: 0 = text, 1 = binary or empty,
   # >= 2 = error, which fails closed instead of silently skipping the text-only entropy check.
-  grep -Iq . "$f"; rc=$?
+  grep -Iq -- . "$src"; rc=$?
   case $rc in
-    0) text=1; src=(cat -- "$f") ;;
-    1) text=0; src=(strings -n 8 -- "$f") ;;
-    *) die "grep failed (status $rc) classifying '$f' as text or binary" ;;
+    0) text=1
+       data=$(cat -- "$src") || die "'cat' failed on '$rep'" ;;
+    1) text=0
+       # 7-bit, then 16-bit little-endian and big-endian strings; each must succeed.
+       data=$(strings -n 8 -- "$src") || die "'strings' failed on '$rep'"
+       d16=$(strings -e l -n 8 -- "$src") || die "'strings -e l' (UTF-16LE) failed on '$rep'"
+       data+=$'\n'$d16
+       d16=$(strings -e b -n 8 -- "$src") || die "'strings -e b' (UTF-16BE) failed on '$rep'"
+       data+=$'\n'$d16 ;;
+    *) die "grep failed (status $rc) classifying '$rep' as text or binary" ;;
   esac
-  data=$("${src[@]}") || die "'${src[0]}' failed on '$f'"
-  for p in "${PATTERNS[@]}"; do matches "$f" "$p" "$p"; done
-  matches "$f" "HUNTSMAN_* credential assignment" "$NAME_RE"
-  # 3) Value digests of the credentials that earlier builds shipped (src/util/keys/constants.rs COMPROMISED_EMBEDDED_DIGESTS):
-  #    a regression that re-embeds one shows up as its digest. (Done in the cargo test
-  #    `no_credential_is_embedded_in_the_build`; here we add a high-entropy heuristic for text logs/artifacts only.)
+  for p in "${PATTERNS[@]}"; do matches "$rep" "$p" "$p"; done
+  matches "$rep" "HUNTSMAN_* credential assignment" "$NAME_RE"
+  # 3) A high-entropy heuristic, for text logs/artifacts only. (This repository keeps no digest list of
+  #    previously shipped credentials, so there is no digest check here.)
   if [ "$text" -eq 1 ]; then
     # Split on path/identifier separators and score each segment of 24+ chars that mixes upper,
     # lower and digits at >= 4.2 bits/char. That catches base64/alnum secrets but not paths, snake_case or hex digests.
-    ents=$(python3 - "$f" <<'PY2'
+    ents=$(python3 - "$src" <<'PY2'
 import math,re,sys,collections
 txt=open(sys.argv[1],errors="ignore").read()
 for seg in set(re.findall(r"[A-Za-z0-9+]{24,}", txt)):
@@ -74,11 +162,11 @@ for seg in set(re.findall(r"[A-Za-z0-9+]{24,}", txt)):
     c=collections.Counter(seg); n=len(seg); h=-sum(v/n*math.log2(v/n) for v in c.values())
     if h>=4.2: print(f"{h:.2f}")
 PY2
-) || die "the python3 entropy check failed on '$f'"
-    while read -r ent; do [ -n "$ent" ] && report "$f" "high-entropy string (H=$ent)"; done <<<"$ents"
+) || die "the python3 entropy check failed on '$rep'"
+    while read -r ent; do [ -n "$ent" ] && report "$rep" "high-entropy string (H=$ent)"; done <<<"$ents"
   fi
   scanned=$((scanned+1))
-done 3<"$list"
+done 3<"$tmpd/list"
 [ "$scanned" -gt 0 ] || die "zero files were scanned"
 echo "files scanned: $scanned"
 echo "key scan: $hits finding(s)"
