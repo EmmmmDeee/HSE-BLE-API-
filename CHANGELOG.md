@@ -62,6 +62,18 @@ for what that release contains).
   spaces or newlines is no longer skipped, and a clean scan also prints
   `files scanned: N`. `scripts/test-scan-for-keys.sh` checks this behaviour as
   a step of the `gates` job (#55).
+- `scripts/scan-for-keys.sh` also scans the UTF-16LE and UTF-16BE strings
+  of binaries (`strings -e l` / `-e b`, each failing closed), so a key in
+  compiled Android XML such as `AndroidManifest.xml` is no longer missed.
+  Symlinks are contained: every root is resolved with `realpath -e` (a root
+  given as a symlink is scanned as its target), and every symlink under the
+  roots is resolved without being followed before the walk. A link that is
+  broken, loops or resolves outside every scanned root (for example to `/`,
+  `/proc/self/environ`, a `../..` escape or a `root-evil` sibling of `root`)
+  exits 2. Links that stay inside the roots are followed and scanned as their
+  targets, and a file reached through several links is scanned and reported
+  once. Before, every symlink was skipped silently, so a linked token file
+  passed as `0 finding(s)`. `realpath` is now a required tool (#57).
 - The emulator proof judges the first launch's update check on that check's
   log lines accumulated from the launch on, so the logcat ring buffer can no
   longer rotate them out before they are read. The guest's logcat buffers are

@@ -3,22 +3,29 @@
 # Planted tokens are assembled at run time, so this file itself never contains a key-shaped string.
 # Exit 0 only if every case behaves: findings exit 1, a clean scan exits 0, and every way the scan
 # could silently scan nothing (missing tool, missing path, nothing to scan, a grep or strings call that
-# errors instead of answering, a broken or looping symlink) exits 2 without "0 finding(s)".
+# errors instead of answering, a broken or looping symlink) exits 2 without "0 finding(s)", and so does
+# a symlink that resolves outside every scanned root (it must never be followed or read).
+# Symlink fixtures live only inside this script's mktemp dir, and every case runs under timeout: a scan
+# that wanders off (a link to / once walked the whole filesystem) fails the case instead of hanging.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 scanner="$here/scan-for-keys.sh"
 bash_bin=$(command -v bash)
+timeout_bin=$(command -v timeout) || { echo "test-scan-for-keys: 'timeout' not found on PATH"; exit 1; }
+limit=60   # seconds per case; the symlink cases below run under 10
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 fail=0
 token="gh""p_$(printf 'A1b2C3d4E5%.0s' 1 2 3 4)"   # GitHub-token shape, 40 chars after the prefix
 # 34 distinct alphanumerics (H ~ 5.1 bits/char): caught only by the text-only entropy check, no token rule.
 highent=$(printf '%s' {A..L} {a..l} {0..9})
 
-# run <name> <expected-exit> <env PATH or ""> <args...>; sets $out
+# run <name> <expected-exit> <env PATH or ""> <args...>; sets $out. A case that outlives $limit seconds fails.
 run() {
   local name=$1 want=$2 path=$3; shift 3
-  if [ -n "$path" ]; then out=$(PATH="$path" "$bash_bin" "$scanner" "$@" 2>&1); else out=$("$bash_bin" "$scanner" "$@" 2>&1); fi
+  if [ -n "$path" ]; then out=$(PATH="$path" "$timeout_bin" -k 5 "$limit" "$bash_bin" "$scanner" "$@" 2>&1)
+  else out=$("$timeout_bin" -k 5 "$limit" "$bash_bin" "$scanner" "$@" 2>&1); fi
   local got=$?
+  if [ "$got" -eq 124 ] || [ "$got" -eq 137 ]; then echo "FAIL $name: timed out after ${limit}s (exit $got), want $want"; fail=1; return 1; fi
   if [ "$got" -ne "$want" ]; then echo "FAIL $name: exit $got, want $want"; printf '    %s\n' "$out"; fail=1; return 1; fi
   if [ "$want" -eq 2 ] && grep -q "finding(s)" <<<"$out"; then echo "FAIL $name: a scanner error still printed a finding count"; fail=1; return 1; fi
   echo "ok   $name (exit $got)"
@@ -26,7 +33,7 @@ run() {
 # A PATH holding only the scanner's tools, minus the one named.
 path_without() {
   local d="$work/bin-without-$1"; mkdir -p "$d"
-  for t in find grep cat strings python3 mktemp rm; do
+  for t in find grep cat strings python3 mktemp realpath rm; do
     [ "$t" = "$1" ] && continue
     ln -sf "$(command -v "$t")" "$d/$t"
   done
@@ -75,6 +82,23 @@ ln -s outside/secret.log "$work/arglink.log"
 echo "nothing secret" >"$work/dirlink/clean.txt"; ln -s "../outside/linked dir" "$work/dirlink/sub"
 echo "nothing secret" >"$work/broken/clean.txt"; ln -s does-not-exist "$work/broken/dangling.log"
 echo "nothing secret" >"$work/loop/clean.txt"; ln -s self.log "$work/loop/self.log"
+# Containment: a link may only resolve inside one of the scanned roots. Each escape below points at
+# something the scan was not given (a planted token, /proc, /), so following it is the bug.
+mkdir -p "$work/esc-proc" "$work/esc-file" "$work/pfx/root" "$work/pfx/root-evil" "$work/esc-slash"
+mkdir -p "$work/esc-dir" "$work/rel/root/sub" "$work/rel/loot" "$work/inlink/root/real" "$work/argroot/real/inner"
+mkdir -p "$work/dedup/root/data"
+for d in esc-proc esc-file pfx/root esc-slash esc-dir rel/root inlink/root dedup/root; do echo "nothing secret" >"$work/$d/clean.txt"; done
+ln -s /proc/self/environ "$work/esc-proc/env"
+ln -s ../outside/secret.log "$work/esc-file/link.log"
+echo "token=$token" >"$work/pfx/root-evil/secret.log"; ln -s ../root-evil "$work/pfx/root/evil"   # /…/root-evil is not under /…/root
+ln -s / "$work/esc-slash/everything"
+ln -s "../outside/linked dir" "$work/esc-dir/sub"
+echo "token=$token" >"$work/rel/loot/secret.log"; ln -s ../../loot/secret.log "$work/rel/root/sub/up.log"
+echo "token=$token" >"$work/inlink/root/real/secret.log"; ln -s real "$work/inlink/root/via"
+# A root given as a symlink is resolved first: its inner link resolves under real/, not under the link's name.
+echo "token=$token" >"$work/argroot/real/inner/secret.log"; ln -s ../real/inner "$work/argroot/real/peer"
+ln -s argroot/real "$work/rootlink"
+echo "token=$token" >"$work/dedup/root/data/secret.log"; ln -s data "$work/dedup/root/l1"; ln -s data "$work/dedup/root/l2"
 
 if run "clean tree passes" 0 "" "$work/clean"; then
   if ! { grep -qx "key scan: 0 finding(s)" <<<"$out" && grep -qx "files scanned: 2" <<<"$out"; }; then
@@ -103,11 +127,37 @@ run "UTF-16LE token in a binary is found"            1 "" "$work/utf16le"
 run "UTF-16BE token in a binary is found"            1 "" "$work/utf16be"
 run "strings -e l error fails closed"                2 "$(path_fails_on strings "-e l")" "$work/clean"
 run "strings -e b error fails closed"                2 "$(path_fails_on strings "-e b")" "$work/clean"
-run "symlink to a token file inside a dir is found"  1 "" "$work/links"
+limit=10
+# The links in links/ and dirlink/ point into outside/, so outside/ is scanned as a root too: a link
+# between two scanned roots is inside. Scanned alone, the same kind of link is an escape (below).
+run "symlink to a token file inside a dir is found"  1 "" "$work/links" "$work/outside"
 run "symlink to a token file as an argument is found" 1 "" "$work/arglink.log" "$work/clean/readme.txt"
-run "symlink to a dir holding a token is found"      1 "" "$work/dirlink"
+run "symlink to a dir holding a token is found"      1 "" "$work/dirlink" "$work/outside"
 run "broken symlink inside a dir fails closed"       2 "" "$work/broken"
 run "looping symlink inside a dir fails closed"      2 "" "$work/loop"
+run "no realpath on PATH fails closed"               2 "$(path_without realpath)" "$work/clean"
+run "symlink to /proc/self/environ fails closed"     2 "" "$work/esc-proc"
+run "symlink to a file outside the roots fails closed" 2 "" "$work/esc-file"
+run "symlink to a prefix sibling (root-evil) fails closed" 2 "" "$work/pfx/root"
+# Quickly, and without walking anything: exiting 2 only after find -L has walked the whole filesystem
+# (or hanging until the timeout) still fails this case.
+if run "symlink to / fails closed quickly"           2 "" "$work/esc-slash"; then
+  if grep -qF -- "$work/esc-slash/everything/" <<<"$out"; then echo "FAIL symlink to /: the scan walked beneath the link"; fail=1; fi
+fi
+run "symlink to a dir outside the roots fails closed" 2 "" "$work/esc-dir"
+run "../.. relative symlink escape fails closed"     2 "" "$work/rel/root"
+if run "symlink to a dir inside the root is scanned" 1 "" "$work/inlink/root"; then
+  grep -qx "key scan: 1 finding(s)" <<<"$out" || { echo "FAIL inside-link report (want 1 finding):"; printf '    %s\n' "$out"; fail=1; }
+fi
+if run "symlink given as the root is resolved and scanned" 1 "" "$work/rootlink"; then
+  grep -qx "key scan: 1 finding(s)" <<<"$out" || { echo "FAIL symlink-root report (want 1 finding):"; printf '    %s\n' "$out"; fail=1; }
+fi
+# One token, reached as data/ and through two links to it: one file, one finding (not three).
+if run "a file reached through 2 links is scanned once" 1 "" "$work/dedup/root"; then
+  if ! { grep -qx "key scan: 1 finding(s)" <<<"$out" && grep -qx "files scanned: 2" <<<"$out"; }; then
+    echo "FAIL dedup report (want 2 files, 1 finding):"; printf '    %s\n' "$out"; fail=1
+  fi
+fi
 
 [ "$fail" -eq 0 ] && echo "scan-for-keys: all cases passed" || echo "scan-for-keys: FAILED"
 exit "$fail"

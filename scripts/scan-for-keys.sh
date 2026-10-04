@@ -4,8 +4,12 @@
 # Fails closed (exit 2, and never prints "0 finding(s)") when it cannot actually scan: no path given, a
 # path that does not exist, a required tool (strings, python3, …) missing, a file it cannot read or
 # decode, a grep/strings/python3 call that errors (grep: status >= 2) rather than answering, a broken
-# or looping symlink, or zero files scanned in total. A scan that silently scanned nothing must not pass as clean.
-# Symlinks are followed (find -L), so a linked file or directory is scanned as its target.
+# or looping symlink, a symlink that resolves outside every scanned root, or zero files scanned in total.
+# A scan that silently scanned nothing, or scanned something it was not given, must not pass as clean.
+# Symlinks are contained: every root is resolved with realpath -e, then every symlink under the roots is
+# listed without following it and resolved; one that is broken, loops or resolves outside every root
+# exits 2 before anything is followed. Only then are links followed (find -L), so a linked file or
+# directory inside the roots is scanned as its target, once per resolved path however many links reach it.
 # Binaries are scanned as 7-bit strings plus UTF-16LE and UTF-16BE strings: compiled Android XML
 # (AndroidManifest.xml, <meta-data android:value=…>) keeps its string pool in UTF-16LE.
 set -uo pipefail
@@ -26,12 +30,49 @@ matches() {
   case $rc in 0) report "$1" "$2" ;; 1) ;; *) die "grep failed (status $rc) applying the allow-list on '$1'" ;; esac
 }
 # 0) Preconditions: every tool the scan depends on, and every path it was asked to scan.
-for tool in find grep cat strings python3 mktemp; do
+for tool in find grep cat strings python3 mktemp realpath; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool '$tool' not found on PATH"
 done
 python3 -c 'import math,re,sys,collections' >/dev/null 2>&1 || die "python3 cannot run the entropy check"
 [ "$#" -gt 0 ] || die "no path to scan was given"
 for p in "$@"; do [ -e "$p" ] || die "path '$p' does not exist"; done
+tmpd=$(mktemp -d) || die "cannot create a temporary directory"
+trap 'rm -rf -- "$tmpd"' EXIT
+# resolve <path>: set $resolved to realpath -e of <path>, or return 1 if it is broken or loops.
+# NUL-delimited through a file and read -d '', never $(…), which would drop a trailing newline of the path.
+resolve() {
+  resolved=
+  realpath -e -z -- "$1" >"$tmpd/resolved" || return 1
+  IFS= read -r -d '' resolved <"$tmpd/resolved" || return 1
+  [ -n "$resolved" ]
+}
+# Each root as resolved (containment is judged against these) and as walked: the path as given,
+# unless it is itself a symlink, which is replaced by its target (a root that is a link is resolved, then scanned).
+roots=() walk=()
+for p in "$@"; do
+  resolve "$p" || die "cannot resolve path '$p' (broken or looping symlink?)"
+  roots+=("$resolved")
+  if [ -L "$p" ]; then walk+=("$resolved"); else walk+=("$p"); fi
+done
+# inside <resolved path>: whole path segments only, so /a/root-evil is not inside /a/root. A root that
+# resolves to / contains everything (and "$r/" would be '//', which nothing starts with).
+inside() {
+  local r
+  for r in "${roots[@]}"; do
+    [ "$r" = / ] && return 0
+    [ "$1" = "$r" ] && return 0
+    case $1 in "$r"/*) return 0 ;; esac
+  done
+  return 1
+}
+# Symlink pre-pass, before anything is followed: list every link under the roots without following it
+# (find -P) and resolve each. A link to / or /proc/self/environ, a ../.. escape or a link to a prefix
+# sibling (root-evil next to root) exits 2 here instead of being walked or read.
+find -P "${walk[@]}" -type l -print0 >"$tmpd/links" || die "find failed listing the symlinks under the given paths"
+while IFS= read -r -d '' -u 3 l; do
+  resolve "$l" || die "symlink '$l' is broken or loops"
+  inside "$resolved" || die "symlink '$l' resolves to '$resolved', outside every scanned root"
+done 3<"$tmpd/links"
 # 1) Known provider token shapes.
 PATTERNS=(
   '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}'  # OpenAI-style (word boundary: not 'xtask-sdk-…')
@@ -47,29 +88,36 @@ PATTERNS=(
 NAME_RE='HUNTSMAN_[A-Z0-9_]*(KEY|TOKEN|SECRET|USER|ID|GUID)[\"'"'"' ]*[:=][\"'"'"' ]*[A-Za-z0-9_./+-]{12,}'
 ALLOW_RE='insert_[a-z0-9_]+_here|AKIAIOSFODNN7EXAMPLE|<value>|\$\{?[A-Z_]+'
 # NUL-delimited, so a path with spaces or newlines is scanned whole instead of being word-split and skipped.
-# -L follows symlinks, both as arguments and inside directories; find itself fails on a symlink or
-# directory loop. Under -L only a dangling symlink is still -type l: it is listed so the loop exits 2 on it.
-list=$(mktemp) || die "cannot create a temporary file"
-trap 'rm -f "$list"' EXIT
-find -L "$@" \( -type f -o -type l \) -print0 >"$list" || die "find failed on the given paths"
+# -L follows the (now vetted) symlinks inside directories; find itself fails on a symlink or directory
+# loop. Under -L only a dangling symlink is still -type l: it is listed so the loop exits 2 on it.
+find -L "${walk[@]}" \( -type f -o -type l \) -print0 >"$tmpd/list" || die "find failed on the given paths"
 # The list is read once, in find's order (no sort, no second pass), on fd 3 so nothing in the loop body
-# can consume entries from it; every entry either counts as scanned or exits 2.
+# can consume entries from it; every entry either counts as scanned, is skipped as a file already
+# scanned under another path (same resolved path), or exits 2.
+declare -A seen=()
 while IFS= read -r -d '' -u 3 f; do
   if [ -L "$f" ] && [ ! -e "$f" ]; then die "broken symlink '$f'"; fi
-  [ -f "$f" ] || die "'$f' is not a regular file"
-  [ -r "$f" ] || die "cannot read '$f'"
+  # Defence in depth: every file the walk reaches must resolve inside the roots too. It is then read
+  # through that resolved path, and a file reached through N links is scanned (and reported) once.
+  resolve "$f" || die "cannot resolve '$f' (broken or looping symlink?)"
+  inside "$resolved" || die "'$f' resolves to '$resolved', outside every scanned root"
+  [ -z "${seen[$resolved]+x}" ] || continue
+  seen[$resolved]=1
+  src=$resolved
+  [ -f "$src" ] || die "'$f' is not a regular file"
+  [ -r "$src" ] || die "cannot read '$f'"
   # binaries: scan the printable strings; text: scan as-is. grep -I: 0 = text, 1 = binary or empty,
   # >= 2 = error, which fails closed instead of silently skipping the text-only entropy check.
-  grep -Iq . "$f"; rc=$?
+  grep -Iq . "$src"; rc=$?
   case $rc in
     0) text=1
-       data=$(cat -- "$f") || die "'cat' failed on '$f'" ;;
+       data=$(cat -- "$src") || die "'cat' failed on '$f'" ;;
     1) text=0
        # 7-bit, then 16-bit little-endian and big-endian strings; each must succeed.
-       data=$(strings -n 8 -- "$f") || die "'strings' failed on '$f'"
-       d16=$(strings -e l -n 8 -- "$f") || die "'strings -e l' (UTF-16LE) failed on '$f'"
+       data=$(strings -n 8 -- "$src") || die "'strings' failed on '$f'"
+       d16=$(strings -e l -n 8 -- "$src") || die "'strings -e l' (UTF-16LE) failed on '$f'"
        data+=$'\n'$d16
-       d16=$(strings -e b -n 8 -- "$f") || die "'strings -e b' (UTF-16BE) failed on '$f'"
+       d16=$(strings -e b -n 8 -- "$src") || die "'strings -e b' (UTF-16BE) failed on '$f'"
        data+=$'\n'$d16 ;;
     *) die "grep failed (status $rc) classifying '$f' as text or binary" ;;
   esac
@@ -80,7 +128,7 @@ while IFS= read -r -d '' -u 3 f; do
   if [ "$text" -eq 1 ]; then
     # Split on path/identifier separators and score each segment of 24+ chars that mixes upper,
     # lower and digits at >= 4.2 bits/char. That catches base64/alnum secrets but not paths, snake_case or hex digests.
-    ents=$(python3 - "$f" <<'PY2'
+    ents=$(python3 - "$src" <<'PY2'
 import math,re,sys,collections
 txt=open(sys.argv[1],errors="ignore").read()
 for seg in set(re.findall(r"[A-Za-z0-9+]{24,}", txt)):
@@ -92,7 +140,7 @@ PY2
     while read -r ent; do [ -n "$ent" ] && report "$f" "high-entropy string (H=$ent)"; done <<<"$ents"
   fi
   scanned=$((scanned+1))
-done 3<"$list"
+done 3<"$tmpd/list"
 [ "$scanned" -gt 0 ] || die "zero files were scanned"
 echo "files scanned: $scanned"
 echo "key scan: $hits finding(s)"
