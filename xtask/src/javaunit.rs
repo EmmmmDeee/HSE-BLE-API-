@@ -577,7 +577,7 @@ mod tests {
                 .contains("no report line")
         );
 
-        let mut disagreeing = good.clone();
+        let mut disagreeing = good;
         disagreeing.push_str("summary tests=1 failed=0\n");
         assert!(
             check_runner_report(&disagreeing)

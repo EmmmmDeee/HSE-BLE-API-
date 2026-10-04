@@ -445,10 +445,12 @@ fn random_operation_campaign_keeps_the_engine_consistent() {
                                     }
                                     let mut probe = engine.clone();
                                     match probe.correlate(left, right) {
-                                        Err(InfrastructureError::NoComparableObservations {
-                                            ..
-                                        })
-                                        | Err(InfrastructureError::ResourceLimit { .. }) => {}
+                                        Err(
+                                            InfrastructureError::NoComparableObservations {
+                                                ..
+                                            }
+                                            | InfrastructureError::ResourceLimit { .. },
+                                        ) => {}
                                         Ok(_) => {
                                             return Err(format!(
                                                 "correlate_all left comparable pair {forward} uncorrelated"
