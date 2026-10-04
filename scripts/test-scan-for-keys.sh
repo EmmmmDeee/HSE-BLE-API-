@@ -2,8 +2,8 @@
 # test-scan-for-keys.sh — behavioural test for scripts/scan-for-keys.sh.
 # Planted tokens are assembled at run time, so this file itself never contains a key-shaped string.
 # Exit 0 only if every case behaves: findings exit 1, a clean scan exits 0, and every way the scan
-# could silently scan nothing (missing tool, missing path, nothing to scan, a grep call that errors
-# instead of answering) exits 2 without "0 finding(s)".
+# could silently scan nothing (missing tool, missing path, nothing to scan, a grep or strings call that
+# errors instead of answering, a broken or looping symlink) exits 2 without "0 finding(s)".
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 scanner="$here/scan-for-keys.sh"
@@ -32,20 +32,30 @@ path_without() {
   done
   echo "$d"
 }
-# A PATH whose grep exits 2 (an error, not "no match") when called with first argument $1, and is the
-# real grep otherwise: -Iq = the text/binary classification, -Eo = a rule match, -Evq = the allow-list.
-path_grep_fails_on() {
-  local d="$work/bin-grep-fails-on$1" real; real=$(command -v grep); mkdir -p "$d"
-  cat >"$d/grep" <<WRAPPER
+# path_fails_on <tool> <args>: a PATH whose <tool> exits 2 (an error, not "no match") when its
+# arguments start with <args>, and is the real tool otherwise.
+path_fails_on() {
+  local d="$work/bin-$1-fails-on${2// /}" real; real=$(command -v "$1"); mkdir -p "$d"
+  cat >"$d/$1" <<WRAPPER
 #!$bash_bin
-if [ "\${1:-}" = "$1" ]; then echo "grep: injected error" >&2; exit 2; fi
+case "\$*" in "$2"*) echo "$1: injected error" >&2; exit 2 ;; esac
 exec "$real" "\$@"
 WRAPPER
-  chmod +x "$d/grep"
+  chmod +x "$d/$1"
   echo "$d:$PATH"
+}
+# grep's calls: -Iq = the text/binary classification, -Eo = a rule match, -Evq = the allow-list.
+path_grep_fails_on() { path_fails_on grep "$1"; }
+# utf16 <le|be> <text>: <text> as UTF-16 (ASCII input), built byte by byte.
+utf16() {
+  local i
+  for ((i = 0; i < ${#2}; i++)); do
+    if [ "$1" = le ]; then printf '%s\0' "${2:i:1}"; else printf '\0%s' "${2:i:1}"; fi
+  done
 }
 
 mkdir -p "$work/clean" "$work/text" "$work/bin" "$work/spaced dir" "$work/empty" "$work/entropy" "$work/many"
+mkdir -p "$work/utf16le" "$work/utf16be" "$work/outside/linked dir" "$work/links" "$work/dirlink" "$work/broken" "$work/loop"
 echo "hello world, nothing secret here" >"$work/clean/readme.txt"
 printf '\x00\x01\x02plain binary payload\x00\xff' >"$work/clean/blob.bin"
 echo "token=$token" >"$work/text/log.txt"
@@ -54,6 +64,17 @@ echo "token=$token" >"$work/spaced dir/a log.txt"
 echo "session=$highent" >"$work/entropy/session.log"
 # > 64 KiB of rule matches: a "grep -Eo | grep -Evq" pipeline under pipefail lost this finding to SIGPIPE.
 for _ in $(seq 3000); do echo "token=$token"; done >"$work/many/big.log"
+# UTF-16 strings in a binary (the string-pool encoding of compiled Android XML): 7-bit strings misses them.
+{ printf '\x00\x01\x02\xff'; utf16 le "token=$token"; printf '\x00\x00\xfe'; } >"$work/utf16le/AndroidManifest.xml"
+{ printf '\x00\x01\x02\xff'; utf16 be "token=$token"; printf '\x00\x00\xfe'; } >"$work/utf16be/resources.arsc"
+# Symlinks: to a token file from inside a directory, as an argument, to a directory, broken, looping.
+echo "token=$token" >"$work/outside/secret.log"
+echo "token=$token" >"$work/outside/linked dir/secret.log"
+echo "nothing secret" >"$work/links/clean.txt"; ln -s ../outside/secret.log "$work/links/link.log"
+ln -s outside/secret.log "$work/arglink.log"
+echo "nothing secret" >"$work/dirlink/clean.txt"; ln -s "../outside/linked dir" "$work/dirlink/sub"
+echo "nothing secret" >"$work/broken/clean.txt"; ln -s does-not-exist "$work/broken/dangling.log"
+echo "nothing secret" >"$work/loop/clean.txt"; ln -s self.log "$work/loop/self.log"
 
 if run "clean tree passes" 0 "" "$work/clean"; then
   if ! { grep -qx "key scan: 0 finding(s)" <<<"$out" && grep -qx "files scanned: 2" <<<"$out"; }; then
@@ -78,6 +99,15 @@ run "grep error matching: planted text token fails closed"          2 "$(path_gr
 run "grep error matching: planted binary token fails closed"        2 "$(path_grep_fails_on -Eo)" "$work/bin"
 run "grep error matching: high-entropy text secret fails closed"    2 "$(path_grep_fails_on -Eo)" "$work/entropy"
 run "grep error in allow-list: planted binary token fails closed"   2 "$(path_grep_fails_on -Evq)" "$work/bin"
+run "UTF-16LE token in a binary is found"            1 "" "$work/utf16le"
+run "UTF-16BE token in a binary is found"            1 "" "$work/utf16be"
+run "strings -e l error fails closed"                2 "$(path_fails_on strings "-e l")" "$work/clean"
+run "strings -e b error fails closed"                2 "$(path_fails_on strings "-e b")" "$work/clean"
+run "symlink to a token file inside a dir is found"  1 "" "$work/links"
+run "symlink to a token file as an argument is found" 1 "" "$work/arglink.log" "$work/clean/readme.txt"
+run "symlink to a dir holding a token is found"      1 "" "$work/dirlink"
+run "broken symlink inside a dir fails closed"       2 "" "$work/broken"
+run "looping symlink inside a dir fails closed"      2 "" "$work/loop"
 
 [ "$fail" -eq 0 ] && echo "scan-for-keys: all cases passed" || echo "scan-for-keys: FAILED"
 exit "$fail"

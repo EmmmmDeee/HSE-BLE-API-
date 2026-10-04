@@ -3,9 +3,14 @@
 # Used by .github/workflows/release.yml on the exact artifact it publishes. It reports only the location and rule; it never prints the matched value.
 # Fails closed (exit 2, and never prints "0 finding(s)") when it cannot actually scan: no path given, a
 # path that does not exist, a required tool (strings, python3, …) missing, a file it cannot read or
-# decode, a grep/strings/python3 call that errors (grep: status >= 2) rather than answering, or zero
-# files scanned in total. A scan that silently scanned nothing must not pass as clean.
+# decode, a grep/strings/python3 call that errors (grep: status >= 2) rather than answering, a broken
+# or looping symlink, or zero files scanned in total. A scan that silently scanned nothing must not pass as clean.
+# Symlinks are followed (find -L), so a linked file or directory is scanned as its target.
+# Binaries are scanned as 7-bit strings plus UTF-16LE and UTF-16BE strings: compiled Android XML
+# (AndroidManifest.xml, <meta-data android:value=…>) keeps its string pool in UTF-16LE.
 set -uo pipefail
+# One byte = one character for grep's classes and ranges, whatever the runner's locale.
+export LC_ALL=C
 hits=0
 scanned=0
 die() { echo "::error::scan-for-keys: $1 — refusing to report a result (fail closed)" >&2; exit 2; }
@@ -42,27 +47,36 @@ PATTERNS=(
 NAME_RE='HUNTSMAN_[A-Z0-9_]*(KEY|TOKEN|SECRET|USER|ID|GUID)[\"'"'"' ]*[:=][\"'"'"' ]*[A-Za-z0-9_./+-]{12,}'
 ALLOW_RE='insert_[a-z0-9_]+_here|AKIAIOSFODNN7EXAMPLE|<value>|\$\{?[A-Z_]+'
 # NUL-delimited, so a path with spaces or newlines is scanned whole instead of being word-split and skipped.
+# -L follows symlinks, both as arguments and inside directories; find itself fails on a symlink or
+# directory loop. Under -L only a dangling symlink is still -type l: it is listed so the loop exits 2 on it.
 list=$(mktemp) || die "cannot create a temporary file"
 trap 'rm -f "$list"' EXIT
-find "$@" -type f -print0 >"$list" || die "find failed on the given paths"
+find -L "$@" \( -type f -o -type l \) -print0 >"$list" || die "find failed on the given paths"
 # The list is read once, in find's order (no sort, no second pass), on fd 3 so nothing in the loop body
 # can consume entries from it; every entry either counts as scanned or exits 2.
 while IFS= read -r -d '' -u 3 f; do
+  if [ -L "$f" ] && [ ! -e "$f" ]; then die "broken symlink '$f'"; fi
+  [ -f "$f" ] || die "'$f' is not a regular file"
   [ -r "$f" ] || die "cannot read '$f'"
   # binaries: scan the printable strings; text: scan as-is. grep -I: 0 = text, 1 = binary or empty,
   # >= 2 = error, which fails closed instead of silently skipping the text-only entropy check.
   grep -Iq . "$f"; rc=$?
   case $rc in
-    0) text=1; src=(cat -- "$f") ;;
-    1) text=0; src=(strings -n 8 -- "$f") ;;
+    0) text=1
+       data=$(cat -- "$f") || die "'cat' failed on '$f'" ;;
+    1) text=0
+       # 7-bit, then 16-bit little-endian and big-endian strings; each must succeed.
+       data=$(strings -n 8 -- "$f") || die "'strings' failed on '$f'"
+       d16=$(strings -e l -n 8 -- "$f") || die "'strings -e l' (UTF-16LE) failed on '$f'"
+       data+=$'\n'$d16
+       d16=$(strings -e b -n 8 -- "$f") || die "'strings -e b' (UTF-16BE) failed on '$f'"
+       data+=$'\n'$d16 ;;
     *) die "grep failed (status $rc) classifying '$f' as text or binary" ;;
   esac
-  data=$("${src[@]}") || die "'${src[0]}' failed on '$f'"
   for p in "${PATTERNS[@]}"; do matches "$f" "$p" "$p"; done
   matches "$f" "HUNTSMAN_* credential assignment" "$NAME_RE"
-  # 3) Value digests of the credentials that earlier builds shipped (src/util/keys/constants.rs COMPROMISED_EMBEDDED_DIGESTS):
-  #    a regression that re-embeds one shows up as its digest. (Done in the cargo test
-  #    `no_credential_is_embedded_in_the_build`; here we add a high-entropy heuristic for text logs/artifacts only.)
+  # 3) A high-entropy heuristic, for text logs/artifacts only. (This repository keeps no digest list of
+  #    previously shipped credentials, so there is no digest check here.)
   if [ "$text" -eq 1 ]; then
     # Split on path/identifier separators and score each segment of 24+ chars that mixes upper,
     # lower and digits at >= 4.2 bits/char. That catches base64/alnum secrets but not paths, snake_case or hex digests.
