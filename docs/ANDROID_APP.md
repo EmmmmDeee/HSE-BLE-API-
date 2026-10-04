@@ -85,7 +85,7 @@ Reasons, in priority order:
   targets the same hardware class.
 - One cross-compile target (`aarch64-linux-android`, API 26 clang from the
   NDK) keeps `build-apk` deterministic and the package small. The committed
-  `HSE-BLE-Radar-arm64-v1.0.0.apk` (598,755 bytes at `8a0ab6e`) holds
+  `HSE-BLE-Radar-arm64-v1.0.0.apk` (598,755 bytes, last rebuilt in #43) holds
   670,353 bytes uncompressed in ten entries — `classes.dex` 103,628,
   `resources.arsc` 3,768, the manifest 7,232, two icon resources, the two
   backup-rule XMLs, `assets/dashboard.html` 27,870,

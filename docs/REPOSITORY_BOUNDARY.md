@@ -1,6 +1,6 @@
 # Repository boundary: the HSE BLE Radar and HSE
 
-Two repositories, two purposes. **They are currently independent: neither depends on the other.** This file was last checked against HSE `main` at `1ea6c304` (2026-10-02) and this repository's `main` at `8a0ab6e`.
+Two repositories, two purposes. **They are currently independent: neither depends on the other.** This file was last checked on 2026-10-04 against HSE `main` at `bd0ccad8` and this repository's `main` at `5aa9b94`.
 
 | | **HSE BLE Radar** — this repository | **Huntsman Search Engine (HSE)** — [`EmmmmDeee/Huntsman-Search-Engine-HSE-Termux-Android-Aarch64-Rust-`](https://github.com/EmmmmDeee/Huntsman-Search-Engine-HSE-Termux-Android-Aarch64-Rust-) |
 |---|---|---|
@@ -17,18 +17,22 @@ BLE Radar  ──────────── nothing from HSE, ever ───
 ```
 
 - The radar never depends on HSE. `cargo xtask check-dependency-policy` (a `gates` step) fails when `Cargo.lock` holds any crate outside the audited workspace set, and `xtask`'s `no_workspace_manifest_depends_on_hse` fails on any manifest that names an HSE crate or a git source.
-- HSE does not currently depend on `bleradar-core`. The HSE v1.41.0 monolith did: it took `bleradar-core` as a git dependency pinned to a commit and called the `sweep` rules from its `src/modules/signal_radar/`. That monolith is now read-only reference under HSE's `legacy/` and is not built. Current HSE has no `bleradar-core` dependency, no `src/modules/` and no `install.sh`.
+- HSE does not currently depend on `bleradar-core`: no HSE manifest that is built names it, and no HSE code outside `legacy/` refers to it. Current HSE has no `src/modules/` and no `install.sh`.
+- Earlier HSE trees did depend on it, through a git dependency pinned to a commit. They are history, not a current dependency, and the two snapshots used different rules:
+  - **`legacy/hse-monolith-v1.41.0/`** (a read-only reference copy in HSE, not built) pins `bleradar-core` rev `1e47bca`. That rev has no `sweep` module. The copy calls `bleradar_core::wifi_frequency_to_channel`, `proximity_label` and `ProximityBand` (`src/modules/signal_radar/wifi.rs`, `mod.rs`).
+  - **The last tree before HSE's reconstruction** (HSE `f0a1c64c^`, after HSE #657) pinned rev `98c4b08` and called the `sweep` rules listed below, `sighting_key` included, from `src/modules/signal_radar/wifi.rs` and `bluetooth.rs`. HSE `f0a1c64c` ("Make huntsman-recon the only current tree") removed that tree.
 
 ## Rules the radar could offer HSE (`bleradar_core`, module `sweep`)
 
-These are exported from `bleradar-core` with tests. **No HSE code consumes them today.**
+These are exported from `bleradar-core` with tests. **No HSE code consumes them today.** The column records what HSE's pre-reconstruction tree (`f0a1c64c^`, rev `98c4b08`) used each one for; the `legacy/` v1.41.0 copy used none of them.
 
-| Rule | What the monolith used it for |
+| Rule | What HSE `f0a1c64c^` used it for |
 |---|---|
 | `is_real_device_address` | dropping placeholder / malformed BSSIDs and Bluetooth addresses |
 | `wifi_rssi_reliability` | the Wi-Fi observation confidence tier |
 | `wifi_channel` | the `channel:<n>` tag |
 | `wifi_proximity` | the `proximity:<band>` tag |
+| `sighting_key` | the key each Wi-Fi and Bluetooth sighting was stored under, instead of the scan's raw address |
 
 ## Duplicated rules
 
