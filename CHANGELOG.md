@@ -24,7 +24,10 @@ for what that release contains).
   the end record are compared; entry order is free (`zip` stores the build
   host's directory-read order). The check is signer-agnostic and fails closed
   on a malformed, commented, ZIP64 or unsigned package. `--byte-identical`
-  also requires the same entry order.
+  also requires the same entry order. The same CI step first runs
+  `apksigner verify --print-certs` on the committed APK, as
+  `verify-android-live` does on the fresh build, so a committed package whose
+  signature does not verify fails the job; no signer is pinned.
 
 ### Changed
 
