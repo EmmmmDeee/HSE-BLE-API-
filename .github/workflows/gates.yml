@@ -45,6 +45,10 @@ jobs:
           java-version: '21'
       - name: Run every gate via the local gate runner
         run: cargo xtask gates
+      # The release key scan must fail closed: findings exit 1, and a missing
+      # tool, a missing path or zero files scanned exit 2, never "0 finding(s)".
+      - name: Key-scan behaviour (scripts/scan-for-keys.sh fails closed)
+        run: bash scripts/test-scan-for-keys.sh
       - name: Live JVM → JNI → Rust proof against NativeRadar.java
         run: cargo xtask verify-jni-live
       # The app's real ApiHttpServer on this JVM with fixture sources: every

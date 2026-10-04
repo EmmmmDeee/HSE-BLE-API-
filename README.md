@@ -605,7 +605,7 @@ git add HSE-BLE-Radar-arm64-v<version name>.apk
 cargo xtask release-plan                                 # tag v<version name>, the APK and manifest names
 cargo xtask release-manifest --out release_manifest.txt  # url = the asset on the v<version name> release
 scan="$(mktemp -d)" && unzip -q -d "$scan" HSE-BLE-Radar-arm64-v<version name>.apk
-bash scripts/scan-for-keys.sh HSE-BLE-Radar-arm64-v<version name>.apk "$scan"  # must report 0 findings
+bash scripts/scan-for-keys.sh HSE-BLE-Radar-arm64-v<version name>.apk "$scan"  # must report 0 findings (exit 2 = could not scan: fix, never ignore)
 gh release create v<version name> HSE-BLE-Radar-arm64-v<version name>.apk release_manifest.txt \
   --target <commit> --title "HSE BLE Radar <version name>" --latest
 ```
