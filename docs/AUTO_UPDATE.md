@@ -63,7 +63,9 @@ A release announces itself in one place: `release_manifest.txt` attached to
 the repository's latest GitHub release, at
 `UpdateCheckService.RELEASE_MANIFEST_URL`
 (`https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt`,
-a stable URL that redirects to the asset). `ReleaseManifestSource.java` GETs
+a URL that redirects to that asset of GitHub's "latest" release; GitHub
+never picks a pre-release as latest, so while only pre-releases exist the URL
+answers `404`). `ReleaseManifestSource.java` GETs
 it on the service's worker thread (network I/O may not run on the main
 thread) with 10 s connect and read timeouts and a 16 KiB cap, never throws,
 and reports the HTTP status, a `MANIFEST_FETCH_*` failure kind and a
@@ -221,6 +223,10 @@ before it is published, and the emulator proof runs the pathway past the
 decision — the download, the verification, the installer, the install —
 against a stand-in release host on every pull request ("Verifying it"
 below). The steps are listed under "Releasing" in the README.
+
+**Release policy:** pre-releases only, as `main-<sha7>` plus a rolling
+`latest`. A stable (non-pre-release) release is made only with the owner's
+explicit approval and is never automatic.
 
 Stable releases are cut by hand; the automation publishes only
 pre-releases. The `release` workflow (`.github/workflows/release.yml`) runs
