@@ -31,6 +31,14 @@ for what that release contains).
   (7 classes, 115 tests), the committed APK's size and entries, and the
   current state of the repository boundary with HSE. Historical records keep
   the emulator 37.1.11 they ran on, with a note on the current 37.2.12 pin.
+- The immutable v0.3.0 inputs (the original APK, the migration archive,
+  renamed without ` (1)` with the same bytes, and `git-history.bundle`)
+  moved into `oracle/`, where every file is pinned by `oracle/SHA256SUMS`.
+  `check-oracle-integrity` now verifies that manifest, requires the
+  snapshot's `SHA256SUMS` to list every snapshot file, and requires each
+  snapshot copy of an oracle to be byte-identical to its counterpart. Only
+  untracked build output in the snapshot's gitignored `target/` is skipped;
+  a file force-added there must be listed (#45).
 
 ### Fixed
 
