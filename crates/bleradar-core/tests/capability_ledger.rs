@@ -1,7 +1,9 @@
 //! Integration tests for the defensive ATT&CK capability ledger.
 //!
 //! These tests assert that Verified status cannot be set by static data alone,
-//! that evidence failure auto-downgrades derived status, and that Navigator
+//! that evidence failure auto-downgrades derived status, that corroboration and
+//! regression health is derived from the linked records (never a hand-set
+//! flag), that blank or whitespace ids count as missing, and that Navigator
 //! export is deterministic and derived-only.
 
 use bleradar_core::{
@@ -22,8 +24,6 @@ fn complete_links() -> CapabilityEvidenceLinks {
         regression_lock_ids: vec!["lock-1".into()],
         passed_test_ids: vec!["test-capability-1".into()],
         failed_test_ids: vec![],
-        corroboration_ok: true,
-        regression_ok: true,
     }
 }
 
@@ -72,7 +72,6 @@ fn manual_verified_without_evidence_is_impossible() {
     // Constructing Verified requires mandatory_complete.
     let incomplete = CapabilityEvidenceLinks {
         source_ids: vec!["s".into()],
-        regression_ok: true,
         ..CapabilityEvidenceLinks::empty()
     };
     assert!(!incomplete.mandatory_complete());
@@ -264,9 +263,7 @@ fn partial_when_incomplete_links() {
         benchmark_ids: vec![],
         regression_lock_ids: vec![],
         passed_test_ids: vec![],
-        failed_test_ids: vec![],
-        corroboration_ok: false,
-        regression_ok: true, // avoid hard-failure path so Partial can surface
+        failed_test_ids: vec![], // no failed test, so Partial can surface
     };
     assert!(!partial_links.mandatory_complete());
     assert_eq!(
@@ -283,4 +280,229 @@ fn partial_when_incomplete_links() {
 
     let layer = ledger.navigator_layer("partial", "enterprise-attack", "14.1");
     assert!(layer.contains("\"techniqueID\":\"T1016\",\"score\":50,\"color\":\"#fec44f\""));
+}
+
+#[test]
+fn hand_set_flags_without_ids_are_not_verified() {
+    // The flags no longer exist as fields (a struct literal setting them does
+    // not compile: see the compile_fail doctests on CapabilityEvidenceLinks).
+    // Every non-id part of the chain is healthy and every test passed, but
+    // no corroboration or regression-lock record is linked.
+    let unlinked = CapabilityEvidenceLinks {
+        corroboration_ids: vec![],
+        regression_lock_ids: vec![],
+        ..complete_links()
+    };
+    assert!(!unlinked.corroboration_ok());
+    assert!(!unlinked.regression_ok());
+    assert!(!unlinked.mandatory_complete());
+    assert_eq!(
+        derive_status(ClaimScope::InScope, &unlinked),
+        CapabilityStatus::Partial
+    );
+
+    // With no ids at all nothing is linked: Unverified, never Verified.
+    let empty = CapabilityEvidenceLinks::empty();
+    assert!(!empty.corroboration_ok());
+    assert!(!empty.regression_ok());
+    assert_eq!(
+        derive_status(ClaimScope::InScope, &empty),
+        CapabilityStatus::Unverified
+    );
+
+    let mut ledger = CapabilityLedger::seed_v0();
+    ledger.set_links("T1040", unlinked).expect("T1040 present");
+    assert_ne!(ledger.status_of("T1040"), Some(CapabilityStatus::Verified));
+    assert_eq!(ledger.verified_count(), 0);
+}
+
+#[test]
+fn whitespace_ids_count_as_missing() {
+    let blank = || vec![String::new(), " ".to_string(), "\t\n".to_string()];
+
+    // Each mandatory list replaced by blank ids alone breaks the chain.
+    type SetIds = fn(&mut CapabilityEvidenceLinks, Vec<String>);
+    let cases: [(&str, SetIds); 6] = [
+        ("source_ids", |l, v| l.source_ids = v),
+        ("input_ids", |l, v| l.input_ids = v),
+        ("output_ids", |l, v| l.output_ids = v),
+        ("corroboration_ids", |l, v| l.corroboration_ids = v),
+        ("test_ids", |l, v| l.test_ids = v),
+        ("regression_lock_ids", |l, v| l.regression_lock_ids = v),
+    ];
+    for (field, set) in cases {
+        let mut links = complete_links();
+        set(&mut links, blank());
+        assert!(!links.mandatory_complete(), "blank {field} must be missing");
+        assert_ne!(
+            derive_status(ClaimScope::InScope, &links),
+            CapabilityStatus::Verified,
+            "blank {field} must not be Verified"
+        );
+        let mut ledger = CapabilityLedger::seed_v0();
+        ledger.set_links("T1040", links).expect("T1040 present");
+        assert_ne!(ledger.status_of("T1040"), Some(CapabilityStatus::Verified));
+        assert_eq!(ledger.verified_count(), 0, "blank {field}");
+    }
+
+    // Blank single-record ids are missing too.
+    for links in [
+        CapabilityEvidenceLinks {
+            execution_record_id: Some("  ".into()),
+            ..complete_links()
+        },
+        CapabilityEvidenceLinks {
+            provenance_claim_id: Some(String::new()),
+            ..complete_links()
+        },
+    ] {
+        assert!(!links.mandatory_complete());
+        assert_eq!(
+            derive_status(ClaimScope::InScope, &links),
+            CapabilityStatus::Partial
+        );
+    }
+
+    // Only-blank ids anywhere are no evidence at all: Unverified, not Partial.
+    let all_blank = CapabilityEvidenceLinks {
+        source_ids: blank(),
+        input_ids: blank(),
+        execution_record_id: Some(" ".into()),
+        output_ids: blank(),
+        provenance_claim_id: Some(" ".into()),
+        corroboration_ids: blank(),
+        test_ids: blank(),
+        benchmark_ids: blank(),
+        regression_lock_ids: blank(),
+        passed_test_ids: blank(),
+        failed_test_ids: blank(),
+    };
+    assert!(!all_blank.any_mandatory_partial());
+    assert!(!all_blank.corroboration_ok());
+    assert!(!all_blank.regression_ok());
+    assert_eq!(
+        derive_status(ClaimScope::InScope, &all_blank),
+        CapabilityStatus::Unverified
+    );
+
+    // A blank failed-test id is no failure: the chain stays Verified.
+    let blank_failure = CapabilityEvidenceLinks {
+        failed_test_ids: vec![" ".into()],
+        ..complete_links()
+    };
+    assert_eq!(
+        derive_status(ClaimScope::InScope, &blank_failure),
+        CapabilityStatus::Verified
+    );
+
+    // set_links trims ids and drops blank ones; padded ids still match.
+    let padded = CapabilityEvidenceLinks {
+        source_ids: vec![" src-oracle-1 ".into(), "  ".into()],
+        execution_record_id: Some("  ".into()),
+        test_ids: vec!["test-capability-1".into()],
+        passed_test_ids: vec!["\ttest-capability-1 ".into()],
+        failed_test_ids: vec![String::new()],
+        ..complete_links()
+    };
+    let mut ledger = CapabilityLedger::seed_v0();
+    ledger.set_links("T1040", padded).expect("T1040 present");
+    let stored = &ledger.get("T1040").expect("T1040 row").links;
+    assert_eq!(stored.source_ids, vec!["src-oracle-1".to_string()]);
+    assert_eq!(stored.execution_record_id, None);
+    assert_eq!(
+        stored.passed_test_ids,
+        vec!["test-capability-1".to_string()]
+    );
+    assert!(stored.failed_test_ids.is_empty());
+    // The blank execution record left the chain incomplete.
+    assert_eq!(ledger.status_of("T1040"), Some(CapabilityStatus::Partial));
+
+    // A blank test id passed to invalidate_test names no test.
+    ledger.set_links("T1040", complete_links()).expect("T1040");
+    ledger.invalidate_test("T1040", "   ").expect("invalidate");
+    assert!(
+        ledger
+            .get("T1040")
+            .expect("row")
+            .links
+            .failed_test_ids
+            .is_empty()
+    );
+    assert_eq!(ledger.status_of("T1040"), Some(CapabilityStatus::Verified));
+    // A padded one is trimmed to the linked id it names.
+    ledger
+        .invalidate_test("T1040", " test-capability-1 ")
+        .expect("invalidate");
+    let links = &ledger.get("T1040").expect("row").links;
+    assert_eq!(links.failed_test_ids, vec!["test-capability-1".to_string()]);
+    assert!(links.passed_test_ids.is_empty());
+    assert_eq!(
+        ledger.status_of("T1040"),
+        Some(CapabilityStatus::Unverified)
+    );
+}
+
+#[test]
+fn derived_flags_match_linked_records() {
+    // corroboration_ok follows corroboration_ids alone.
+    for (ids, expected) in [
+        (vec![], false),
+        (vec![" ".to_string()], false),
+        (vec!["corr-1".to_string()], true),
+        (vec![" ".to_string(), "corr-1".to_string()], true),
+    ] {
+        let links = CapabilityEvidenceLinks {
+            corroboration_ids: ids.clone(),
+            ..CapabilityEvidenceLinks::empty()
+        };
+        assert_eq!(links.corroboration_ok(), expected, "{ids:?}");
+    }
+
+    // regression_ok needs a linked lock and no failed linked test.
+    for (locks, failed, expected) in [
+        (vec![], vec![], false),
+        (vec![" ".to_string()], vec![], false),
+        (vec!["lock-1".to_string()], vec![], true),
+        (vec!["lock-1".to_string()], vec!["  ".to_string()], true),
+        (vec!["lock-1".to_string()], vec!["t-1".to_string()], false),
+        (vec![], vec!["t-1".to_string()], false),
+    ] {
+        let links = CapabilityEvidenceLinks {
+            regression_lock_ids: locks.clone(),
+            failed_test_ids: failed.clone(),
+            ..CapabilityEvidenceLinks::empty()
+        };
+        assert_eq!(links.regression_ok(), expected, "{locks:?} / {failed:?}");
+    }
+
+    // On the full chain both hold; each flips with its own records.
+    let full = complete_links();
+    assert!(full.corroboration_ok() && full.regression_ok());
+
+    let mut ledger = CapabilityLedger::seed_v0();
+    ledger.set_links("T1040", complete_links()).expect("T1040");
+    ledger
+        .invalidate_test("T1040", "test-capability-1")
+        .expect("fail");
+    let failed = &ledger.get("T1040").expect("row").links;
+    assert!(failed.corroboration_ok());
+    assert!(
+        !failed.regression_ok(),
+        "a failed linked test breaks the regression"
+    );
+    assert_eq!(
+        ledger.status_of("T1040"),
+        Some(CapabilityStatus::Unverified)
+    );
+
+    // Status agrees with the derived flags on every seeded row, and the
+    // export carries status only — no stored flag reaches it.
+    for (tid, row) in ledger.iter() {
+        let status = ledger.status_of(tid).expect("row status");
+        if status == CapabilityStatus::Verified {
+            assert!(row.links.corroboration_ok() && row.links.regression_ok());
+        }
+    }
+    let layer = ledger.navigator_layer("flags", "enterprise-attack", "14.1");
+    assert!(!layer.contains("corroboration_ok") && !layer.contains("regression_ok"));
 }
