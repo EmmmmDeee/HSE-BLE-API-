@@ -13,6 +13,7 @@
 //! invoking it from a subdirectory still works.
 
 mod apilive;
+mod apk_rebuild;
 mod companyids;
 mod dashboard;
 mod dex;
@@ -135,6 +136,7 @@ fn main() -> ExitCode {
         "check-jni-contract" => cmd_check_jni_contract(&rest),
         "verify-jni-live" => cmd_verify_jni_live(),
         "verify-android-live" => cmd_verify_android_live(),
+        "verify-apk-rebuild" => cmd_verify_apk_rebuild(&rest),
         "check-app-version" => cmd_check_app_version(),
         "release-manifest" => cmd_release_manifest(&rest),
         "release-plan" => cmd_release_plan(&rest),
@@ -188,6 +190,7 @@ fn print_usage() {
          \x20 check-jni-contract [lib]   fail unless NativeRadar.java's static natives and the library's Java_* exports match 1:1\n\
          \x20 verify-jni-live            run a live Java→JNI→Rust verification against NativeRadar.java\n\
          \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
+         \x20 verify-apk-rebuild [--byte-identical] <committed.apk> <rebuilt.apk>  fail unless the two packages agree once the APK Signing Block is removed from both: every entry's bytes, the central directory and the end record (entry order free unless --byte-identical); signer-agnostic, refuses a malformed, commented, ZIP64 or unsigned package\n\
          \x20 check-app-version          fail unless the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME and no artifact of another version remains\n\
          \x20 release-manifest [--url <artifact url>] [--out <path>]  print (or write) the release manifest for the committed APK: its version, exact size and SHA-256\n\
          \x20 release-plan               print the authoritative release identity (tag, apk, manifest, version) as key=value lines for the release workflow, after checking the committed APK exists and no stale artifact remains\n\
@@ -3896,6 +3899,73 @@ fn cmd_verify_android_live() -> Result<(), String> {
 
     println!("== verify-android-live complete ==");
     Ok(())
+}
+
+/// `cargo xtask verify-apk-rebuild [--byte-identical] <committed.apk> <rebuilt.apk>`:
+/// the two packages must agree once the APK Signing Block is removed from
+/// both ([`apk_rebuild::verify`]). By default every entry's bytes, the central
+/// directory and the end record must be equal, with entry order free (it
+/// follows the build host's directory-read order). `--byte-identical`
+/// requires the stripped files themselves to be equal. CI's `android-apk` job
+/// runs it on the committed APK (as `git show HEAD:<apk>`) and the package
+/// `verify-android-live` just built, so it holds whatever key signed either:
+/// `build-apk`'s debug key is generated per build directory.
+fn cmd_verify_apk_rebuild(args: &[String]) -> Result<(), String> {
+    const USAGE: &str =
+        "usage: cargo xtask verify-apk-rebuild [--byte-identical] <committed.apk> <rebuilt.apk>";
+    let (mode, paths) = match args {
+        [flag, rest @ ..] if flag == "--byte-identical" => (apk_rebuild::Mode::ByteIdentical, rest),
+        _ => (apk_rebuild::Mode::LayoutIndependent, args),
+    };
+    let [committed, rebuilt] = paths else {
+        return Err(USAGE.to_string());
+    };
+    if committed.starts_with('-') || rebuilt.starts_with('-') {
+        return Err(USAGE.to_string());
+    }
+    let read = |path: &str| {
+        fs::read(path)
+            .map_err(|e| format!("cannot read {path}: {e}; refusing to compare (fail closed)"))
+    };
+    let summary =
+        apk_rebuild::verify(committed, &read(committed)?, rebuilt, &read(rebuilt)?, mode)?;
+    println!("{summary}");
+    Ok(())
+}
+
+#[cfg(test)]
+mod verify_apk_rebuild_cli_tests {
+    use super::cmd_verify_apk_rebuild;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn usage_errors_and_missing_files_fail_closed() {
+        for bad in [
+            &[][..],
+            &["one.apk"][..],
+            &["a", "b", "c"][..],
+            &["--byte-identical", "a"][..],
+            &["--bogus", "a"][..],
+        ] {
+            let err = cmd_verify_apk_rebuild(&args(bad)).unwrap_err();
+            assert!(err.starts_with("usage:"), "{bad:?}: {err}");
+        }
+        let missing = std::env::temp_dir().join("xtask-verify-apk-rebuild-no-such-file.apk");
+        let missing = missing.to_str().unwrap();
+        for list in [
+            vec![missing, missing],
+            vec!["--byte-identical", missing, missing],
+        ] {
+            let err = cmd_verify_apk_rebuild(&args(&list)).unwrap_err();
+            assert!(
+                err.contains("cannot read") && err.contains("fail closed"),
+                "{err}"
+            );
+        }
+    }
 }
 
 /// The timestamp every packaged entry carries: ZIP's epoch, 1980-01-01

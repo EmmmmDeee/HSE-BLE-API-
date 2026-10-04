@@ -90,6 +90,31 @@ jobs:
         run: cargo xtask android-sdk-install
       - name: Build, sign and inspect the APK
         run: cargo xtask verify-android-live
+      # verify-android-live compares the fresh build's entry names, sizes and
+      # CRC-32s with the committed APK. This compares every byte of every entry
+      # (local header, padding, compressed data), the central directory and the
+      # end record, with the APK Signing Block removed from both, so it holds
+      # whatever key signed either: this runner's throw-away debug key never
+      # signed the committed APK. Entry order is free, because zip stores the
+      # build host's directory-read order. The build overwrote the committed
+      # file, so the committed copy comes from git at this same commit.
+      # Stripping the signing block means the comparison alone says nothing
+      # about the committed APK's signature, so the committed copy also goes
+      # through `apksigner verify --print-certs`, the check verify-android-live
+      # runs on the fresh build: a committed package whose signature does not
+      # verify fails here. No signer is pinned; any valid signature passes.
+      - name: The committed APK matches the fresh build (APK Signing Block stripped)
+        run: |
+          set -euo pipefail
+          apk="$(cargo xtask release-plan | sed -n 's/^apk=//p')"
+          [ -n "$apk" ] || { echo "::error::release-plan named no APK"; exit 1; }
+          git show "HEAD:$apk" > "$RUNNER_TEMP/committed.apk"
+          build_tools="$(cargo xtask android-sdk-packages | tr ' ' '\n' | sed -n 's/^build-tools;//p')"
+          [ -n "$build_tools" ] || { echo "::error::android-sdk-packages named no build-tools"; exit 1; }
+          apksigner="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}/build-tools/$build_tools/apksigner"
+          [ -x "$apksigner" ] || { echo "::error::apksigner not found at $apksigner"; exit 1; }
+          "$apksigner" verify --print-certs "$RUNNER_TEMP/committed.apk"
+          cargo xtask verify-apk-rebuild "$RUNNER_TEMP/committed.apk" "$apk"
       # The emulator's upgrade proof installs a package and updates it to its
       # successor; both must carry one signing key, which only one build
       # directory has, so this job builds the pair and hands it over

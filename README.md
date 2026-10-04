@@ -580,6 +580,7 @@ cargo xtask check-jni-contract [lib.so]   # NativeRadar.java natives ↔ Java_* 
 cargo xtask verify-jni-live        # real JVM → JNI → Rust proof (needs a JDK)
 cargo xtask build-apk              # cross-compile + package + sign the Android app (needs SDK/NDK)
 cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/export checks
+cargo xtask verify-apk-rebuild <committed.apk> <rebuilt.apk>  # equal once the APK Signing Block is stripped (signer-agnostic; CI runs it after the build)
 cargo xtask verify-android-unit    # the app's unit tests (android/app/src/test) on the host JVM against the real native core (needs a JDK)
 cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator, then the app upgrading itself against a stand-in github.com (needs KVM + SDK emulator + target/android-apk/proof from build-update-proof)
 cargo xtask build-update-proof     # the current version and its successor on one key + the successor's release manifest, under target/android-apk/proof (needs SDK/NDK)
