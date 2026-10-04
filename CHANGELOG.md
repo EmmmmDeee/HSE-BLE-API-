@@ -18,6 +18,13 @@ for what that release contains).
 ### Added
 
 - `CHANGELOG.md`.
+- `cargo xtask verify-apk-rebuild`, run by CI's `android-apk` job after the
+  build: the committed APK must equal the fresh build once the APK Signing
+  Block is removed from both. Every entry's bytes, the central directory and
+  the end record are compared; entry order is free (`zip` stores the build
+  host's directory-read order). The check is signer-agnostic and fails closed
+  on a malformed, commented, ZIP64 or unsigned package. `--byte-identical`
+  also requires the same entry order.
 
 ### Changed
 
