@@ -158,25 +158,38 @@ fn find_eocd(data: &[u8]) -> Result<usize, String> {
         ));
     }
     let at = data.len() - EOCD_LEN;
-    if u32_at(data, at)? == EOCD_SIGNATURE {
-        return Ok(at);
-    }
-    // Tell a commented archive from a damaged one.
+    // Every EOCD signature whose comment length reaches exactly the end of the file. A valid APK has
+    // one, at the end, with no comment; anything else is refused: a commented archive, an end
+    // record claiming a comment the file does not hold, or more than one candidate (a comment can
+    // carry a second end record).
     let floor = data.len().saturating_sub(EOCD_LEN + 0xffff);
-    for i in (floor..at).rev() {
+    let mut fits = Vec::new();
+    for i in floor..=at {
         if u32_at(data, i)? == EOCD_SIGNATURE
             && i + EOCD_LEN + usize::from(u16_at(data, i + 20)?) == data.len()
         {
-            return Err(format!(
-                "the archive has a {}-byte comment; refused (an APK carries none, and a comment can hide a second end-of-central-directory record)",
-                data.len() - i - EOCD_LEN
-            ));
+            fits.push(i);
         }
     }
-    Err(
-        "no end-of-central-directory record at the end of the file (truncated or not a ZIP)"
-            .to_string(),
-    )
+    match fits.as_slice() {
+        [only] if *only == at => Ok(at),
+        [] if u32_at(data, at)? == EOCD_SIGNATURE => Err(format!(
+            "the end-of-central-directory record ends the file but claims a {}-byte comment; refused (truncated or tampered)",
+            u16_at(data, at + 20)?
+        )),
+        [] => Err(
+            "no end-of-central-directory record at the end of the file (truncated or not a ZIP)"
+                .to_string(),
+        ),
+        [_] => Err(format!(
+            "the archive has a {}-byte comment; refused (an APK carries none, and a comment can hide a second end-of-central-directory record)",
+            data.len() - fits[0] - EOCD_LEN
+        )),
+        _ => Err(format!(
+            "{} end-of-central-directory records each reach the end of the file (one inside another's comment); refused as ambiguous",
+            fits.len()
+        )),
+    }
 }
 
 /// Parses a signed package and removes its APK Signing Block. Fails closed
@@ -235,10 +248,18 @@ pub fn strip_signing_block(data: &[u8]) -> Result<Stripped, String> {
     let mut pair = block_offset + 8;
     let pairs_end = cd_offset - 24;
     while pair < pairs_end {
+        // A pair is an 8-byte length, then at least a 4-byte ID.
+        if pairs_end - pair < 12 {
+            return Err(format!(
+                "APK Signing Block: {} bytes left at {pair}, too few for an ID-value pair",
+                pairs_end - pair
+            ));
+        }
         let len = u64_at(data, pair)?;
+        let room = pairs_end - pair - 8;
         let len = usize::try_from(len)
             .ok()
-            .filter(|&len| len >= 4 && len <= pairs_end - pair - 8)
+            .filter(|&len| len >= 4 && len <= room)
             .ok_or_else(|| format!("APK Signing Block: an ID-value pair at {pair} has length {len}, which does not fit"))?;
         let id = u32_at(data, pair + 8)?;
         if let Some((_, scheme)) = SIGNATURE_SCHEME_IDS.iter().find(|(known, _)| *known == id) {
@@ -870,6 +891,47 @@ mod tests {
                 .unwrap_err()
                 .contains("multi-disk")
         );
+    }
+
+    #[test]
+    fn an_end_record_claiming_a_missing_comment_or_two_end_records_are_refused() {
+        // Copilot on #58: the end record at EOF was accepted without checking its comment length.
+        let good = zip(ENTRIES, Some(&signer_a()));
+        let mut claims = good.clone();
+        let n = claims.len();
+        claims[n - 2..].copy_from_slice(&5u16.to_le_bytes());
+        let err = strip_signing_block(&claims).unwrap_err();
+        assert!(err.contains("claims a 5-byte comment"), "{err}");
+        // A 22-byte comment that is itself an end record with no comment: two candidates reach EOF.
+        let mut nested = good.clone();
+        let eocd = nested.len() - EOCD_LEN;
+        let fake = nested[eocd..].to_vec();
+        nested[eocd + 20..eocd + 22].copy_from_slice(&(EOCD_LEN as u16).to_le_bytes());
+        nested.extend_from_slice(&fake);
+        let err = strip_signing_block(&nested).unwrap_err();
+        assert!(err.contains("refused as ambiguous"), "{err}");
+    }
+
+    #[test]
+    fn a_signing_block_with_a_short_remainder_is_refused_without_panicking() {
+        // Copilot on #58: 1-7 bytes before the trailing size field underflowed `pairs_end - pair - 8`.
+        for junk in 1..12 {
+            let mut body = Vec::new();
+            body.extend_from_slice(&304u64.to_le_bytes());
+            body.extend_from_slice(&0x7109_871au32.to_le_bytes());
+            body.extend_from_slice(&[0xa1; 300]);
+            body.extend(std::iter::repeat_n(0xee, junk));
+            let size = (body.len() + 24) as u64;
+            let mut block = size.to_le_bytes().to_vec();
+            block.extend(body);
+            block.extend_from_slice(&size.to_le_bytes());
+            block.extend_from_slice(SIGNING_BLOCK_MAGIC);
+            let err = strip_signing_block(&zip(ENTRIES, Some(&block))).unwrap_err();
+            assert!(
+                err.contains("too few for an ID-value pair"),
+                "{junk}: {err}"
+            );
+        }
     }
 
     #[test]
