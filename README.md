@@ -552,6 +552,7 @@ cargo xtask                        # list subcommands
 cargo xtask parity-report          # regenerate docs/PARITY_COVERAGE.md
 cargo xtask check-dependency-policy
 cargo xtask check-oracle-integrity
+cargo xtask check-crate-boundary     # radar modules, bleradar-jni and bleradar-compat never reach the non-radar engines (docs/CRATE_BOUNDARY_PLAN.md)
 cargo xtask apk-inventory <apk>
 cargo xtask native-abi <lib.so>
 cargo xtask dex-classes <classes.dex>
