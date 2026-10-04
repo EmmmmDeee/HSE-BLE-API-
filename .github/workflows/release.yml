@@ -281,13 +281,26 @@ jobs:
           }
           # Release JSON for a tag, or nothing if there is no release under it.
           release_json() { gh release view "$1" --json isDraft,isPrerelease,targetCommitish,assets 2>/dev/null || true; }
+          # One asset download, retried (3 attempts, 5 s then 15 s apart) on a
+          # transient API error such as the HTTP 500 that failed run 37055587714.
+          # Only the download is retried; every check in verify_assets fails at once.
+          download_asset() {
+            local tag="$1" dir="$2" a="$3" delay
+            for delay in 5 15; do
+              gh release download "$tag" --dir "$dir" --pattern "$a" --clobber && return 0
+              echo "::warning::$tag: downloading $a failed; retrying in ${delay}s"
+              sleep "$delay"
+            done
+            gh release download "$tag" --dir "$dir" --pattern "$a" --clobber \
+              || fail "$tag: could not download $a after 3 attempts"
+          }
           # Download a pre-release's assets and require exactly the staged APK
           # and manifest bytes, a SHA256SUMS that verifies, and a zero-finding
           # key-scan report for this APK and commit.
           verify_assets() {
             local tag="$1" got="check/$1" a
             rm -rf "$got" && mkdir -p "$got"
-            for a in "${assets[@]}"; do gh release download "$tag" --dir "$got" --pattern "$a"; done
+            for a in "${assets[@]}"; do download_asset "$tag" "$got" "$a"; done
             cmp -s "$got/$APK" "out/$tag/$APK" || fail "$tag: $APK differs from the scanned APK"
             cmp -s "$got/$MANIFEST" "out/$tag/$MANIFEST" || fail "$tag: $MANIFEST differs from the manifest for this APK and tag"
             [ "$(awk '{print $2}' "$got/SHA256SUMS" | sort | tr '\n' ' ')" = "$(printf '%s\n' "$APK" "$MANIFEST" key-scan-report.txt | sort | tr '\n' ' ')" ] \
