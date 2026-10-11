@@ -106,6 +106,31 @@ pub enum ClaimScope {
 ///
 /// Status is **not** stored here; callers always pass these links through
 /// [`derive_status`]. Benchmarks are optional for v0 `Verified`.
+///
+/// An identifier that is empty or only whitespace is **missing**: it never
+/// satisfies a mandatory link, and [`CapabilityLedger::set_links`] /
+/// [`CapabilityLedger::insert_row`] drop it when links are stored.
+///
+/// There are no stored health flags. Whether corroboration and regression are
+/// satisfied is derived from the linked records by
+/// [`CapabilityEvidenceLinks::corroboration_ok`] and
+/// [`CapabilityEvidenceLinks::regression_ok`], so neither can be set by hand:
+///
+/// ```compile_fail,E0560
+/// use bleradar_core::CapabilityEvidenceLinks;
+/// let _ = CapabilityEvidenceLinks {
+///     corroboration_ok: true,
+///     ..CapabilityEvidenceLinks::empty()
+/// };
+/// ```
+///
+/// ```compile_fail,E0560
+/// use bleradar_core::CapabilityEvidenceLinks;
+/// let _ = CapabilityEvidenceLinks {
+///     regression_ok: true,
+///     ..CapabilityEvidenceLinks::empty()
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CapabilityEvidenceLinks {
     /// Authoritative source identifiers for the claim.
@@ -130,10 +155,35 @@ pub struct CapabilityEvidenceLinks {
     pub passed_test_ids: Vec<String>,
     /// Linked tests currently Failed — forces downgrade.
     pub failed_test_ids: Vec<String>,
-    /// True when independent corroboration channel is satisfied.
-    pub corroboration_ok: bool,
-    /// True when regression locks are intact (no fail).
-    pub regression_ok: bool,
+}
+
+/// True when `id` names a record: blank or whitespace-only ids are missing.
+fn id_present(id: &str) -> bool {
+    !id.trim().is_empty()
+}
+
+/// True when at least one id in `ids` is present (non-blank).
+fn any_id_present(ids: &[String]) -> bool {
+    ids.iter().any(|id| id_present(id))
+}
+
+/// True when the optional record id is present (non-blank).
+fn opt_id_present(id: Option<&String>) -> bool {
+    id.is_some_and(|id| id_present(id))
+}
+
+/// Trim every id and drop the blank ones.
+fn normalize_ids(ids: Vec<String>) -> Vec<String> {
+    ids.into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+/// Trim an optional id; a blank one becomes `None`.
+fn normalize_opt_id(id: Option<String>) -> Option<String> {
+    id.map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
 }
 
 impl CapabilityEvidenceLinks {
@@ -143,60 +193,92 @@ impl CapabilityEvidenceLinks {
         Self::default()
     }
 
+    /// Derived: the independent corroboration channel is satisfied, i.e. at
+    /// least one non-blank `corroboration_ids` entry is linked.
+    #[must_use]
+    pub fn corroboration_ok(&self) -> bool {
+        any_id_present(&self.corroboration_ids)
+    }
+
+    /// True when at least one non-blank `failed_test_ids` entry is linked.
+    fn has_failed_tests(&self) -> bool {
+        any_id_present(&self.failed_test_ids)
+    }
+
+    /// Derived: regression locks are intact, i.e. at least one non-blank
+    /// `regression_lock_ids` entry is linked and no linked test has failed.
+    #[must_use]
+    pub fn regression_ok(&self) -> bool {
+        any_id_present(&self.regression_lock_ids) && !self.has_failed_tests()
+    }
+
     /// True when every mandatory field for `Verified` is satisfied.
     ///
-    /// Benchmarks are optional for v0. Requires:
-    /// - non-empty `source_ids`, `input_ids`, `output_ids`, `corroboration_ids`
+    /// Blank or whitespace-only ids count as missing. Benchmarks are optional
+    /// for v0. Requires:
+    /// - a present id in `source_ids`, `input_ids`, `output_ids`, `corroboration_ids`
     /// - `execution_record_id` and `provenance_claim_id` present
-    /// - non-empty `test_ids`
-    /// - non-empty `regression_lock_ids` (no regression lock, no `Verified`)
-    /// - `corroboration_ok` and `regression_ok`
-    /// - `failed_test_ids` empty
-    /// - every `test_id` appears in `passed_test_ids`
+    /// - a present id in `test_ids`
+    /// - a present id in `regression_lock_ids` (no regression lock, no `Verified`)
+    /// - derived [`Self::corroboration_ok`] and [`Self::regression_ok`]
+    /// - no present id in `failed_test_ids`
+    /// - every present `test_id` appears (trimmed) in `passed_test_ids`
     #[must_use]
     pub fn mandatory_complete(&self) -> bool {
-        if self.source_ids.is_empty()
-            || self.input_ids.is_empty()
-            || self.output_ids.is_empty()
-            || self.corroboration_ids.is_empty()
-            || self.test_ids.is_empty()
-            || self.regression_lock_ids.is_empty()
+        if !any_id_present(&self.source_ids)
+            || !any_id_present(&self.input_ids)
+            || !any_id_present(&self.output_ids)
+            || !any_id_present(&self.test_ids)
         {
             return false;
         }
-        if self.execution_record_id.is_none() || self.provenance_claim_id.is_none() {
+        if !opt_id_present(self.execution_record_id.as_ref())
+            || !opt_id_present(self.provenance_claim_id.as_ref())
+        {
             return false;
         }
-        if !self.corroboration_ok || !self.regression_ok {
+        if !self.corroboration_ok() || !self.regression_ok() {
             return false;
         }
-        if !self.failed_test_ids.is_empty() {
-            return false;
-        }
-        for tid in &self.test_ids {
-            if !self.passed_test_ids.iter().any(|p| p == tid) {
-                return false;
-            }
-        }
-        true
+        self.test_ids
+            .iter()
+            .map(|tid| tid.trim())
+            .filter(|tid| !tid.is_empty())
+            .all(|tid| self.passed_test_ids.iter().any(|p| p.trim() == tid))
     }
 
-    /// True if any mandatory evidence field has at least one value present
-    /// (used to distinguish Partial vs Unverified when incomplete).
+    /// True if any mandatory evidence field has at least one present
+    /// (non-blank) value (used to distinguish Partial vs Unverified when
+    /// incomplete).
     #[must_use]
     pub fn any_mandatory_partial(&self) -> bool {
-        !self.source_ids.is_empty()
-            || !self.input_ids.is_empty()
-            || self.execution_record_id.is_some()
-            || !self.output_ids.is_empty()
-            || self.provenance_claim_id.is_some()
-            || !self.corroboration_ids.is_empty()
-            || !self.test_ids.is_empty()
-            || self.corroboration_ok
-            || self.regression_ok
-            || !self.passed_test_ids.is_empty()
-            || !self.failed_test_ids.is_empty()
-            || !self.regression_lock_ids.is_empty()
+        any_id_present(&self.source_ids)
+            || any_id_present(&self.input_ids)
+            || opt_id_present(self.execution_record_id.as_ref())
+            || any_id_present(&self.output_ids)
+            || opt_id_present(self.provenance_claim_id.as_ref())
+            || any_id_present(&self.corroboration_ids)
+            || any_id_present(&self.test_ids)
+            || any_id_present(&self.passed_test_ids)
+            || any_id_present(&self.failed_test_ids)
+            || any_id_present(&self.regression_lock_ids)
+    }
+
+    /// Trim every id and drop blank ones (applied whenever links are stored).
+    fn normalized(self) -> Self {
+        Self {
+            source_ids: normalize_ids(self.source_ids),
+            input_ids: normalize_ids(self.input_ids),
+            execution_record_id: normalize_opt_id(self.execution_record_id),
+            output_ids: normalize_ids(self.output_ids),
+            provenance_claim_id: normalize_opt_id(self.provenance_claim_id),
+            corroboration_ids: normalize_ids(self.corroboration_ids),
+            test_ids: normalize_ids(self.test_ids),
+            benchmark_ids: normalize_ids(self.benchmark_ids),
+            regression_lock_ids: normalize_ids(self.regression_lock_ids),
+            passed_test_ids: normalize_ids(self.passed_test_ids),
+            failed_test_ids: normalize_ids(self.failed_test_ids),
+        }
     }
 }
 
@@ -253,10 +335,10 @@ impl std::error::Error for CapabilityError {}
 
 /// Derive coverage status from scope + evidence links.
 ///
-/// Rules:
+/// Rules (blank or whitespace-only ids count as missing throughout):
 /// - `NotApplicable` scope → [`CapabilityStatus::NotApplicable`] (even if links present)
-/// - any `failed_test_ids` or `!regression_ok` → [`CapabilityStatus::Unverified`]
-/// - `mandatory_complete` (+ corroboration/regression ok, failed empty) → [`CapabilityStatus::Verified`]
+/// - any linked `failed_test_ids` (a broken regression) → [`CapabilityStatus::Unverified`]
+/// - `mandatory_complete` (incl. derived corroboration/regression ok) → [`CapabilityStatus::Verified`]
 /// - any mandatory field partially filled → [`CapabilityStatus::Partial`]
 /// - else [`CapabilityStatus::Unverified`]
 #[must_use]
@@ -264,18 +346,14 @@ pub fn derive_status(scope: ClaimScope, links: &CapabilityEvidenceLinks) -> Capa
     if scope == ClaimScope::NotApplicable {
         return CapabilityStatus::NotApplicable;
     }
-    // Hard failures: prefer Unverified (even if some links exist).
-    if !links.failed_test_ids.is_empty() {
-        return CapabilityStatus::Unverified;
-    }
-    // regression_ok=false with any evidence activity → Unverified (auto-downgrade).
-    // Empty default (regression_ok=false, no links) falls through to Unverified below.
-    if !links.regression_ok && links.any_mandatory_partial() {
+    // Hard failure: a failed linked test breaks the regression → Unverified,
+    // even if every other link exists (auto-downgrade).
+    if links.has_failed_tests() {
         return CapabilityStatus::Unverified;
     }
     if links.mandatory_complete() {
-        // mandatory_complete already requires corroboration_ok, regression_ok,
-        // failed empty, and every test_id in passed_test_ids.
+        // mandatory_complete already requires the derived corroboration_ok and
+        // regression_ok, and every linked test_id in passed_test_ids.
         return CapabilityStatus::Verified;
     }
     if links.any_mandatory_partial() {
@@ -388,7 +466,9 @@ impl CapabilityLedger {
     }
 
     /// Insert or replace a row. Status is never stored — always derived.
-    pub fn insert_row(&mut self, row: CapabilityRow) {
+    /// Link ids are trimmed and blank ones dropped.
+    pub fn insert_row(&mut self, mut row: CapabilityRow) {
+        row.links = row.links.normalized();
         self.rows.insert(row.technique_id.clone(), row);
     }
 
@@ -403,7 +483,8 @@ impl CapabilityLedger {
         self.rows.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// Update evidence links only; status remains derived.
+    /// Update evidence links only; status remains derived. Link ids are
+    /// trimmed and blank ones dropped, so a whitespace id is never stored.
     pub fn set_links(
         &mut self,
         technique_id: &str,
@@ -413,7 +494,7 @@ impl CapabilityLedger {
             .rows
             .get_mut(technique_id)
             .ok_or_else(|| CapabilityError::UnknownTechnique(technique_id.to_string()))?;
-        row.links = links;
+        row.links = links.normalized();
         Ok(())
     }
 
@@ -456,6 +537,7 @@ impl CapabilityLedger {
 
     /// Mark a linked test as failed: move/add to `failed_test_ids`, remove from
     /// `passed_test_ids`. Used to demonstrate auto-downgrade of derived status.
+    /// The id is trimmed; a blank id names no test and changes nothing.
     pub fn invalidate_test(
         &mut self,
         technique_id: &str,
@@ -465,6 +547,11 @@ impl CapabilityLedger {
             .rows
             .get_mut(technique_id)
             .ok_or_else(|| CapabilityError::UnknownTechnique(technique_id.to_string()))?;
+        // Same id rules as `set_links`: trimmed, and a blank id names no test.
+        let test_id = test_id.trim();
+        if test_id.is_empty() {
+            return Ok(());
+        }
         row.links.passed_test_ids.retain(|id| id != test_id);
         if !row.links.failed_test_ids.iter().any(|id| id == test_id) {
             row.links.failed_test_ids.push(test_id.to_string());
