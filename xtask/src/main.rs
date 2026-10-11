@@ -5037,6 +5037,18 @@ fn cmd_deny() -> Result<(), String> {
     run_status(cmd)
 }
 
+/// The `git diff --exit-code docs/PARITY_COVERAGE.md` that `gates` runs in
+/// `root` after regenerating the report: it exits non-zero when the
+/// regenerated report differs from the one in git's index. Built by
+/// [`git_in`]: with [`GIT_REDIRECT_ENV_VARS`] inherited from the caller and
+/// pointing at another repository, work tree or a missing index, git found
+/// nothing to compare and exited 0, so a drifted report passed.
+fn parity_coverage_drift_check(root: &Path) -> Command {
+    let mut command = git_in(root);
+    command.args(["diff", "--exit-code", "docs/PARITY_COVERAGE.md"]);
+    command
+}
+
 fn cmd_gates() -> Result<(), String> {
     let root = repo_root()?;
 
@@ -5119,12 +5131,7 @@ fn cmd_gates() -> Result<(), String> {
 
     println!("== parity report drift ==");
     cmd_parity_report()?;
-    run_status({
-        let mut c = Command::new("git");
-        c.current_dir(&root)
-            .args(["diff", "--exit-code", "docs/PARITY_COVERAGE.md"]);
-        c
-    })?;
+    run_status(parity_coverage_drift_check(&root))?;
 
     println!("== dependency policy ==");
     cmd_check_dependency_policy()?;
@@ -7820,5 +7827,84 @@ struct JNINativeInterface_ {
 
         assert!(find_files_with_extension(&root, "java").unwrap().is_empty());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Set only in the child process that
+    /// `parity_drift_check_ignores_git_redirects_inherited_from_the_environment`
+    /// re-runs itself as: the repository whose parity report has drifted.
+    const HOSTILE_GIT_ENV_CHILD_PARITY_REPO: &str = "XTASK_TEST_HOSTILE_GIT_ENV_PARITY_REPO";
+
+    #[test]
+    fn parity_drift_check_ignores_git_redirects_inherited_from_the_environment() {
+        // git honours GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE from the
+        // caller's environment. Pointed at another repository or work tree,
+        // or at an index that does not exist, `git diff --exit-code
+        // docs/PARITY_COVERAGE.md` finds nothing to compare and exits 0, so
+        // a drifted parity report passed `gates`. The inherited environment
+        // can only be set safely in a new process, so this test re-runs
+        // itself (and only itself) with each variable set.
+        if let Some(repo) = env::var_os(HOSTILE_GIT_ENV_CHILD_PARITY_REPO) {
+            let out = parity_coverage_drift_check(Path::new(&repo))
+                .output()
+                .expect("git runs");
+            assert_eq!(
+                out.status.code(),
+                Some(1),
+                "the drifted report must fail the check:\n{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        let dir = unique_temp_dir("parity_drift_check_ignores_git_redirects");
+        let repo = dir.join("repo");
+        let decoy = dir.join("decoy");
+        fs::create_dir_all(repo.join("docs")).unwrap();
+        fs::create_dir_all(&decoy).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = git_in(dir).args(args).output().expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        fs::write(repo.join("docs/PARITY_COVERAGE.md"), b"committed\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "docs/PARITY_COVERAGE.md"]);
+        fs::write(repo.join("docs/PARITY_COVERAGE.md"), b"regenerated\n").unwrap();
+        git(&decoy, &["init", "-q"]);
+        let decoy_git_dir = decoy.join(".git");
+        let missing_index = dir.join("no-such-index");
+        let hostile = [
+            ("GIT_INDEX_FILE", missing_index.as_path()),
+            ("GIT_DIR", decoy_git_dir.as_path()),
+            ("GIT_WORK_TREE", decoy.as_path()),
+        ];
+        let mut cases: Vec<Vec<(&str, &Path)>> = vec![vec![]];
+        cases.extend(hostile.iter().map(|&var| vec![var]));
+        cases.push(hostile.to_vec());
+        let mut failures = Vec::new();
+        for case in cases {
+            let out = Command::new(env::current_exe().expect("test binary path"))
+                .args([
+                    "tests::parity_drift_check_ignores_git_redirects_inherited_from_the_environment",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(HOSTILE_GIT_ENV_CHILD_PARITY_REPO, &repo)
+                .envs(case.iter().copied())
+                .output()
+                .expect("the test binary re-runs");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !(out.status.success() && stdout.contains("1 passed")) {
+                failures.push(format!(
+                    "with {case:?} in the environment:\n{stdout}{}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+        }
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
