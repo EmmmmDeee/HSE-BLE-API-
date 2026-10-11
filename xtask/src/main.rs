@@ -818,6 +818,27 @@ fn git_tracked_file_names(dir: &Path, sub: &str) -> Result<Vec<String>, String> 
         .collect())
 }
 
+/// Variables in the caller's environment that make git read another
+/// repository, work tree or index than the one it finds from its working
+/// directory. With any of them pointing elsewhere (another repository, or an
+/// index file that does not exist), `git ls-files` answers with an empty list
+/// and exit status 0, which would let a tracked file go unlisted. Other `GIT_*`
+/// variables are left alone: `ls-files` does not read objects, and a bad
+/// `GIT_OBJECT_DIRECTORY` or `GIT_CEILING_DIRECTORIES` only makes git fail,
+/// which already fails closed.
+const GIT_REDIRECT_ENV_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+
+/// A `git` command run in `dir`, with [`GIT_REDIRECT_ENV_VARS`] removed from
+/// the environment it inherits, so it finds the repository from `dir`.
+fn git_in(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(dir);
+    for var in GIT_REDIRECT_ENV_VARS {
+        command.env_remove(var);
+    }
+    command
+}
+
 /// The `/`-separated path (relative to `dir`) of every non-directory entry
 /// under `dir`, recursively and sorted: regular files, symlinks (never
 /// followed, so a symlinked directory is one entry) and anything else alike.
@@ -4940,12 +4961,13 @@ fn cmd_deny() -> Result<(), String> {
 
 /// The `git diff --exit-code docs/PARITY_COVERAGE.md` that `gates` runs in
 /// `root` after regenerating the report: it exits non-zero when the
-/// regenerated report differs from the one in git's index.
+/// regenerated report differs from the one in git's index. Built by
+/// [`git_in`]: with [`GIT_REDIRECT_ENV_VARS`] inherited from the caller and
+/// pointing at another repository, work tree or a missing index, git found
+/// nothing to compare and exited 0, so a drifted report passed.
 fn parity_coverage_drift_check(root: &Path) -> Command {
-    let mut command = Command::new("git");
-    command
-        .current_dir(root)
-        .args(["diff", "--exit-code", "docs/PARITY_COVERAGE.md"]);
+    let mut command = git_in(root);
+    command.args(["diff", "--exit-code", "docs/PARITY_COVERAGE.md"]);
     command
 }
 
@@ -7699,12 +7721,7 @@ struct JNINativeInterface_ {
         fs::create_dir_all(repo.join("docs")).unwrap();
         fs::create_dir_all(&decoy).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            let mut command = Command::new("git");
-            command.current_dir(dir);
-            for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
-                command.env_remove(var);
-            }
-            let out = command.args(args).output().expect("git runs");
+            let out = git_in(dir).args(args).output().expect("git runs");
             assert!(
                 out.status.success(),
                 "git {args:?}: {}",
