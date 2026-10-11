@@ -51,6 +51,21 @@ checks it by hand).
    itself and the gitignored local build directory `target/` at the
    snapshot's top level are skipped, and of `target/` only what git does not
    track: a file force-added there (`git add -f`) must be listed too.
+   "Tracked" means present in git's index (what `git ls-files` lists), not in
+   `HEAD`, so a file that is staged but not committed counts.
+
+   This step runs `git ls-files`, so it needs `git` on `PATH` and a git
+   checkout. Without them the gate fails and never treats `target/` as
+   empty. With no `git` on `PATH` it reports `git ls-files in <dir>: No such
+   file or directory`. Outside any git checkout, for example in an archive
+   extracted to a plain directory, it reports git's exit status 128 (`not a
+   git repository`). Inside a checkout of a different repository, git
+   answers from that repository's index, which normally tracks nothing
+   there, so all of `target/` is skipped. The gate removes `GIT_DIR`,
+   `GIT_WORK_TREE` and `GIT_INDEX_FILE` from git's environment, so git finds
+   the repository from the snapshot directory. Set in the caller's
+   environment to another repository, another work tree or a missing index,
+   they would make git report no tracked files with exit 0.
 
 Each branch was falsified before merging: a byte appended to `classes.dex`, a
 stray unpinned file in `oracle/`, an unpinned subdirectory, an unpinned

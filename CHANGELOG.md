@@ -101,6 +101,13 @@ for what that release contains).
   log lines accumulated from the launch on, so the logcat ring buffer can no
   longer rotate them out before they are read. The guest's logcat buffers are
   raised to 16M (best-effort, outcome reported) (#52).
+- `check-oracle-integrity` removes `GIT_DIR`, `GIT_WORK_TREE` and
+  `GIT_INDEX_FILE` from the environment of the `git ls-files` call that lists
+  the files tracked under the snapshot's `target/`. Set in the caller's
+  environment to another repository, another work tree or a missing index,
+  they made git report no tracked files with exit 0, so a force-added file
+  there passed unlisted. The docs now say that "tracked" means in git's index
+  and that the check needs `git` on `PATH` and a git checkout (#59).
 
 ### Known issues
 
