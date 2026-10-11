@@ -108,6 +108,10 @@ for what that release contains).
   they made git report no tracked files with exit 0, so a force-added file
   there passed unlisted. The docs now say that "tracked" means in git's index
   and that the check needs `git` on `PATH` and a git checkout (#59).
+- The vendored advisory-db materialization (`cargo deny` setup in `gates`)
+  runs its `git init` / `add` / `commit` without the caller's `GIT_DIR`,
+  `GIT_WORK_TREE` and `GIT_INDEX_FILE`, which pointed them at another
+  repository, work tree or index.
 
 ### Known issues
 
