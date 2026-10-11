@@ -616,7 +616,7 @@ pub struct HseEvidence {
     /// verbatim for traceability. `BTreeMap` (not `HashMap`) so the serialised
     /// evidence has a stable, sorted key order — identical findings must
     /// produce byte-identical output (reproducibility / hashable evidence
-    /// chains), and HashMap iteration order is randomised per instance.
+    /// chains), and `HashMap` iteration order is randomised per instance.
     pub attributes: BTreeMap<String, String>,
     /// Unix timestamp (seconds) when evidence was recorded. Explicit (never
     /// captured from a wall clock inside this crate) so every value is
@@ -844,7 +844,7 @@ impl HseEntity {
     // ── Derived metrics ──────────────────────────────────────────────────────
 
     /// Number of DISTINCT corroborating sources backing this entity — the
-    /// true cross-correlation signal that drives the C_eff boost.
+    /// true cross-correlation signal that drives the `C_eff` boost.
     ///
     /// This is the grounded distinct-`evidence.source` count (minus the
     /// non-corroborating passes, with the promotion-source grounding gate),
@@ -857,11 +857,11 @@ impl HseEntity {
     /// Why not the `corroboration` field directly: that field is the summed
     /// *observation magnitude* (e.g. a verified-breach count, an
     /// engine-agreement count). Summed within-module counts are NOT a count of
-    /// independent sources, so using them to boost C_eff over-credited
+    /// independent sources, so using them to boost `C_eff` over-credited
     /// single-source findings (a 5-breach hit looked like "5 independent
     /// sources"). The `corroboration` field is retained as the
     /// observation-magnitude signal for ranking/diagnostics; it does not drive
-    /// C_eff.
+    /// `C_eff`.
     #[inline]
     #[must_use]
     pub fn source_count(&self) -> u32 {
@@ -944,7 +944,7 @@ impl HseEntity {
     /// * **Multiplicative** (legacy): `confidence × (1 + 0.15·ln n)` — a
     ///   gentle, sharply-diminishing boost.
     /// * **Independent-agreement** (noisy-OR):
-    ///   `1 − (1 − confidence)·γ^(n−1)` with `γ =
+    ///   `1 − (1 − confidence)·γ^(n−1)` with `γ` =
     ///   [`CORROBORATION_DOUBT_DECAY`] — each *additional* independent source
     ///   shrinks the residual doubt, so N sources agreeing on a finding drive
     ///   confidence toward certainty.
@@ -975,7 +975,7 @@ impl HseEntity {
     /// for [`Self::source_count`] — itself an O(k²) scan of the evidence chain
     /// — pass it here instead of forcing a recompute. `c_effective()` is
     /// exactly `c_effective_with_source_count(self.source_count())`, so the
-    /// C_eff formula is single-sourced and the two can never drift apart.
+    /// `C_eff` formula is single-sourced and the two can never drift apart.
     #[inline]
     #[must_use]
     pub fn c_effective_with_source_count(&self, n: u32) -> f64 {
@@ -1755,8 +1755,8 @@ fn fmt_coord_6dp(lat: f64, lon: f64) -> String {
 ///   (EXCEPT a 27-char all-ASCII-alphanumeric value — a base62 structured-ID
 ///   shape like a KSUID, where case is significant — which is trimmed/
 ///   sigil-stripped but NOT case-folded, so its encoded data survives intact)
-/// - IpAddress → canonical `IpAddr` form (IPv4-mapped IPv6 folds to IPv4)
-/// - MacAddress → lower-case colon-separated when 12 hex digits
+/// - `IpAddress` → canonical `IpAddr` form (IPv4-mapped IPv6 folds to IPv4)
+/// - `MacAddress` → lower-case colon-separated when 12 hex digits
 /// - Coordinates → canonical `"lat,lon"` at 6 dp via `fmt_coord_6dp`,
 ///   accepting any notation [`crate::coords::parse`] understands
 /// - Phone → strip non-digits (keep leading `+`)
@@ -1981,8 +1981,8 @@ pub fn evidence_sources(entities: &[HseEntity]) -> std::collections::BTreeSet<&s
 /// are exhausted or pruned. Pure; returns a `BTreeMap` so generations are
 /// already in order.
 #[must_use]
-pub fn expansion_timeline(entities: &[HseEntity]) -> std::collections::BTreeMap<u32, usize> {
-    let mut hist = std::collections::BTreeMap::new();
+pub fn expansion_timeline(entities: &[HseEntity]) -> BTreeMap<u32, usize> {
+    let mut hist = BTreeMap::new();
     for e in entities {
         *hist.entry(e.generation).or_insert(0) += 1;
     }

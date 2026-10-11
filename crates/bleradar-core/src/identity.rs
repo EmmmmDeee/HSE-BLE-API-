@@ -163,7 +163,7 @@ impl IdentityEvidence {
         let mut services: Vec<String> = report
             .service_uuids
             .iter()
-            .map(|u| u.to_canonical())
+            .map(crate::adv::Uuid::to_canonical)
             .collect();
         services.sort_unstable();
         services.dedup();

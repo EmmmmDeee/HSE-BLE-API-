@@ -375,10 +375,10 @@ fn pipeline_error_variants_implement_display_and_error() {
 mod differential {
     use std::collections::{BTreeMap, BTreeSet};
 
-    pub struct Rng(pub u64);
+    pub(crate) struct Rng(pub u64);
 
     impl Rng {
-        pub fn next(&mut self) -> u64 {
+        pub(crate) fn next(&mut self) -> u64 {
             let mut x = self.0;
             x ^= x >> 12;
             x ^= x << 25;
@@ -386,7 +386,7 @@ mod differential {
             self.0 = x;
             x.wrapping_mul(0x2545_F491_4F6C_DD1D)
         }
-        pub fn below(&mut self, n: usize) -> usize {
+        pub(crate) fn below(&mut self, n: usize) -> usize {
             (self.next() % n as u64) as usize
         }
     }
@@ -406,7 +406,11 @@ mod differential {
     }
 
     /// Component label of every node with edge `skip` (if any) removed.
-    pub fn components(n: usize, edges: &[(usize, usize)], skip: Option<usize>) -> Vec<usize> {
+    pub(crate) fn components(
+        n: usize,
+        edges: &[(usize, usize)],
+        skip: Option<usize>,
+    ) -> Vec<usize> {
         let mut parent: Vec<usize> = (0..n).collect();
         for (i, &(a, b)) in edges.iter().enumerate() {
             if Some(i) == skip {
@@ -420,7 +424,7 @@ mod differential {
         (0..n).map(|v| find(&mut parent, v)).collect()
     }
 
-    pub fn component_sets(names: &[String], labels: &[usize]) -> BTreeSet<BTreeSet<String>> {
+    pub(crate) fn component_sets(names: &[String], labels: &[usize]) -> BTreeSet<BTreeSet<String>> {
         let mut by_label: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
         for (v, label) in labels.iter().enumerate() {
             by_label.entry(*label).or_default().insert(names[v].clone());
@@ -428,7 +432,7 @@ mod differential {
         by_label.into_values().collect()
     }
 
-    pub fn distinct(labels: &[usize]) -> usize {
+    pub(crate) fn distinct(labels: &[usize]) -> usize {
         labels.iter().collect::<BTreeSet<_>>().len()
     }
 }

@@ -381,10 +381,7 @@ fn random_operation_campaign_keeps_the_engine_consistent() {
                     let Some(snapshot) = snapshot(&mut rng, ts) else {
                         return Ok(());
                     };
-                    let expected = snapshot
-                        .extract_observations()
-                        .map(|v| v.len())
-                        .unwrap_or(0);
+                    let expected = snapshot.extract_observations().map_or(0, |v| v.len());
                     match engine.observe_snapshot(&snapshot) {
                         Ok(ids) => {
                             successes += 1;
@@ -512,8 +509,10 @@ fn random_operation_campaign_keeps_the_engine_consistent() {
                                     }
                                     let mut probe = engine.clone();
                                     match probe.correlate(left, right) {
-                                        Err(WebsiteError::NoComparableObservations { .. })
-                                        | Err(WebsiteError::ResourceLimit { .. }) => {}
+                                        Err(
+                                            WebsiteError::NoComparableObservations { .. }
+                                            | WebsiteError::ResourceLimit { .. },
+                                        ) => {}
                                         Ok(_) => {
                                             return Err(format!(
                                                 "correlate_all left comparable pair {forward} uncorrelated"

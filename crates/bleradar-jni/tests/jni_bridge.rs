@@ -1329,6 +1329,33 @@ fn wifi_observation_drops_a_placeholder_or_malformed_bssid() {
 }
 
 #[test]
+fn wifi_observation_export_answers_through_the_string_bridge() {
+    use bleradar_jni::Java_com_hse_bleradar_NativeRadar_wifiObservation as wifi_observation;
+    use bleradar_jni::wifi_observation_encoded;
+    let mock = MockEnv::new();
+    let env = mock.env();
+    let null = core::ptr::null_mut();
+    let bssid = mock.string("3c:5a:b4:11:22:01");
+    let capabilities = mock.string("[WPA2-EAP-CCMP][ESS]");
+
+    // The export answers exactly what the pure core encodes.
+    assert_eq!(
+        mock.read(wifi_observation(env, null, bssid, capabilities, -48, 2437)),
+        wifi_observation_encoded("3c:5a:b4:11:22:01", Some("[WPA2-EAP-CCMP][ESS]"), -48, 2437)
+    );
+    // A null capabilities string is accepted and read as absent.
+    assert_eq!(
+        mock.read(wifi_observation(env, null, bssid, null, i32::MAX, 0)),
+        wifi_observation_encoded("3c:5a:b4:11:22:01", None, i32::MAX, 0)
+    );
+    // A null or placeholder BSSID, and a null env, answer null.
+    assert!(wifi_observation(env, null, null, capabilities, -48, 2437).is_null());
+    let masked = mock.string("02:00:00:00:00:00");
+    assert!(wifi_observation(env, null, masked, capabilities, -48, 2437).is_null());
+    assert!(wifi_observation(null, null, bssid, capabilities, -48, 2437).is_null());
+}
+
+#[test]
 fn scan_failure_action_encodes_give_up_already_running_and_a_retry_delay() {
     // The platform's six codes, first failure of an incident.
     assert_eq!(scan_failure_action_code(1, 0), SCAN_FAILURE_ALREADY_RUNNING);

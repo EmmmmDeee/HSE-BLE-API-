@@ -28,7 +28,7 @@ const VECTORS: &str = include_str!("oracle/signal_executed_vectors.tsv");
 const ORACLE_SO_SHA256: &str = "d14022cd113332312fb1719aafa107155a4c046c056cb9b2bcd3c94eb980b12d";
 
 /// The oracle's fixed BLE calibration (confirmed by the executed-oracle sweep):
-/// RSSI at 1 m = -59 dBm, path-loss exponent 2.4, tx_power ignored.
+/// RSSI at 1 m = -59 dBm, path-loss exponent 2.4, `tx_power` ignored.
 const ORACLE_RSSI_AT_1M: f64 = -59.0;
 const ORACLE_PATH_LOSS: f64 = 2.4;
 const ORACLE_LOW_CLAMP_M: f64 = 0.1;

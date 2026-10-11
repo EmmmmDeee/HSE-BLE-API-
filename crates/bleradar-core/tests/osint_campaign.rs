@@ -152,7 +152,7 @@ fn consistency(
             ));
         }
     }
-    if engine.has_ready_pivot() != !ranked.is_empty() {
+    if engine.has_ready_pivot() == ranked.is_empty() {
         return Err("has_ready_pivot disagrees with ranking".into());
     }
     let stats_total: usize = engine
@@ -225,7 +225,7 @@ fn random_operation_campaign_keeps_the_engine_consistent() {
                                 if engine.pivot_count() != before.pivots + 1 {
                                     return Err("add_pivot did not add exactly one".into());
                                 }
-                                if engine.pivot(&id).map(|p| p.state())
+                                if engine.pivot(&id).map(SearchPivot::state)
                                     != Some(SearchPivotState::Proposed)
                                 {
                                     return Err("added pivot not proposed".into());
@@ -342,7 +342,7 @@ fn random_operation_campaign_keeps_the_engine_consistent() {
                                 if engine.execution_count() != before.executions + 1 {
                                     return Err("execution_count did not grow by one".into());
                                 }
-                                if engine.pivot(&id).map(|p| p.state())
+                                if engine.pivot(&id).map(SearchPivot::state)
                                     != Some(SearchPivotState::Executed)
                                 {
                                     return Err("executed pivot not marked Executed".into());
@@ -396,13 +396,13 @@ fn random_operation_campaign_keeps_the_engine_consistent() {
                         } else {
                             "nope".to_string()
                         };
-                        let was = engine.pivot(&id).map(|p| p.state());
+                        let was = engine.pivot(&id).map(SearchPivot::state);
                         match engine.exhaust(&id) {
                             Ok(()) => {
                                 if was != Some(SearchPivotState::Proposed) {
                                     return Err(format!("exhaust accepted pivot in state {was:?}"));
                                 }
-                                if engine.pivot(&id).map(|p| p.state())
+                                if engine.pivot(&id).map(SearchPivot::state)
                                     != Some(SearchPivotState::Exhausted)
                                 {
                                     return Err("exhausted pivot not marked".into());

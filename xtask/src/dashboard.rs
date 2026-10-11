@@ -338,7 +338,7 @@ impl MockApi {
                     let requests = Arc::clone(&requests);
                     let dashboard = Arc::clone(&dashboard);
                     thread::spawn(move || {
-                        serve_connection(stream, scenario, &dashboard, &requests)
+                        serve_connection(stream, scenario, &dashboard, &requests);
                     });
                 }
             })
@@ -1208,7 +1208,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     );
     mock.stop();
     result?;
-    let size = fs::metadata(&screenshot).map(|m| m.len()).unwrap_or(0);
+    let size = fs::metadata(&screenshot).map_or(0, |m| m.len());
     if size == 0 {
         return Err(format!(
             "the browser produced no screenshot at {}",

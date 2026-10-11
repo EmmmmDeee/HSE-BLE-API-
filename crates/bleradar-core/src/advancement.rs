@@ -146,8 +146,8 @@ impl AdvancementPriority {
 
 impl Ord for AdvancementPriority {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.numerator as u128 * other.denominator as u128)
-            .cmp(&(other.numerator as u128 * self.denominator as u128))
+        (u128::from(self.numerator) * u128::from(other.denominator))
+            .cmp(&(u128::from(other.numerator) * u128::from(self.denominator)))
     }
 }
 

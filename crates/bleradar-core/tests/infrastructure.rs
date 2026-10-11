@@ -86,14 +86,14 @@ fn observations_preserve_raw_normalized_values_and_canonical_provenance() {
         "site-a",
         InfrastructureKind::Dns,
         " 203.0.113.7 ",
-        source.clone(),
+        source,
         20,
     )
     .with_normalized_value("203.0.113.7")
     .with_interval(TemporalInterval::new(10, 20, 30).unwrap());
 
     let mut engine = TemporalMetamorphicInfrastructureCorrelationEngine::new(EvidenceStore::new());
-    engine.observe(observation.clone()).unwrap();
+    engine.observe(observation).unwrap();
     let canonical = engine.evidence().observation("dns-a").unwrap();
     assert_eq!(
         canonical.raw_value(),

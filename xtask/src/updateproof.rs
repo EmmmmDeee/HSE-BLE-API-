@@ -365,8 +365,7 @@ fn refused_host(line: &str) -> Option<String> {
     let target = request_line.split_whitespace().nth(1).unwrap_or("");
     let authority = target
         .split_once("://")
-        .map(|(_, rest)| rest.split('/').next().unwrap_or(""))
-        .unwrap_or("");
+        .map_or("", |(_, rest)| rest.split('/').next().unwrap_or(""));
     Some(if authority.is_empty() {
         "?".to_string()
     } else {
@@ -919,7 +918,7 @@ mod tests {
             "refused a non-CONNECT request: GET http://connectivitycheck.gstatic.com/generate_204 HTTP/1.1",
         ]
         .iter()
-        .map(|line| line.to_string())
+        .map(ToString::to_string)
         .collect();
         let summary = tunnel_summary(&log);
         assert_eq!(summary.relayed, 2);
@@ -943,7 +942,7 @@ mod tests {
             "refused a non-CONNECT request: GET /generate_204 HTTP/1.1",
         ]
         .iter()
-        .map(|line| line.to_string())
+        .map(ToString::to_string)
         .collect();
         let summary = tunnel_summary(&odd);
         assert_eq!(summary.relayed, 0);

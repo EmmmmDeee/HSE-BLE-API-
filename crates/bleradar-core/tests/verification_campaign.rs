@@ -26,7 +26,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use bleradar_core::{
     DifferentialCase, ExecutionOutcome, FailureCause, MetamorphicRelation, MetamorphicTest,
     RegressionLock, RepairRecord, RequiredSemantics, VerificationEngine, VerificationError,
-    VerificationSurface,
+    VerificationSurface, VerificationViolation,
 };
 
 const DEFAULT_SEQUENCES: u64 = 150;
@@ -387,7 +387,7 @@ fn check_verify(
     let violating: BTreeSet<&str> = report
         .violations()
         .iter()
-        .map(|violation| violation.test_id())
+        .map(VerificationViolation::test_id)
         .collect();
     let expected_passed = executed
         .iter()
@@ -729,14 +729,9 @@ fn random_operation_campaign_keeps_the_engine_consistent() {
                             .map(|_| random_input(&mut rng))
                             .collect();
                         let lock_id = format!("lock-{}", rng.below(4));
-                        let lock = RegressionLock::new(
-                            lock_id.clone(),
-                            id.clone(),
-                            relation,
-                            inputs,
-                            "locked",
-                        )
-                        .unwrap();
+                        let lock =
+                            RegressionLock::new(lock_id.clone(), id, relation, inputs, "locked")
+                                .unwrap();
                         let duplicate = books.locks.contains(&lock_id);
                         match engine.add_regression_lock(lock) {
                             Ok(()) if known && !duplicate => {

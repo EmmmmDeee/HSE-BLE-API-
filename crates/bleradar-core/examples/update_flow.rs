@@ -167,7 +167,7 @@ fn main() {
         max_delay_secs: 3600,
     };
     let mut r = UpdateSession::new(Version::new(41, "1.2.2"));
-    r.offer(manifest.clone(), 34).unwrap();
+    r.offer(manifest, 34).unwrap();
     for fault in 1..=2 {
         r.begin_download().unwrap();
         r.record_progress(20_000).unwrap(); // partial, then the connection drops
