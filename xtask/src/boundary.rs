@@ -51,6 +51,9 @@ pub const CRATE_ROOT: &str = "(crate root)";
 pub const LAYERS: &[(&str, Layer)] = &[
     (CRATE_ROOT, Layer::Radar),
     ("adv", Layer::Radar),
+    // The ATT&CK coverage-claims ledger (std-only, no in-crate edges) is a
+    // radar capability record, so it must never reach an engine.
+    ("capability", Layer::Radar),
     ("geo", Layer::Radar),
     ("history", Layer::Radar),
     ("identity", Layer::Radar),

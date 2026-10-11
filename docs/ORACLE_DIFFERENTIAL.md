@@ -86,7 +86,10 @@ a bit bound).
 
 - oracle `oracle/libbleradar_core.so` SHA-256:
   `d14022cd113332312fb1719aafa107155a4c046c056cb9b2bcd3c94eb980b12d`
-  (from the migration archive, itself pinned by `check-oracle-integrity`).
+  (from the migration archive
+  `oracle/BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0.zip`, itself
+  pinned by `check-oracle-integrity`; the same bytes are checked in as
+  `oracle/libbleradar_core.so`, pinned by `oracle/SHA256SUMS`).
 - Bionic runtime: `system-images;android-24;default;arm64-v8a`
   (`Android/sdk_phone_arm64/generic_arm64:7.0/NYC/8695085`).
 - CPU emulator: `qemu-aarch64` 8.2.2 (user-mode).

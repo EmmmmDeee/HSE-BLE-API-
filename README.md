@@ -2,9 +2,9 @@
 
 Huntsman's Radar (API)
 
-The **HSE BLE Radar**: a standalone Android ARM64 wireless-intelligence app (an installable `HSE-BLE-Radar-arm64-<version>.apk`, published as a GitHub release) and the safe-Rust engine library behind it, `bleradar-core`. The app scans BLE on the device, decodes what it hears, names the manufacturer and services, keeps an identity across address rotation and remembers devices across sessions — all decided in Rust, with Android providing only the platform glue.
+The **HSE BLE Radar**: a standalone Android ARM64 wireless-intelligence app (an installable `HSE-BLE-Radar-arm64-<version>.apk`, attached to a GitHub release; release policy is pre-releases only, see [Releasing](#releasing)) and the safe-Rust engine library behind it, `bleradar-core`. The app scans BLE on the device, decodes what it hears, names the manufacturer and services, keeps an identity across address rotation and remembers devices across sessions — all decided in Rust, with Android providing only the platform glue.
 
-It is one of two repositories with distinct purposes. The other is the [Huntsman Search Engine](https://github.com/EmmmmDeee/Huntsman-Search-Engine-HSE-Termux-Android-Aarch64-Rust-) (HSE), an OSINT platform that runs in Termux; it consumes this repository's reading rules through a pinned dependency, and this repository depends on nothing from it. What each owns and the one seam between them: [`docs/REPOSITORY_BOUNDARY.md`](docs/REPOSITORY_BOUNDARY.md).
+It is one of two repositories with distinct purposes. The other is the [Huntsman Search Engine](https://github.com/EmmmmDeee/Huntsman-Search-Engine-HSE-Termux-Android-Aarch64-Rust-) (HSE), a recon CLI (`huntsman-recon`) for Termux. The two repositories are currently independent: this repository depends on nothing from HSE, and HSE does not depend on `bleradar-core` (checked against HSE `main`; the SHA and date are in the boundary document). Some rules exist in both (for example `tower_id`) rather than one depending on the other. What each owns, the duplicated rules, and how a seam could be re-established: [`docs/REPOSITORY_BOUNDARY.md`](docs/REPOSITORY_BOUNDARY.md).
 
 Origin: an auditable Rust reconstruction produced from the supplied BLE Radar v0.3.0 APK. It preserves the original executable artifacts as immutable behavioral oracles and makes parity gaps explicit instead of guessing missing source behavior.
 
@@ -71,19 +71,23 @@ Code that works in principle but was never executed is incomplete. Features that
   `shouldCheckForUpdate` / `downloadReadiness` / `retryBackoffDelaySeconds`),
   so the app makes those safety decisions in verified Rust. See
   `docs/AUTO_UPDATE.md`.
+- `crates/bleradar-core::capability` — the ATT&CK capability ledger (v0): defensive coverage claims whose status is derived from an evidence chain only (no manual promotion; `Verified` needs a regression lock). See `docs/CAPABILITY_LEDGER.md`.
 - `crates/bleradar-compat` — complete native ABI runtime/reachability census plus a separate source-replacement parity registry.
-- `xtask/` — dependency-free Rust-native developer tooling (`cargo xtask`): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, executed-oracle differential verification under `qemu-aarch64` (`oracle-differential`, see `docs/ORACLE_DIFFERENTIAL.md`), and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
+- `xtask/` — third-party-free Rust-native developer tooling (`cargo xtask`; its only dependency is the in-repo `bleradar-core` path crate): binary inventory, parity-report generation, ABI/DEX census, the JNI export-contract gate derived from `NativeRadar.java`, live Java→JNI→Rust verification, APK packaging, executed-oracle differential verification under `qemu-aarch64` (`oracle-differential`, see `docs/ORACLE_DIFFERENTIAL.md`), and the dependency-policy, oracle-integrity, `cargo audit`, and `cargo deny` gates, plus a one-command `gates` runner.
 - `android/app/src/main` — the hand-built Android radar app that consumes `bleradar-core` through `crates/bleradar-jni`; its design record is `docs/ANDROID_APP.md`.
 - `vendor/rustsec-advisory-db/` — vendored RustSec advisory database for fully offline `cargo audit`/`cargo deny`.
 - `docs/` — verified runtime topology, behavioral contract, Rust target architecture, issue/exception ledgers, generated parity frontier, the generated capability supersession matrix (`docs/CAPABILITY_MATRIX.md`, rendered by `bleradar_core::registry`), and verification records. Host toolchain / PATH setup: `docs/DEVELOPMENT.md`.
 - `benchmarks/` — benchmark harness notes.
 - `RUST_CONVERSION.md` — Rust-first migration boundary and consolidation prerequisites.
 - `.github/workflows/gates.yml` — CI enforcement of every gate below.
-- `BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk` — original APK oracle.
-- `BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip` — byte-pinned migration archive (the `check-oracle-integrity` baseline). Its contents are checked in, not only zipped:
-  - `migration/critically-enhanced-v0.3.0/` — the v0.3.0 reconstruction, checked in as Rust. Inventory and parity generation live in `crates/bleradar-tools` (no Python, no shell). The snapshot is **not** a workspace member (`exclude = ["migration"]`) and must not replace the crates on `main`, which have moved past it. `SHA256SUMS` covers this Rust tree; the pinned zip remains the byte-for-byte original archive.
+- `.github/workflows/release.yml` — publishes the committed APK after `gates` passes on `main` (see [Releasing](#releasing)).
+- `CHANGELOG.md` — notable changes, Keep a Changelog format.
+- `oracle/` — the one canonical home of every immutable v0.3.0 input, each file pinned by `oracle/SHA256SUMS` and verified by `cargo xtask check-oracle-integrity` (a `gates` step). Layout, provenance and storage follow-ups: [`docs/ORACLE_STORAGE.md`](docs/ORACLE_STORAGE.md).
+  - `oracle/BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk` — original APK oracle (also pinned by `docs/INPUT_SHA256.txt`).
+  - `oracle/BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0.zip` — byte-pinned migration archive (the `check-oracle-integrity` baseline; it was committed at the root as `BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip`, same bytes). Its contents are checked in, not only zipped:
   - `oracle/libbleradar_core.so` and `oracle/classes.dex` — the immutable native oracle and DEX, same bytes as inside the archive.
-  - `git-history.bundle` — the recovery history (`archive/migration-v0.3.0`, tags `migration/*` and `recovery/*`).
+  - `oracle/git-history.bundle` — the recovery history (`archive/migration-v0.3.0`, tags `migration/*` and `recovery/*`).
+- `migration/critically-enhanced-v0.3.0/` — the v0.3.0 reconstruction from that archive, checked in as Rust. Inventory and parity generation live in `crates/bleradar-tools` (no Python, no shell). The snapshot is **not** a workspace member (`exclude = ["migration"]`) and must not replace the crates on `main`, which have moved past it. Its `SHA256SUMS` lists every other file in this Rust tree (`check-oracle-integrity` rejects an unlisted one; only untracked build output in the gitignored `target/` directory is skipped, so a file force-added there with `git add -f` must be listed too), including its copies of the canonical files (`oracle/BLE-Radar-v0.3.0-original.apk`, `oracle/classes.dex`, `oracle/libbleradar_core.so`, `git-history.bundle`). `check-oracle-integrity` maps each copy to its own counterpart above (the APK copy to `oracle/BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk`, the others to the file of the same name) and requires it to be listed and byte-identical to that file; the pinned zip remains the byte-for-byte original archive.
 - The original Python and shell helpers survive only inside the pinned zip, which `check-oracle-integrity` must not modify. The source that builds is Rust: `cargo xtask` on `main`, and `bleradar-tools` inside the v0.3.0 snapshot.
 
 ## Developer setup
@@ -252,7 +256,10 @@ of which measures actual round-over-round yield.
 - Rust toolchain **1.98.0** with `clippy` and `rustfmt` — pinned by `rust-toolchain.toml`; `rustup` installs it automatically on first `cargo` invocation in the repo. Put `~/.cargo/bin` first on `PATH` (a system `/usr/bin/rustc` below 1.98 fails MSRV with exit 101). See `docs/DEVELOPMENT.md`.
 - No third-party crates in the shipped workspace: it is intentionally dependency-free, and CI fails if that changes without a recorded decision. `xtask/` (developer tooling) and the vendored advisory database are outside that scope; see `xtask/Cargo.toml`.
 - `cargo-audit` and `cargo-deny` on `PATH` to run those two specific gates, at the versions CI pins (`cargo install --locked cargo-audit@0.22.2 cargo-deny@0.20.2`; bump them together with `.github/workflows/gates.yml`); every other gate, including `cargo xtask gates` itself, needs nothing beyond the pinned toolchain. The JNI export-contract gate inside `gates` reads the host-built `libbleradar_jni.so` with the in-tree ELF64 reader, so `gates` is proven on Linux hosts (what CI runs).
-- A JDK (`javac`/`java`) only for `cargo xtask verify-jni-live`, `verify-api-live` and `verify-android-emulator` (whose `avdmanager` runs on it), an Android SDK/NDK only for `cargo xtask build-apk`/`verify-android-live`, and the SDK's emulator, platform-tools and pinned system image plus KVM only for `verify-android-emulator` (see `docs/ANDROID_APP.md`).
+- A JDK (`javac`/`java`/`keytool`, and `jar` for `oracle-differential`) only for `cargo xtask verify-jni-live`, `verify-api-live`, `verify-android-unit`, `build-apk`, `verify-android-live`, `build-update-proof`, `oracle-differential` and `verify-android-emulator` (whose `avdmanager` runs on it). CI uses Temurin 21.
+- An Android SDK/NDK only for `cargo xtask build-apk`/`verify-android-live`/`build-update-proof`/`verify-jni-target`/`oracle-differential`/`prepare-bionic-sysroot` (pinned in `xtask/src/main.rs`: platform `android-36`, build-tools `37.0.0`, NDK `27.3.13750724`; `cargo xtask android-sdk-install` installs them).
+- For the qemu proofs `oracle-differential` and `verify-jni-target`: `qemu-aarch64` (or `qemu-aarch64-static`, or `QEMU_AARCH64`) and a Bionic runtime. That runtime is `BIONIC_SYSROOT`, or `debugfs` (e2fsprogs) plus the pinned `system-images;android-24;default;arm64-v8a` (`cargo xtask android-sdk-install --system-image`), which `prepare-bionic-sysroot` also needs. See `docs/ORACLE_DIFFERENTIAL.md`.
+- The SDK's emulator (pinned `37.2.12`), platform-tools and the pinned `system-images;android-34;google_apis;x86_64` plus KVM only for `verify-android-emulator` (`cargo xtask android-sdk-install --emulator`; see `docs/ANDROID_APP.md` and `docs/DEVELOPMENT.md`).
 
 ## Installation
 
@@ -299,10 +306,10 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 
 Or run every gate — the above plus the JNI export-contract check (every
 `static native` in `NativeRadar.java` ↔ exactly one `Java_*` export in the
-built `bleradar-jni`, no orphans), the parity-report drift check, the
-zero-third-party-dependency policy check, the oracle-integrity check, and
-`cargo audit`/`cargo deny` against the vendored advisory database — with the
-single local gate runner:
+built `bleradar-jni`, no orphans), `xtask`'s own fmt/clippy/build/test, the
+parity-report drift check, the zero-third-party-dependency policy check, the
+oracle-integrity check, `check-app-version`, and `cargo audit`/`cargo deny`
+against the vendored advisory database — with the single local gate runner:
 
 ```sh
 cargo xtask gates
@@ -466,7 +473,11 @@ the gate — because until decision #98 every file there was dormant: 2,731
 lines of JUnit-style tests that had never run, 2,091 of them asserting
 literals against themselves. `BlipTest` (the RSSI window, the spread, the
 address-derived angle) and `ReleaseManifestTest` (the manifest contract
-through the real core) remain and run: 70 tests. It needs a JDK; CI's
+through the real core) survived that cut; the runner now executes seven
+classes pinned in `HOST_TEST_CLASSES` (`xtask/src/javaunit.rs`) —
+`ApiHttpServerGuardTest` 4, `BlipTest` 14, `DeviceHistoryTest` 10,
+`ReleaseManifestTest` 50, `ScanSupervisorTest` 21, `WifiApTest` 12,
+`WifiSurveyTest` 4: 115 tests. It needs a JDK; CI's
 `gates` job runs it after `verify-api-live`.
 
 ```sh
@@ -476,7 +487,10 @@ cargo xtask verify-android-emulator
 This runs the committed `HSE-BLE-Radar-arm64-v1.0.0.apk` on a real Android
 runtime: a throw-away AVD from the pinned API 34 `google_apis` x86_64 system
 image (whose ARM translation runs the arm64-only package as is) boots
-headless on KVM; the adapter is enabled and awaited, the APK installed with
+headless on KVM, on the pinned emulator 37.2.12 started with
+`-feature -WiFiPacketStream` (the guest's Wi-Fi then uses the emulator's own
+globally administered access point, not netsimd's randomized one; Bluetooth
+stays on netsimd); the adapter is enabled and awaited, the APK installed with
 its runtime permissions granted, the activity launched and the loopback API
 forwarded to the host. It then requires, over real HTTP, `GET /` byte-identical
 to the committed dashboard, the three documents with their keys and
@@ -518,10 +532,18 @@ the artifact in order (on the first end-to-end run: handed to the installer
 deleted on every exit. It needs
 `/dev/kvm`, the SDK's `emulator`, `platform-tools` and the pinned image
 (`cargo xtask android-sdk-install --emulator` installs them: licenses
-accepted, `sdkmanager` retried, every package and the tools checked)
-and a JDK; CI's `android-emulator` job runs it on every pull request and
+accepted, `sdkmanager` retried, every package and the tools checked, and
+the emulator pinned to 37.2.12: kept only when its `package.xml` and
+`source.properties` name 37.2.12 and the SHA-256 of seven of its files
+matches the pinned archive, else replaced by that archive, fetched over
+HTTPS only, its size and SHA-256 checked before it is unpacked and swapped
+in) and a JDK; CI's `android-emulator` job runs it on every pull request and
 every push to `main` (2 min 33 s on the first green run; 4 min 00 s with
-the virtual advertiser, decision #95).
+the virtual advertiser, decision #95). The emulator is launched with
+`-feature -WiFiPacketStream`, so the survey sees its own virtio-wifi access
+point (`00:13:10:85:fe:01`, globally administered, `TRACKABLE`) rather than
+netsimd's locally administered one; the run fails if netsimd's Wi-Fi comes
+up anyway.
 
 ## Parity report
 
@@ -534,10 +556,12 @@ the semantic source-parity/runtime registries.
 
 ## Developer tooling (`cargo xtask`)
 
-`xtask/` is a dependency-free, Rust-native replacement for the former
+`xtask/` is a third-party-free, Rust-native replacement for the former
 `tools/*.py`/`tools/native_abi.sh` scripts — no Python or `readelf` needed.
 It is a separate Cargo workspace, so it never joins `--workspace` scope or
-the root `Cargo.lock`.
+the root `Cargo.lock`. Its only dependency is the in-repo `bleradar-core`
+path crate (used by `cargo xtask capability`); it pulls in no third-party
+crate.
 
 ```sh
 cargo xtask                        # list subcommands
@@ -545,18 +569,27 @@ cargo xtask parity-report          # regenerate docs/PARITY_COVERAGE.md
 cargo xtask check-dependency-policy
 cargo xtask check-oracle-integrity
 cargo xtask check-crate-boundary     # radar modules, bleradar-jni and bleradar-compat never reach the non-radar engines (docs/CRATE_BOUNDARY_PLAN.md)
+cargo xtask capability             # read-only: the seed_v0() capability ledger's derived status and corroboration/regression health per technique, counts_by_status() and verified_count() (bleradar-core); writes only stdout
 cargo xtask apk-inventory <apk>
 cargo xtask native-abi <lib.so>
 cargo xtask dex-classes <classes.dex>
+cargo xtask vendor-advisory-db         # materialize the offline cargo-deny advisory db
+cargo xtask oracle-differential        # execute the immutable oracle under qemu-aarch64 and check the committed vectors (docs/ORACLE_DIFFERENTIAL.md)
+cargo xtask verify-jni-target          # bleradar-jni tests cross-compiled for aarch64-linux-android, run under qemu against Bionic
+cargo xtask prepare-bionic-sysroot <dir>   # extract the android-24 arm64 Bionic runtime for BIONIC_SYSROOT
+cargo xtask verify-dashboard-live      # dashboard.html in headless Chromium against a mock of the JSON contract
+cargo xtask verify-api-live            # the real ApiHttpServer on the host JVM, every HTTP contract, then the dashboard from it
+cargo xtask sync-company-ids           # refresh the Bluetooth SIG company-identifier registry (crates/bleradar-core/data)
 cargo xtask check-jni-contract [lib.so]   # NativeRadar.java natives ↔ Java_* exports, 1:1 (host build by default)
 cargo xtask verify-jni-live        # real JVM → JNI → Rust proof (needs a JDK)
 cargo xtask build-apk              # cross-compile + package + sign the Android app (needs SDK/NDK)
 cargo xtask verify-android-live    # verify-jni-live + build-apk + APK/DEX/export checks
+cargo xtask verify-apk-rebuild <committed.apk> <rebuilt.apk>  # equal once the APK Signing Block is stripped (signer-agnostic; CI runs it after the build)
 cargo xtask verify-android-unit    # the app's unit tests (android/app/src/test) on the host JVM against the real native core (needs a JDK)
 cargo xtask verify-android-emulator   # the committed APK on a headless API 34 emulator, then the app upgrading itself against a stand-in github.com (needs KVM + SDK emulator + target/android-apk/proof from build-update-proof)
 cargo xtask build-update-proof     # the current version and its successor on one key + the successor's release manifest, under target/android-apk/proof (needs SDK/NDK)
 cargo xtask android-sdk-packages [--system-image|--emulator]   # the pinned sdkmanager package set CI installs
-cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked (what CI runs)
+cargo xtask android-sdk-install [--system-image|--emulator]    # install that set: licenses, sdkmanager retried, every package and the pinned tools checked, the emulator verified against (or replaced by) its pinned archive (what CI runs)
 cargo xtask check-app-version      # the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME, no artifact of another version remains (a gates step)
 cargo xtask release-plan           # the release identity (tag, apk, manifest, version) as key=value lines, after checking the committed APK; what the release workflow reads
 cargo xtask release-manifest [--url <artifact url>] [--out <path>]   # the manifest a release publishes: the committed APK's version, exact size and SHA-256
@@ -578,9 +611,13 @@ BLERADAR_ADVANCEMENT_CAMPAIGN_SEQUENCES=50000 cargo test -p bleradar-core --rele
 
 ## Releasing
 
+**Release policy:** pre-releases only, as `main-<sha7>` plus a rolling
+`latest`. A stable (non-pre-release) release is made only with the owner's
+explicit approval and is never automatic.
+
 The app checks `https://github.com/EmmmmDeee/HSE-BLE-API-/releases/latest/download/release_manifest.txt`
-daily (`docs/AUTO_UPDATE.md`), so a release is a GitHub release carrying two
-assets — the APK and the manifest that describes it — and the version has one
+daily (`docs/AUTO_UPDATE.md`), so a stable release is a GitHub release (not a
+pre-release) carrying two assets — the APK and the manifest that describes it — and the version has one
 authority, `APP_VERSION_CODE`/`APP_VERSION_NAME` in `xtask/src/main.rs`:
 
 ```sh
@@ -591,15 +628,28 @@ git rm HSE-BLE-Radar-arm64-v<previous>.apk # one artifact is committed: check-ap
 cargo xtask check-app-version              # the bundled manifest, the artifact's name, no stale artifact (also a `gates` step)
 cargo xtask verify-android-live            # the built version read back; the package's entries reproduced by a second build
 git add HSE-BLE-Radar-arm64-v<version name>.apk
-# 2. merge to main — the `release` workflow tags v<version name>, generates the
-#    manifest and publishes the GitHub release itself
+# 2. merge to main — the `release` workflow publishes that commit as the
+#    pre-releases main-<sha7> and `latest` (never a stable release)
+# 3. cut the stable release by hand, from a main commit `gates` passed on:
+cargo xtask release-plan                                 # tag v<version name>, the APK and manifest names
+cargo xtask release-manifest --out release_manifest.txt  # url = the asset on the v<version name> release
+scan="$(mktemp -d)" && unzip -q -d "$scan" HSE-BLE-Radar-arm64-v<version name>.apk
+bash scripts/scan-for-keys.sh HSE-BLE-Radar-arm64-v<version name>.apk "$scan"  # must report 0 findings (exit 2 = could not scan: fix, never ignore)
+gh release create v<version name> HSE-BLE-Radar-arm64-v<version name>.apk release_manifest.txt \
+  --target <commit> --title "HSE BLE Radar <version name>" --latest
 ```
 
-Publishing is automated: once the change is on `main` and `gates` passes, the
-`release` workflow publishes the committed APK and its manifest as the latest
-`v<version name>` release, so a user only ever downloads and installs the APK
-— see "Publishing" in `docs/AUTO_UPDATE.md` for exactly when it runs and what
-it refuses.
+Every main build is published automatically, as pre-releases only: once a
+commit is on `main` and `gates` passes, the `release` workflow publishes the
+committed APK (with a `release_manifest.txt` pointing at that pre-release's
+own asset, the zero-finding `key-scan-report.txt` and `SHA256SUMS`) as the
+immutable `main-<sha7>` pre-release and moves the rolling `latest`
+pre-release to it, so a tester only ever downloads and installs the APK. It
+never creates, edits or re-tags a stable release and never marks anything
+latest, and GitHub's `releases/latest/download/` URL skips pre-releases, so
+installed apps are updated only by a stable release cut by hand (step 3) —
+see "Publishing a release" in `docs/AUTO_UPDATE.md` for exactly when the
+workflow runs and what it refuses.
 
 `release-manifest` refuses a non-`https` URL, and `verify-api-live` serves
 the manifest it generates to the real core as the accepted-manifest scenario,
@@ -633,3 +683,6 @@ Read, in order:
 9. `docs/REQUIREMENTS_LEDGER.md`
 10. `docs/COLD_START_VERIFICATION.md`
 11. `docs/ANDROID_APP.md`
+12. `docs/CAPABILITY_LEDGER.md`
+13. `docs/DEVELOPMENT.md`
+14. `CHANGELOG.md`

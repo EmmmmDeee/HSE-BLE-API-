@@ -73,6 +73,11 @@ bleradar-jni reaches:    (crate root), adv, coords, entity, geo, history, identi
 bleradar-compat reaches: (crate root), geo, signal
 ```
 
+`capability` (the ATT&CK coverage-claims ledger, 670 lines, `std` only, no
+in-crate edges either way) landed on `main` after this snapshot and is placed
+in the Radar layer as a radar capability record; the check now prints
+`capability [Radar] -> (none)`.
+
 What this shows:
 
 1. **The direction is already clean.** No Radar or HseModel module reaches an
