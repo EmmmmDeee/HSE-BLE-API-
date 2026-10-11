@@ -1,13 +1,16 @@
 # `xtask` is deliberately its own workspace (matching the standard cargo-xtask
-# pattern) so it never joins the `bleradar-*` dependency graph or shows up in
-# `cargo build/test/clippy --workspace` for the shipped library crates. See
-# `docs/AUTONOMOUS_DECISIONS.md` decision 24.
+# pattern): it is not a member of the shipped crates' workspace, no shipped
+# crate depends on it, it never shows up in `cargo build/test/clippy
+# --workspace`, and the root `Cargo.lock` has no `xtask` entry. xtask's own
+# graph (`xtask/Cargo.lock`) holds exactly one dependency, the in-repo
+# `bleradar-core` path crate (below), and no third-party crate. See
+# `docs/AUTONOMOUS_DECISIONS.md` decisions 25 and 118.
 [workspace]
 
 [package]
 name = "xtask"
 version = "0.1.0"
-description = "Dependency-free Rust-native developer tooling: parity report, policy/oracle gates, ABI/APK/DEX census, and the one-command local gate runner."
+description = "Third-party-free Rust-native developer tooling: parity report, policy/oracle gates, ABI/APK/DEX census, and the one-command local gate runner."
 edition = "2024"
 rust-version = "1.98"
 license = "Proprietary"
@@ -16,6 +19,11 @@ publish = false
 [[bin]]
 name = "xtask"
 path = "src/main.rs"
+
+# The in-repo core only (no third-party crate): `cargo xtask capability` reads
+# the ATT&CK capability ledger's derived status straight from bleradar-core.
+[dependencies]
+bleradar-core = { path = "../crates/bleradar-core" }
 
 [lints.rust]
 unsafe_code = "forbid"
