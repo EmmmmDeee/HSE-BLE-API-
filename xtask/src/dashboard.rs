@@ -7,7 +7,7 @@
 //! fetches to completion and `--dump-dom` prints the resulting document, so no
 //! browser-automation library is needed: the browser is an external tool
 //! invoked like the SDK, the JDK and qemu are, and the tooling stays
-//! dependency-free. Five scenarios run — a healthy API (every fixture device
+//! third-party-free. Five scenarios run — a healthy API (every fixture device
 //! must be rendered in server order, escaped, the page must have polled
 //! more than once, and the Start button must be disabled with Stop offered
 //! while the server reports scanning), `/api/devices` answering `500`, `/api/devices` answering

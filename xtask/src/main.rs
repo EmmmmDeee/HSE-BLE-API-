@@ -1,4 +1,4 @@
-//! `cargo xtask` — dependency-free, Rust-native developer tooling for the
+//! `cargo xtask` — third-party-free, Rust-native developer tooling for the
 //! `bleradar-*` workspace.
 //!
 //! Replaces the `tools/*.py` and `tools/native_abi.sh` scripts with a single
@@ -13,6 +13,7 @@
 //! invoking it from a subdirectory still works.
 
 mod apilive;
+mod apk_rebuild;
 mod companyids;
 mod dashboard;
 mod dex;
@@ -25,6 +26,9 @@ mod updateproof;
 mod vendor;
 mod zip_reader;
 
+// Read-only status of bleradar-core's ATT&CK capability ledger.
+mod capability;
+
 use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -36,13 +40,60 @@ use std::process::{Command, ExitCode};
 /// `cargo deny`, `cargo audit` tolerates a plain, non-git directory).
 const AUDIT_DB_PATH: &str = "vendor/rustsec-advisory-db/advisory-db-3157b0e258782691";
 
-/// The committed migration archive that retains the immutable native oracles.
-const MIGRATION_ZIP_NAME: &str = "BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip";
-/// Zip entry of the immutable v0.3.0 native oracle inside [`MIGRATION_ZIP_NAME`].
+/// The one canonical directory (relative to the repo root) holding every
+/// immutable v0.3.0 input: the original APK, the byte-pinned migration archive,
+/// the native oracle and DEX extracted from it, and the recovery history.
+const ORACLE_DIR: &str = "oracle";
+/// The SHA-256 manifest (`sha256sum` format, names relative to [`ORACLE_DIR`])
+/// that pins every file in [`ORACLE_DIR`]; `check-oracle-integrity` verifies it.
+const ORACLE_MANIFEST_NAME: &str = "SHA256SUMS";
+/// The original v0.3.0 APK oracle (relative to the repo root).
+const ORACLE_APK_PATH: &str = "oracle/BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk";
+/// The committed migration archive that retains the immutable native oracles
+/// (relative to the repo root). Byte-identical to the archive once committed at
+/// the root as `BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip`;
+/// only its path changed (no space, no ` (1)`), its SHA-256 pin did not.
+const MIGRATION_ZIP_PATH: &str = "oracle/BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0.zip";
+/// SHA-256 of [`MIGRATION_ZIP_PATH`], the archive's recorded baseline.
+const MIGRATION_ZIP_SHA256: &str =
+    "07d2d80ce7e6c43f4c6ccc2496d30faafb77342e7bf196b894d32c7528cf3f76";
+/// The checked-in v0.3.0 snapshot's own manifest (`./`-relative names), whose
+/// `./oracle/` entries are copies of the canonical oracles.
+const MIGRATION_SNAPSHOT_MANIFEST_PATH: &str = "migration/critically-enhanced-v0.3.0/SHA256SUMS";
+/// The snapshot's gitignored local build directory (`cargo build` inside the
+/// snapshot), the one top-level entry its file listing skips.
+const SNAPSHOT_BUILD_DIR: &str = "target";
+/// Every copy of a canonical oracle inside the v0.3.0 snapshot, mapped
+/// explicitly to its own counterpart: `(path relative to the snapshot
+/// directory, file name in [`ORACLE_DIR`])`. `check-oracle-integrity` requires
+/// each copy to be listed in the snapshot manifest with exactly its
+/// counterpart's digest, and rejects any other entry under the snapshot's
+/// `oracle/`, so a copy can never carry a different oracle's bytes.
+const SNAPSHOT_ORACLE_COPIES: &[(&str, &str)] = &[
+    (
+        "oracle/BLE-Radar-v0.3.0-original.apk",
+        "BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk",
+    ),
+    ("oracle/classes.dex", "classes.dex"),
+    ("oracle/libbleradar_core.so", "libbleradar_core.so"),
+    ("git-history.bundle", "git-history.bundle"),
+];
+/// Zip entry of the immutable v0.3.0 native oracle inside [`MIGRATION_ZIP_PATH`].
 const ORACLE_SO_ZIP_ENTRY: &str = "oracle/libbleradar_core.so";
 /// SHA-256 of that oracle `.so`, pinned so `oracle-differential` refuses to run
 /// against anything but the recorded immutable binary.
 const ORACLE_SO_SHA256: &str = "d14022cd113332312fb1719aafa107155a4c046c056cb9b2bcd3c94eb980b12d";
+/// The original v0.3.0 DEX in [`ORACLE_DIR`] (relative to the repo root).
+const ORACLE_DEX_PATH: &str = "oracle/classes.dex";
+/// SHA-256 of [`ORACLE_DEX_PATH`], an independent pin so editing the oracle
+/// manifest (and the snapshot's) cannot bless a changed DEX.
+const ORACLE_DEX_SHA256: &str = "a1311463a58fd2e4859e5227ee6b56040ccbcf1a63c8db544d65cc4ad3feeccc";
+/// The v0.3.0 recovery history in [`ORACLE_DIR`] (relative to the repo root).
+const ORACLE_HISTORY_BUNDLE_PATH: &str = "oracle/git-history.bundle";
+/// SHA-256 of [`ORACLE_HISTORY_BUNDLE_PATH`], an independent pin like
+/// [`ORACLE_DEX_SHA256`].
+const ORACLE_HISTORY_BUNDLE_SHA256: &str =
+    "e93a359b5ad836f00d557edd3c5af7ca7b0cb0bdfd20466a59c0d297e94abc6c";
 /// Committed executed-oracle ground truth `oracle-differential` regenerates and
 /// drift-checks (relative to the repo root).
 const EXECUTED_VECTORS_PATH: &str = "crates/bleradar-compat/tests/oracle/wifi_executed_vectors.tsv";
@@ -88,6 +139,7 @@ fn main() -> ExitCode {
         "check-jni-contract" => cmd_check_jni_contract(&rest),
         "verify-jni-live" => cmd_verify_jni_live(),
         "verify-android-live" => cmd_verify_android_live(),
+        "verify-apk-rebuild" => cmd_verify_apk_rebuild(&rest),
         "check-app-version" => cmd_check_app_version(),
         "release-manifest" => cmd_release_manifest(&rest),
         "release-plan" => cmd_release_plan(&rest),
@@ -102,6 +154,7 @@ fn main() -> ExitCode {
         "android-sdk-packages" => cmd_android_sdk_packages(&rest),
         "android-sdk-install" => cmd_android_sdk_install(&rest),
         "sync-company-ids" => cmd_sync_company_ids(),
+        "capability" => capability::cmd_capability(),
         "audit" => cmd_audit(),
         "deny" => cmd_deny(),
         "gates" => cmd_gates(),
@@ -141,6 +194,7 @@ fn print_usage() {
          \x20 check-jni-contract [lib]   fail unless NativeRadar.java's static natives and the library's Java_* exports match 1:1\n\
          \x20 verify-jni-live            run a live Java→JNI→Rust verification against NativeRadar.java\n\
          \x20 verify-android-live        run the strongest current end-to-end Android proof available in this sandbox\n\
+         \x20 verify-apk-rebuild [--byte-identical] <committed.apk> <rebuilt.apk>  fail unless the two packages agree once the APK Signing Block is removed from both: every entry's bytes, the central directory and the end record (entry order free unless --byte-identical); signer-agnostic, refuses a malformed, commented, ZIP64 or unsigned package\n\
          \x20 check-app-version          fail unless the bundled release manifest repeats APP_VERSION_CODE/NAME, the committed APK's name carries APP_VERSION_NAME and no artifact of another version remains\n\
          \x20 release-manifest [--url <artifact url>] [--out <path>]  print (or write) the release manifest for the committed APK: its version, exact size and SHA-256\n\
          \x20 release-plan               print the authoritative release identity (tag, apk, manifest, version) as key=value lines for the release workflow, after checking the committed APK exists and no stale artifact remains\n\
@@ -155,6 +209,7 @@ fn print_usage() {
          \x20 android-sdk-packages [--system-image|--emulator]  print the pinned sdkmanager package set the Android proofs are built with (CI installs exactly this)\n\
          \x20 android-sdk-install [--system-image|--emulator]   install that set into the discovered SDK: licenses accepted, sdkmanager retried, every package checked complete and discoverable (what CI runs)\n\
          \x20 sync-company-ids          refresh the bundled Bluetooth SIG company-identifier registry (crates/bleradar-core/data) from the SIG, keeping the old file if the core rejects the new one\n\
+         \x20 capability                 print each ATT&CK capability-ledger technique's derived status and verified_count() (read-only)\n\
          \x20 audit                      cargo audit against the vendored advisory db\n\
          \x20 deny                       cargo deny check against the vendored advisory db\n\
          \x20 gates                      run every gate (fmt/clippy/build/jni-contract/test/doc/checks/audit/deny)"
@@ -577,10 +632,9 @@ fn cmd_check_dependency_policy() -> Result<(), String> {
 /// oracle no longer matches its recorded SHA-256.
 fn cmd_check_oracle_integrity() -> Result<(), String> {
     let root = repo_root()?;
-    let apk_path = root.join("BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk");
+    let apk_path = root.join(ORACLE_APK_PATH);
     let input_sha_path = root.join("docs/INPUT_SHA256.txt");
-    let zip_path = root.join("BLE-Radar-Rust-Migration-Critically-Enhanced-v0.3.0 (1).zip");
-    const ZIP_BASELINE: &str = "07d2d80ce7e6c43f4c6ccc2496d30faafb77342e7bf196b894d32c7528cf3f76";
+    let zip_path = root.join(MIGRATION_ZIP_PATH);
 
     let apk_name = apk_path.file_name().unwrap().to_string_lossy().into_owned();
     let input_sha_name = input_sha_path
@@ -611,17 +665,58 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
         None
     };
     let zip_result = evaluate_oracle_hash(
-        Some(ZIP_BASELINE),
+        Some(MIGRATION_ZIP_SHA256),
         actual_zip_sha.as_deref(),
         String::new(), // unreachable: the zip's expected hash is a constant, never unparsable
         format!("missing oracle archive: {zip_name}"),
         &zip_name,
     );
 
-    let failures: Vec<String> = [apk_result, zip_result]
+    let mut failures: Vec<String> = [apk_result, zip_result]
         .into_iter()
         .filter_map(Result::err)
         .collect();
+
+    // Every file in the canonical oracle directory is pinned by its manifest,
+    // and the manifest agrees with the gate's own independent pins.
+    let oracle_dir = root.join(ORACLE_DIR);
+    let manifest_path = oracle_dir.join(ORACLE_MANIFEST_NAME);
+    let listing = list_entry_names(&oracle_dir)?;
+    let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_default();
+    let pins = independent_oracle_pins(expected_apk_sha.clone());
+    let canonical = oracle_manifest_violations(
+        &format!("{ORACLE_DIR}/{ORACLE_MANIFEST_NAME}"),
+        &manifest_text,
+        &listing,
+        &pins,
+        |name| hash_file_if_present(&oracle_dir.join(name)),
+    );
+    // The snapshot cross-check below needs the canonical digests even when a
+    // canonical violation was found, so it reports its own findings, not noise.
+    let canonical_entries = parse_sha256sums("", &manifest_text).unwrap_or_default();
+    if let Err(violations) = canonical {
+        failures.extend(violations);
+    }
+
+    // The v0.3.0 snapshot's manifest still verifies, and each of its copies
+    // of the canonical files (`./oracle/*`, `./git-history.bundle`) is
+    // byte-identical to its own mapped counterpart, never a divergent second
+    // copy and never another oracle's bytes.
+    let snapshot_manifest = root.join(MIGRATION_SNAPSHOT_MANIFEST_PATH);
+    let snapshot_dir = snapshot_manifest
+        .parent()
+        .expect("the snapshot manifest path has a parent directory")
+        .to_path_buf();
+    let snapshot_text = fs::read_to_string(&snapshot_manifest).unwrap_or_default();
+    let snapshot_listing = snapshot_tree_listing(&snapshot_dir)?;
+    failures.extend(snapshot_manifest_violations(
+        MIGRATION_SNAPSHOT_MANIFEST_PATH,
+        &snapshot_text,
+        &snapshot_listing,
+        SNAPSHOT_ORACLE_COPIES,
+        &canonical_entries,
+        |name| hash_file_if_present(&snapshot_dir.join(name)),
+    ));
 
     if !failures.is_empty() {
         println!("Oracle integrity violation — immutable behavioral oracles must never change:");
@@ -632,9 +727,351 @@ fn cmd_check_oracle_integrity() -> Result<(), String> {
     }
 
     println!(
-        "Oracle integrity verified: APK matches docs/INPUT_SHA256.txt; migration archive matches its recorded baseline."
+        "Oracle integrity verified: APK matches docs/INPUT_SHA256.txt; migration archive matches its recorded baseline; \
+         every file in {ORACLE_DIR}/ matches {ORACLE_DIR}/{ORACLE_MANIFEST_NAME}; \
+         {MIGRATION_SNAPSHOT_MANIFEST_PATH} verifies, lists every file in the snapshot, and each copy of a canonical file is identical to its own counterpart."
     );
     Ok(())
+}
+
+/// The gate's own pins for every canonical oracle, independent of
+/// `oracle/SHA256SUMS`: the APK's digest as parsed from `docs/INPUT_SHA256.txt`
+/// (left out when unparsable, which already fails the gate), and the in-code
+/// digests of the archive, the native oracle, the DEX and the history bundle.
+/// `(file name in ORACLE_DIR, digest)` pairs.
+fn independent_oracle_pins(apk_sha: Option<String>) -> Vec<(&'static str, String)> {
+    let apk = apk_sha.map(|digest| (file_name_of(ORACLE_APK_PATH), digest));
+    let in_code = [
+        (MIGRATION_ZIP_PATH, MIGRATION_ZIP_SHA256),
+        (ORACLE_SO_ZIP_ENTRY, ORACLE_SO_SHA256),
+        (ORACLE_DEX_PATH, ORACLE_DEX_SHA256),
+        (ORACLE_HISTORY_BUNDLE_PATH, ORACLE_HISTORY_BUNDLE_SHA256),
+    ]
+    .map(|(path, digest)| (file_name_of(path), digest.to_string()));
+    apk.into_iter().chain(in_code).collect()
+}
+
+/// The last path component of a `/`-separated repo-relative path.
+fn file_name_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// SHA-256 (lowercase hex) of a regular file, or `None` when it is absent,
+/// unreadable, or not a regular file. A symlink is never followed: a pinned
+/// oracle must be the bytes themselves, not a pointer to them.
+fn hash_file_if_present(path: &Path) -> Option<String> {
+    let is_regular = fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file());
+    if !is_regular {
+        return None;
+    }
+    fs::read(path)
+        .ok()
+        .map(|bytes| sha256::to_hex(&sha256::sha256(&bytes)))
+}
+
+/// The names of every entry directly inside `dir` (regular files,
+/// directories, symlinks and anything else alike), sorted, so nothing in an
+/// oracle directory escapes the manifest by not being a plain file.
+fn list_entry_names(dir: &Path) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("listing {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("listing {}: {e}", dir.display()))?;
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Every file the snapshot's manifest must account for: what is on disk,
+/// with the gitignored local build directory [`SNAPSHOT_BUILD_DIR`] skipped,
+/// plus every file git tracks under that directory. The skip is for local
+/// build output only; a file force-added there (`git add -f`) is committed
+/// content and must be listed like any other.
+fn snapshot_tree_listing(snapshot_dir: &Path) -> Result<Vec<String>, String> {
+    let mut names = list_tree_file_names(snapshot_dir, &[SNAPSHOT_BUILD_DIR])?;
+    names.extend(git_tracked_file_names(snapshot_dir, SNAPSHOT_BUILD_DIR)?);
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// The paths (relative to `dir`) of every file in git's index under
+/// `dir/sub`, whatever `.gitignore` says. Fails closed: a `git` that cannot
+/// run or answer is an error, never an empty list.
+fn git_tracked_file_names(dir: &Path, sub: &str) -> Result<Vec<String>, String> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["ls-files", "-z", "--", sub])
+        .output()
+        .map_err(|e| format!("git ls-files in {}: {e}", dir.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files in {} failed ({}): {}",
+            dir.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect())
+}
+
+/// Variables in the caller's environment that make git read another
+/// repository, work tree or index than the one it finds from its working
+/// directory. With any of them pointing elsewhere (another repository, or an
+/// index file that does not exist), `git ls-files` answers with an empty list
+/// and exit status 0, which would let a tracked file go unlisted. Other `GIT_*`
+/// variables are left alone: `ls-files` does not read objects, and a bad
+/// `GIT_OBJECT_DIRECTORY` or `GIT_CEILING_DIRECTORIES` only makes git fail,
+/// which already fails closed.
+const GIT_REDIRECT_ENV_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+
+/// A `git` command run in `dir`, with [`GIT_REDIRECT_ENV_VARS`] removed from
+/// the environment it inherits, so it finds the repository from `dir`.
+fn git_in(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(dir);
+    for var in GIT_REDIRECT_ENV_VARS {
+        command.env_remove(var);
+    }
+    command
+}
+
+/// The `/`-separated path (relative to `dir`) of every non-directory entry
+/// under `dir`, recursively and sorted: regular files, symlinks (never
+/// followed, so a symlinked directory is one entry) and anything else alike.
+/// Top-level entries named in `skip` are left out entirely.
+fn list_tree_file_names(dir: &Path, skip: &[&str]) -> Result<Vec<String>, String> {
+    fn walk(dir: &Path, prefix: &str, skip: &[&str], out: &mut Vec<String>) -> Result<(), String> {
+        let listing_error = |e: std::io::Error| format!("listing {}: {e}", dir.display());
+        for entry in fs::read_dir(dir).map_err(listing_error)? {
+            let entry = entry.map_err(listing_error)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if prefix.is_empty() && skip.contains(&name.as_str()) {
+                continue;
+            }
+            let path = format!("{prefix}{name}");
+            if entry.file_type().map_err(listing_error)?.is_dir() {
+                walk(&entry.path(), &format!("{path}/"), skip, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut names = Vec::new();
+    walk(dir, "", skip, &mut names)?;
+    names.sort();
+    Ok(names)
+}
+
+/// Parses a `sha256sum`-format manifest strictly: every non-empty line is a
+/// 64-character lowercase-hex digest, two spaces (or a space and the binary
+/// marker `*`), then a relative name that is neither absolute nor climbs out
+/// with `..`. A name listed twice is rejected. Returns `(digest, name)` pairs
+/// in file order, or every malformed line (1-based) as a message.
+fn parse_sha256sums(label: &str, text: &str) -> Result<Vec<(String, String)>, Vec<String>> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut errors = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed = line.split_at_checked(64).and_then(|(digest, rest)| {
+            let digest_ok = digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            let name = rest
+                .strip_prefix("  ")
+                .or_else(|| rest.strip_prefix(" *"))?;
+            (digest_ok && !name.is_empty()).then(|| (digest.to_string(), name.to_string()))
+        });
+        let Some((digest, name)) = parsed else {
+            errors.push(format!(
+                "{label}:{number}: not `<sha256>  <name>`: {line:?}"
+            ));
+            continue;
+        };
+        let relative = name.strip_prefix("./").unwrap_or(&name);
+        if relative.starts_with('/') || relative.split('/').any(|part| part == "..") {
+            errors.push(format!(
+                "{label}:{number}: name escapes the manifest's directory: {name:?}"
+            ));
+            continue;
+        }
+        if entries.iter().any(|(_, seen)| *seen == name) {
+            errors.push(format!("{label}:{number}: {name} is listed more than once"));
+            continue;
+        }
+        entries.push((digest, name));
+    }
+    if errors.is_empty() {
+        Ok(entries)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Verifies the canonical oracle directory against its manifest without
+/// touching the filesystem (`hash_of` supplies a file's digest, `None` when it
+/// is missing), so every failure branch is unit-testable:
+/// - the manifest parses, lists only plain names (no subdirectories), and is
+///   not empty;
+/// - every listed file exists as a regular file with exactly the listed
+///   digest;
+/// - every entry in the directory (`listing`: files, subdirectories and
+///   symlinks alike; it may include the manifest itself) is listed, so nothing
+///   unpinned can sit beside the oracles;
+/// - every independent pin `(name, digest)` the gate already holds is listed
+///   with that same digest, so the manifest cannot be edited to bless a
+///   changed oracle.
+///
+/// Returns the parsed entries on success, or every violation found.
+fn oracle_manifest_violations(
+    label: &str,
+    manifest_text: &str,
+    listing: &[String],
+    pins: &[(&str, String)],
+    hash_of: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, String)>, Vec<String>> {
+    let entries = parse_sha256sums(label, manifest_text)?;
+    let mut violations = Vec::new();
+    if entries.is_empty() {
+        violations.push(format!("{label}: missing or empty manifest"));
+    }
+    let manifest_name = file_name_of(label);
+    for (digest, name) in &entries {
+        if name.contains('/') {
+            violations.push(format!(
+                "{label}: {name} is not a plain file name in this directory"
+            ));
+            continue;
+        }
+        match hash_of(name) {
+            None => violations.push(format!(
+                "{label}: listed oracle is missing or not a regular file: {name}"
+            )),
+            Some(actual) if actual != *digest => violations.push(format!(
+                "{label}: {name}: expected {digest}, observed {actual}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for name in listing {
+        if name != manifest_name && !entries.iter().any(|(_, listed)| listed == name) {
+            violations.push(format!(
+                "{label}: {name} is in the oracle directory but not pinned"
+            ));
+        }
+    }
+    for (name, pinned) in pins {
+        match entries.iter().find(|(_, listed)| listed == name) {
+            None => violations.push(format!("{label}: does not list the pinned oracle {name}")),
+            Some((digest, _)) if digest != pinned => violations.push(format!(
+                "{label}: lists {name} as {digest}, but the gate pins {pinned}"
+            )),
+            Some(_) => {}
+        }
+    }
+    if violations.is_empty() {
+        Ok(entries)
+    } else {
+        Err(violations)
+    }
+}
+
+/// Verifies the v0.3.0 snapshot's own manifest without touching the
+/// filesystem: it parses and is not empty, and every listed file exists with
+/// its listed digest. The snapshot's copies of canonical files must be
+/// byte-identical to them, so it never holds a divergent second oracle:
+/// - every `(copy, counterpart)` in `copies` is listed, and with exactly the
+///   digest `canonical` records for that counterpart (never merely the digest
+///   of some other canonical file);
+/// - any other entry under `oracle/`, or whose file name is a canonical
+///   file's name, is an unmapped copy and fails;
+/// - every file in the snapshot (`listing`, paths relative to it; it may
+///   include the manifest itself) is listed, so nothing unpinned sits in it.
+///
+/// `canonical` is the canonical manifest's `(digest, name)` entries. Returns
+/// every violation found.
+fn snapshot_manifest_violations(
+    label: &str,
+    manifest_text: &str,
+    listing: &[String],
+    copies: &[(&str, &str)],
+    canonical: &[(String, String)],
+    hash_of: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let entries = match parse_sha256sums(label, manifest_text) {
+        Ok(entries) => entries,
+        Err(errors) => return errors,
+    };
+    let mut violations = Vec::new();
+    if entries.is_empty() {
+        violations.push(format!("{label}: missing or empty manifest"));
+    }
+    for (digest, name) in &entries {
+        let relative = name.strip_prefix("./").unwrap_or(name);
+        match hash_of(relative) {
+            None => violations.push(format!("{label}: listed file is missing: {name}")),
+            Some(actual) if actual != *digest => violations.push(format!(
+                "{label}: {name}: expected {digest}, observed {actual}"
+            )),
+            Some(_) => {}
+        }
+        match copies.iter().find(|(copy, _)| *copy == relative) {
+            Some((_, counterpart)) => {
+                match canonical.iter().find(|(_, name)| name == counterpart) {
+                    None => violations.push(format!(
+                        "{label}: {name} is a copy of {ORACLE_DIR}/{counterpart}, which {ORACLE_DIR}/ does not pin"
+                    )),
+                    Some((canonical_digest, _)) if canonical_digest != digest => {
+                        violations.push(format!(
+                            "{label}: {name} is listed as {digest}, but its canonical counterpart {ORACLE_DIR}/{counterpart} is {canonical_digest}"
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+            None if relative.starts_with("oracle/")
+                || canonical
+                    .iter()
+                    .any(|(_, canonical_name)| canonical_name == file_name_of(relative)) =>
+            {
+                violations.push(format!(
+                    "{label}: {name} is not a mapped copy of a canonical oracle in {ORACLE_DIR}/"
+                ));
+            }
+            None => {}
+        }
+    }
+    for (copy, counterpart) in copies {
+        let listed = entries
+            .iter()
+            .any(|(_, name)| name.strip_prefix("./").unwrap_or(name) == *copy);
+        if !listed {
+            violations.push(format!(
+                "{label}: does not list ./{copy}, the copy of {ORACLE_DIR}/{counterpart}"
+            ));
+        }
+    }
+    let manifest_name = file_name_of(label);
+    for path in listing {
+        let listed = entries
+            .iter()
+            .any(|(_, name)| name.strip_prefix("./").unwrap_or(name) == path);
+        if path != manifest_name && !listed {
+            violations.push(format!(
+                "{label}: ./{path} is in the snapshot but not listed"
+            ));
+        }
+    }
+    violations
 }
 
 /// Evaluates one oracle file's SHA-256 against its expected value, without
@@ -1178,6 +1615,488 @@ fn release_artifact_url() -> String {
     release_artifact_url_for(APP_VERSION_NAME)
 }
 
+/// The installed emulator's `Pkg.Revision`, if it has one.
+fn installed_emulator_revision(sdk_root: &Path) -> Option<String> {
+    fs::read_to_string(sdk_root.join("emulator/source.properties"))
+        .ok()
+        .and_then(|properties| emulator::package_revision(&properties))
+}
+
+/// One emulator archive the proof may run: its revision, its file name in
+/// the SDK repository, its size and its SHA-256.
+struct EmulatorPin<'a> {
+    revision: &'a str,
+    archive: &'a str,
+    size: usize,
+    sha256: &'a str,
+    /// Files of the unpacked archive (paths under `emulator/`) and their
+    /// SHA-256: what an installed emulator is checked against, since an
+    /// install sdkmanager made leaves no archive to hash.
+    files: &'a [(&'a str, &'a str)],
+}
+
+/// The emulator the proof is pinned to.
+const PINNED_EMULATOR: EmulatorPin<'static> = EmulatorPin {
+    revision: PINNED_EMULATOR_REVISION,
+    archive: PINNED_EMULATOR_ARCHIVE,
+    size: PINNED_EMULATOR_ARCHIVE_SIZE,
+    sha256: PINNED_EMULATOR_ARCHIVE_SHA256,
+    files: PINNED_EMULATOR_FILES,
+};
+
+/// Whether `archive` is the pin's archive: its size, then its SHA-256.
+fn check_emulator_archive(pin: &EmulatorPin, archive: &[u8]) -> Result<(), String> {
+    if archive.len() != pin.size {
+        return Err(format!(
+            "{} is {} bytes, not the pinned {}",
+            pin.archive,
+            archive.len(),
+            pin.size
+        ));
+    }
+    let digest = sha256::to_hex(&sha256::sha256(archive));
+    if digest != pin.sha256 {
+        return Err(format!(
+            "{} has SHA-256 {digest}, not the pinned {}",
+            pin.archive, pin.sha256
+        ));
+    }
+    Ok(())
+}
+
+/// Makes `<sdk>/emulator` the pinned revision (`PINNED_EMULATOR_REVISION`):
+/// kept when it passes `verify_installed_emulator` (the revision its
+/// `package.xml` and `source.properties` name, the SHA-256 of the pinned
+/// archive's files), else replaced by the pinned archive, downloaded from
+/// the SDK repository over HTTPS and verified first; what was done, for the
+/// log.
+fn install_pinned_emulator(sdk_root: &Path) -> Result<String, String> {
+    install_emulator_pin(sdk_root, &PINNED_EMULATOR, |archive, dest| {
+        let url = format!("{SDK_REPOSITORY_URL}/{archive}");
+        println!("== fetching {url} ==");
+        run_status({
+            let mut c = Command::new("curl");
+            // HTTPS only, redirects included.
+            c.args([
+                "-fsSL",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--retry",
+                "3",
+                "-o",
+            ])
+            .arg(dest)
+            .arg(&url);
+            c
+        })
+        .map_err(|e| format!("downloading the pinned emulator {url}: {e}"))
+    })
+}
+
+/// The two filesystem operations the emulator swap and its rollback use;
+/// a test injects failures through it.
+trait EmulatorFs {
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        fs::rename(from, to)
+    }
+    fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()> {
+        fs::remove_dir_all(dir)
+    }
+}
+
+/// The real filesystem.
+struct RealFs;
+impl EmulatorFs for RealFs {}
+
+/// The working directories beside `<sdk>/emulator`. `previous` holds the
+/// emulator that was installed before a swap and is removed only once an
+/// emulator at `dir` has verified; `staging` and `rejected` (an emulator that
+/// failed verification, moved out of the way) never hold the only usable
+/// copy and may always be removed.
+struct EmulatorDirs {
+    dir: PathBuf,
+    staging: PathBuf,
+    previous: PathBuf,
+    rejected: PathBuf,
+}
+
+impl EmulatorDirs {
+    fn new(sdk_root: &Path) -> Self {
+        Self {
+            dir: sdk_root.join("emulator"),
+            staging: sdk_root.join(".emulator-pin-staging"),
+            previous: sdk_root.join(".emulator-pin-previous"),
+            rejected: sdk_root.join(".emulator-pin-rejected"),
+        }
+    }
+
+    /// Removes `staging` and `rejected`, and `previous` too when
+    /// `dir_verified` (it is then not the only usable copy); what could not
+    /// be removed.
+    fn clean(&self, fs: &dyn EmulatorFs, dir_verified: bool) -> Vec<String> {
+        let mut removable = vec![&self.staging, &self.rejected];
+        if dir_verified {
+            removable.push(&self.previous);
+        }
+        removable
+            .into_iter()
+            .filter(|leftover| leftover.exists())
+            .filter_map(|leftover| {
+                fs.remove_dir_all(leftover)
+                    .err()
+                    .map(|e| format!("{} could not be removed: {e}", leftover.display()))
+            })
+            .collect()
+    }
+}
+
+/// `" (warning: …)"` for leftovers that could not be removed, else nothing.
+fn leftover_warning(leftovers: &[String]) -> String {
+    if leftovers.is_empty() {
+        String::new()
+    } else {
+        format!(" (warning: {})", leftovers.join("; "))
+    }
+}
+
+/// `install_pinned_emulator` for any pin, `fetch` writing the pin's archive
+/// to the path it is given.
+fn install_emulator_pin(
+    sdk_root: &Path,
+    pin: &EmulatorPin,
+    fetch: impl FnOnce(&str, &Path) -> Result<(), String>,
+) -> Result<String, String> {
+    install_emulator_pin_with(sdk_root, pin, fetch, &RealFs)
+}
+
+/// `install_emulator_pin` through `fs`. An emulator left at `previous` by an
+/// earlier run is put back first unless the one at `dir` verifies. An
+/// installed emulator is kept only when it passes `verify_installed_emulator`.
+/// Otherwise the archive is verified, unpacked into a staging directory and
+/// checked there, given the installed emulator's `package.xml`, swapped in
+/// (`swap_in_emulator`, the old one moved to `previous`) and verified again;
+/// one that does not verify is moved to `rejected` and `previous` put back.
+/// `previous` is removed only beside a verified emulator, so the old copy
+/// survives every failure, across runs; what is where is said in the error.
+fn install_emulator_pin_with(
+    sdk_root: &Path,
+    pin: &EmulatorPin,
+    fetch: impl FnOnce(&str, &Path) -> Result<(), String>,
+    fs: &dyn EmulatorFs,
+) -> Result<String, String> {
+    let dirs = EmulatorDirs::new(sdk_root);
+    // An earlier run that could not finish its rollback left the old
+    // emulator at `previous`, with nothing or an unverified emulator at
+    // `dir`: it is put back before anything else.
+    if dirs.previous.exists()
+        && !(dirs.dir.exists() && verify_installed_emulator(sdk_root, pin).is_ok())
+    {
+        let restored = restore_previous_emulator(&dirs, fs).map_err(|e| {
+            format!(
+                "an earlier run left the previous emulator at {}, and {e}",
+                dirs.previous.display()
+            )
+        })?;
+        println!("== {restored} (left by an earlier run) ==");
+    }
+    let installed = installed_emulator_revision(sdk_root);
+    let mismatch = match verify_installed_emulator(sdk_root, pin) {
+        Ok(verified) => {
+            let leftovers = dirs.clean(fs, true);
+            return Ok(format!(
+                "emulator {}: kept, {verified}{}",
+                pin.revision,
+                leftover_warning(&leftovers)
+            ));
+        }
+        Err(mismatch) => mismatch,
+    };
+    println!(
+        "== the installed emulator ({}) is not the pinned {}: {mismatch} ==",
+        installed.as_deref().unwrap_or("none"),
+        pin.revision
+    );
+    // `previous` was put back above, so only removable leftovers remain;
+    // they must go before the swap reuses their names.
+    let stale = dirs.clean(fs, false);
+    if !stale.is_empty() || dirs.previous.exists() {
+        return Err(format!(
+            "the emulator pin's working directories are not clear: {}",
+            if stale.is_empty() {
+                format!("{} still exists", dirs.previous.display())
+            } else {
+                stale.join("; ")
+            }
+        ));
+    }
+    std::fs::create_dir_all(&dirs.staging)
+        .map_err(|e| format!("creating {}: {e}", dirs.staging.display()))?;
+    let swapped = stage_emulator_pin(sdk_root, &dirs.staging, pin, fetch).and_then(|unpacked| {
+        swap_in_emulator(&unpacked, &dirs.dir, &dirs.previous, |from, to| {
+            fs.rename(from, to)
+        })
+    });
+    if let Err(mut error) = swapped {
+        // What the swap left is in its error; `previous`, if there, is kept.
+        let leftovers = dirs.clean(fs, false);
+        if !leftovers.is_empty() {
+            error.push_str(&format!("; {}", leftovers.join("; ")));
+        }
+        return Err(error);
+    }
+    // The previous emulator is kept until its replacement verifies.
+    let verified = match verify_installed_emulator(sdk_root, pin) {
+        Ok(verified) => verified,
+        Err(e) => {
+            let restored = restore_previous_emulator(&dirs, fs).unwrap_or_else(|kept| kept);
+            let leftovers = dirs.clean(fs, false);
+            return Err(format!(
+                "the swapped-in emulator does not verify: {e}; {restored}{}",
+                leftover_warning(&leftovers)
+            ));
+        }
+    };
+    let leftovers = dirs.clean(fs, true);
+    Ok(format!(
+        "emulator {}: the pinned archive {}, verified, in place of {}; {verified}{}",
+        pin.revision,
+        pin.archive,
+        installed.as_deref().unwrap_or("none"),
+        leftover_warning(&leftovers)
+    ))
+}
+
+/// Puts the emulator kept at `previous` back at `dir`, moving whatever is at
+/// `dir` (an emulator that did not verify) to `rejected` first. `Ok` once the
+/// previous emulator is at `dir`; otherwise what is where, with `previous`
+/// never removed.
+fn restore_previous_emulator(dirs: &EmulatorDirs, fs: &dyn EmulatorFs) -> Result<String, String> {
+    let (dir, previous, rejected) = (&dirs.dir, &dirs.previous, &dirs.rejected);
+    if !previous.exists() {
+        return Err(format!(
+            "there was no previous emulator to restore, so the unverified one stays at {}",
+            dir.display()
+        ));
+    }
+    if dir.exists() {
+        if rejected.exists() {
+            fs.remove_dir_all(rejected).map_err(|e| {
+                format!(
+                    "clearing {} failed ({e}); the unverified emulator stays at {} and the previous one is kept at {}",
+                    rejected.display(),
+                    dir.display(),
+                    previous.display()
+                )
+            })?;
+        }
+        fs.rename(dir, rejected).map_err(|e| {
+            format!(
+                "moving the unverified emulator from {} to {} failed ({e}); the previous one is kept at {}",
+                dir.display(),
+                rejected.display(),
+                previous.display()
+            )
+        })?;
+    }
+    fs.rename(previous, dir).map_err(|e| {
+        format!(
+            "restoring the previous emulator failed ({e}): {} is missing and the previous emulator is kept at {}",
+            dir.display(),
+            previous.display()
+        )
+    })?;
+    Ok(format!(
+        "the previous emulator was restored to {}",
+        dir.display()
+    ))
+}
+
+/// Moves the emulator at `dir` aside to `previous` and `unpacked` into its
+/// place, through `rename`. On failure the error says what is where: the
+/// installed emulator untouched, moved back, or (when moving it back failed
+/// too) at `previous` with `dir` missing.
+fn swap_in_emulator(
+    unpacked: &Path,
+    dir: &Path,
+    previous: &Path,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let had_previous = dir.exists();
+    if had_previous {
+        rename(dir, previous).map_err(|e| {
+            format!(
+                "moving {} aside to {}: {e}; the installed emulator was not touched",
+                dir.display(),
+                previous.display()
+            )
+        })?;
+    }
+    let Err(e) = rename(unpacked, dir) else {
+        return Ok(());
+    };
+    let moving = format!(
+        "moving {} into place at {}: {e}",
+        unpacked.display(),
+        dir.display()
+    );
+    if !had_previous {
+        return Err(format!("{moving}; there was no emulator installed before"));
+    }
+    match rename(previous, dir) {
+        Ok(()) => Err(format!(
+            "{moving}; the previous emulator was moved back to {}",
+            dir.display()
+        )),
+        Err(back) => Err(format!(
+            "{moving}; moving the previous emulator back failed too ({back}): {} is missing and the previous emulator is at {}",
+            dir.display(),
+            previous.display()
+        )),
+    }
+}
+
+/// Whether `<sdk>/emulator` is the pin: its `package.xml` and
+/// `source.properties` name the pinned revision and every one of the pin's
+/// `files` has its pinned SHA-256; what was checked, or the first mismatch.
+fn verify_installed_emulator(sdk_root: &Path, pin: &EmulatorPin) -> Result<String, String> {
+    let dir = sdk_root.join("emulator");
+    let revision = installed_emulator_revision(sdk_root);
+    if revision.as_deref() != Some(pin.revision) {
+        return Err(format!(
+            "source.properties names revision {}",
+            revision.as_deref().unwrap_or("none")
+        ));
+    }
+    let package_xml = fs::read_to_string(dir.join("package.xml"))
+        .map_err(|e| format!("no readable package.xml: {e}"))?;
+    let named = emulator_package_revision(&package_xml);
+    if named.as_deref() != Some(pin.revision) {
+        return Err(format!(
+            "package.xml names revision {}, not {}",
+            named.as_deref().unwrap_or("none"),
+            pin.revision
+        ));
+    }
+    for (file, want) in pin.files {
+        let path = dir.join(file);
+        let digest = sha256::to_hex(&sha256::sha256(
+            &fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?,
+        ));
+        if digest != *want {
+            return Err(format!(
+                "{} has SHA-256 {digest}, not the pinned archive's {want}",
+                path.display()
+            ));
+        }
+    }
+    Ok(format!(
+        "package.xml and source.properties name {} and the SHA-256 of {} file(s) matches the pinned archive ({})",
+        pin.revision,
+        pin.files.len(),
+        pin.files
+            .iter()
+            .map(|(file, _)| *file)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// Fetches, verifies and unpacks the pin's archive inside `staging`, with
+/// the installed emulator's `package.xml` carried over; the unpacked
+/// `emulator` directory.
+fn stage_emulator_pin(
+    sdk_root: &Path,
+    staging: &Path,
+    pin: &EmulatorPin,
+    fetch: impl FnOnce(&str, &Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let download = staging.join(pin.archive);
+    fetch(pin.archive, &download)?;
+    check_emulator_archive(pin, &read_bytes(&download)?)?;
+    // The archive's single top-level directory is `emulator/`.
+    run_status({
+        let mut c = Command::new("unzip");
+        c.arg("-q").arg(&download).arg("-d").arg(staging);
+        c
+    })?;
+    let revision = installed_emulator_revision(staging);
+    if revision.as_deref() != Some(pin.revision) {
+        return Err(format!(
+            "{} unpacked to source.properties revision {revision:?}, not {}",
+            pin.archive, pin.revision
+        ));
+    }
+    // The archive carries no package.xml (sdkmanager writes it): the one
+    // sdkmanager wrote is kept, its revision rewritten to the pinned one.
+    let unpacked = staging.join("emulator");
+    let metadata = fs::read_to_string(sdk_root.join("emulator/package.xml")).ok();
+    let package_xml = unpacked.join("package.xml");
+    fs::write(
+        &package_xml,
+        emulator_package_xml(pin.revision, metadata.as_deref()),
+    )
+    .map_err(|e| format!("writing {}: {e}", package_xml.display()))?;
+    Ok(unpacked)
+}
+
+/// A revision (`37.2.12`) as sdkmanager's `package.xml` writes it.
+fn emulator_revision_xml(revision: &str) -> String {
+    let mut parts = revision.split('.');
+    let mut part = || parts.next().unwrap_or("0");
+    format!(
+        "<revision><major>{}</major><minor>{}</minor><micro>{}</micro></revision>",
+        part(),
+        part(),
+        part()
+    )
+}
+
+/// Where the `<localPackage>`'s `<revision>` element of a `package.xml`
+/// starts and ends (exclusive); a licence text before it may say anything.
+fn package_revision_span(xml: &str) -> Option<(usize, usize)> {
+    let local = xml.find("<localPackage")?;
+    let open = local + xml[local..].find("<revision>")?;
+    let close = open + xml[open..].find("</revision>")? + "</revision>".len();
+    Some((open, close))
+}
+
+/// The revision (`37.2.12`) the `<localPackage>` of a `package.xml` names,
+/// read component by component, whatever whitespace separates them; a
+/// missing `<minor>` or `<micro>` reads 0, as sdkmanager means it.
+fn emulator_package_revision(xml: &str) -> Option<String> {
+    let (open, close) = package_revision_span(xml)?;
+    let span = &xml[open..close];
+    let part = |tag: &str| -> Option<u32> {
+        let (start, end) = (format!("<{tag}>"), format!("</{tag}>"));
+        let from = span.find(&start)? + start.len();
+        let to = from + span[from..].find(&end)?;
+        span[from..to].trim().parse().ok()
+    };
+    let major = part("major")?;
+    Some(format!(
+        "{major}.{}.{}",
+        part("minor").unwrap_or(0),
+        part("micro").unwrap_or(0)
+    ))
+}
+
+/// The `package.xml` of an emulator `revision`: sdkmanager's own for the
+/// emulator it installed, with the revision rewritten, else a minimal one
+/// in sdkmanager's format.
+fn emulator_package_xml(revision: &str, existing: Option<&str>) -> String {
+    let revision = emulator_revision_xml(revision);
+    if let Some(xml) = existing
+        && let Some((open, close)) = package_revision_span(xml)
+    {
+        return format!("{}{revision}{}", &xml[..open], &xml[close..]);
+    }
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><ns2:repository xmlns:ns2=\"http://schemas.android.com/repository/android/common/02\" xmlns:ns5=\"http://schemas.android.com/repository/android/generic/02\"><localPackage path=\"emulator\" obsolete=\"false\"><type-details xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"ns5:genericDetailsType\"/>{revision}<display-name>Android Emulator</display-name></localPackage></ns2:repository>"
+    )
+}
+
 /// The release asset URL of a version name's artifact (tag `v<name>`).
 fn release_artifact_url_for(version_name: &str) -> String {
     format!(
@@ -1206,6 +2125,60 @@ const PINNED_SYSTEM_IMAGE_TAG: &str = "default";
 const PINNED_EMULATOR_IMAGE_API: u32 = 34;
 const PINNED_EMULATOR_IMAGE_TAG: &str = "google_apis";
 const PINNED_EMULATOR_IMAGE_ABI: &str = "x86_64";
+/// The emulator the emulator proof boots the image with. sdkmanager cannot
+/// ask for a version of `emulator`, only for the newest its channel carries,
+/// and that moved from 37.1.11 to 37.2.12 between two runner images: 37.2.12
+/// hands the guest's Wi-Fi to netsimd, whose access point has a locally
+/// administered BSSID, and every survey history check went red with no change
+/// in this repository. So `android-sdk-install --emulator` checks what
+/// sdkmanager installed and, when the channel has moved on, puts this exact
+/// archive from the SDK repository in its place, checked against its pinned
+/// size and SHA-256 (the repository lists its SHA-1 as
+/// cd7362ea55dfb86a418958138dc396e74165dd01). Bump all four together, in a
+/// reviewed change, once the proof is green on the new revision.
+const PINNED_EMULATOR_REVISION: &str = "37.2.12";
+const PINNED_EMULATOR_ARCHIVE: &str = "emulator-linux_x64-16428233.zip";
+const PINNED_EMULATOR_ARCHIVE_SIZE: usize = 349_654_171;
+const PINNED_EMULATOR_ARCHIVE_SHA256: &str =
+    "b08fc43d8608d2955f607f1b287beb525041e730086bdca3af152accac3af9c1";
+/// What an installed 37.2.12 is checked against when sdkmanager installed it
+/// (no archive left to hash): the SHA-256 of the files in the pinned archive
+/// that decide what the proof runs — the launcher, the x86_64 QEMU binaries
+/// (windowed and headless), netsimd, the feature defaults that carry
+/// `WiFiPacketStream`, the virtio-wifi access point's `hostapd.conf`, and the
+/// package's own properties.
+const PINNED_EMULATOR_FILES: &[(&str, &str)] = &[
+    (
+        "emulator",
+        "27e9a8cbd545529ba2c1aca973e5bc060f50b36a68d2c03296b0162291a16b83",
+    ),
+    (
+        "qemu/linux-x86_64/qemu-system-x86_64",
+        "2924da89cef31402e0379b643a73e4d60097239323095730fc8a78aa55b082f6",
+    ),
+    (
+        "qemu/linux-x86_64/qemu-system-x86_64-headless",
+        "23b788a3b87b3228558924de4cb5477e2818b3b9415d6ce27d6438cf3e462b98",
+    ),
+    (
+        "netsimd",
+        "b32f5ff232b86e2b4bd43e0245b04f72a8c19851ba6087b041a770bd24157088",
+    ),
+    (
+        "lib/advancedFeatures.ini",
+        "0f4532724ad5d666139607ab64bfb3eb42af140343ffb69c97afe72cb686d5f8",
+    ),
+    (
+        "lib/hostapd.conf",
+        "ec59f9e548f8abac42bfa45f466646e57d4e61231a6f2256d3a9952086a9ffd6",
+    ),
+    (
+        "source.properties",
+        "ba13085f647fb8389a4d06a1de0e4104ac4e841733e50f67223ac230e1ce685a",
+    ),
+];
+/// Where sdkmanager itself downloads SDK archives from.
+const SDK_REPOSITORY_URL: &str = "https://dl.google.com/android/repository";
 
 /// Which pinned package set `android-sdk-packages` prints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1368,6 +2341,9 @@ fn cmd_android_sdk_install(args: &[String]) -> Result<(), String> {
                 .collect::<Vec<_>>()
                 .join(" ")
         ));
+    }
+    if set == SdkPackageSet::Emulator {
+        println!("{}", install_pinned_emulator(&sdk_root)?);
     }
     // What the proofs will actually pick up.
     let found: Vec<String> = match set {
@@ -2944,6 +3920,73 @@ fn cmd_verify_android_live() -> Result<(), String> {
     Ok(())
 }
 
+/// `cargo xtask verify-apk-rebuild [--byte-identical] <committed.apk> <rebuilt.apk>`:
+/// the two packages must agree once the APK Signing Block is removed from
+/// both ([`apk_rebuild::verify`]). By default every entry's bytes, the central
+/// directory and the end record must be equal, with entry order free (it
+/// follows the build host's directory-read order). `--byte-identical`
+/// requires the stripped files themselves to be equal. CI's `android-apk` job
+/// runs it on the committed APK (as `git show HEAD:<apk>`) and the package
+/// `verify-android-live` just built, so it holds whatever key signed either:
+/// `build-apk`'s debug key is generated per build directory.
+fn cmd_verify_apk_rebuild(args: &[String]) -> Result<(), String> {
+    const USAGE: &str =
+        "usage: cargo xtask verify-apk-rebuild [--byte-identical] <committed.apk> <rebuilt.apk>";
+    let (mode, paths) = match args {
+        [flag, rest @ ..] if flag == "--byte-identical" => (apk_rebuild::Mode::ByteIdentical, rest),
+        _ => (apk_rebuild::Mode::LayoutIndependent, args),
+    };
+    let [committed, rebuilt] = paths else {
+        return Err(USAGE.to_string());
+    };
+    if committed.starts_with('-') || rebuilt.starts_with('-') {
+        return Err(USAGE.to_string());
+    }
+    let read = |path: &str| {
+        fs::read(path)
+            .map_err(|e| format!("cannot read {path}: {e}; refusing to compare (fail closed)"))
+    };
+    let summary =
+        apk_rebuild::verify(committed, &read(committed)?, rebuilt, &read(rebuilt)?, mode)?;
+    println!("{summary}");
+    Ok(())
+}
+
+#[cfg(test)]
+mod verify_apk_rebuild_cli_tests {
+    use super::cmd_verify_apk_rebuild;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn usage_errors_and_missing_files_fail_closed() {
+        for bad in [
+            &[][..],
+            &["one.apk"][..],
+            &["a", "b", "c"][..],
+            &["--byte-identical", "a"][..],
+            &["--bogus", "a"][..],
+        ] {
+            let err = cmd_verify_apk_rebuild(&args(bad)).unwrap_err();
+            assert!(err.starts_with("usage:"), "{bad:?}: {err}");
+        }
+        let missing = std::env::temp_dir().join("xtask-verify-apk-rebuild-no-such-file.apk");
+        let missing = missing.to_str().unwrap();
+        for list in [
+            vec![missing, missing],
+            vec!["--byte-identical", missing, missing],
+        ] {
+            let err = cmd_verify_apk_rebuild(&args(&list)).unwrap_err();
+            assert!(
+                err.contains("cannot read") && err.contains("fail closed"),
+                "{err}"
+            );
+        }
+    }
+}
+
 /// The timestamp every packaged entry carries: ZIP's epoch, 1980-01-01
 /// 00:00 in the UTC the zip step runs in — what aapt2 stamps on its own
 /// entries — so a rebuild from unchanged sources is byte-identical.
@@ -3783,7 +4826,7 @@ fn ndk_aarch64_clang(ndk_root: &Path) -> Result<PathBuf, String> {
 /// into `workdir` (via `jar`, part of the JDK the live tier already needs) and
 /// refuses to proceed unless it matches the pinned immutable-oracle SHA-256.
 fn extract_and_pin_oracle_so(root: &Path, workdir: &Path) -> Result<PathBuf, String> {
-    let zip = root.join(MIGRATION_ZIP_NAME);
+    let zip = root.join(MIGRATION_ZIP_PATH);
     if !zip.is_file() {
         return Err(format!("missing migration archive: {}", zip.display()));
     }
@@ -3979,6 +5022,18 @@ fn cmd_deny() -> Result<(), String> {
     run_status(cmd)
 }
 
+/// The `git diff --exit-code docs/PARITY_COVERAGE.md` that `gates` runs in
+/// `root` after regenerating the report: it exits non-zero when the
+/// regenerated report differs from the one in git's index. Built by
+/// [`git_in`]: with [`GIT_REDIRECT_ENV_VARS`] inherited from the caller and
+/// pointing at another repository, work tree or a missing index, git found
+/// nothing to compare and exited 0, so a drifted report passed.
+fn parity_coverage_drift_check(root: &Path) -> Command {
+    let mut command = git_in(root);
+    command.args(["diff", "--exit-code", "docs/PARITY_COVERAGE.md"]);
+    command
+}
+
 fn cmd_gates() -> Result<(), String> {
     let root = repo_root()?;
 
@@ -4061,12 +5116,7 @@ fn cmd_gates() -> Result<(), String> {
 
     println!("== parity report drift ==");
     cmd_parity_report()?;
-    run_status({
-        let mut c = Command::new("git");
-        c.current_dir(&root)
-            .args(["diff", "--exit-code", "docs/PARITY_COVERAGE.md"]);
-        c
-    })?;
+    run_status(parity_coverage_drift_check(&root))?;
 
     println!("== dependency policy ==");
     cmd_check_dependency_policy()?;
@@ -4220,6 +5270,649 @@ mod tests {
             sdk_package_dir(sdk, "emulator"),
             PathBuf::from("/sdk/emulator")
         );
+    }
+
+    #[test]
+    fn the_emulator_is_pinned_to_one_verified_archive() {
+        let sdk = sdk_fixture("emulator-pin");
+        assert_eq!(installed_emulator_revision(&sdk), None);
+        fs::create_dir_all(sdk.join("emulator")).unwrap();
+        fs::write(
+            sdk.join("emulator/source.properties"),
+            format!("Pkg.Revision={PINNED_EMULATOR_REVISION}\nPkg.Path=emulator\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            installed_emulator_revision(&sdk).as_deref(),
+            Some(PINNED_EMULATOR_REVISION)
+        );
+        // The right revision alone does not verify: package.xml and the
+        // pinned files are checked too.
+        assert!(
+            verify_installed_emulator(&sdk, &PINNED_EMULATOR)
+                .unwrap_err()
+                .contains("package.xml")
+        );
+        assert_eq!(PINNED_EMULATOR.files.len(), 7);
+        assert!(
+            PINNED_EMULATOR
+                .files
+                .iter()
+                .all(|(_, digest)| digest.len() == 64)
+        );
+        assert!(
+            check_emulator_archive(&PINNED_EMULATOR, b"PK")
+                .unwrap_err()
+                .contains("not the pinned 349654171")
+        );
+        // sdkmanager's metadata is kept, only its revision rewritten; without
+        // it a minimal one in its format names the pinned revision.
+        let pinned = "<revision><major>37</major><minor>2</minor><micro>12</micro></revision>";
+        let sdkmanager = r#"<?xml version="1.0"?><ns2:repository><license id="l">a <revision> in a licence</license><localPackage path="emulator" obsolete="false"><revision><major>37</major><minor>3</minor><micro>2</micro></revision><display-name>Android Emulator</display-name></localPackage></ns2:repository>"#;
+        let rewritten = emulator_package_xml(PINNED_EMULATOR_REVISION, Some(sdkmanager));
+        assert_eq!(
+            rewritten,
+            sdkmanager.replace(
+                "<revision><major>37</major><minor>3</minor><micro>2</micro></revision>",
+                pinned
+            )
+        );
+        // The revision is read by component, whatever the whitespace.
+        let indented = "<ns2:repository><license>a <revision><major>1</major></revision></license>\n  <localPackage path=\"emulator\">\n    <revision>\n      <major>37</major>\n      <minor> 2 </minor>\n      <micro>12</micro>\n    </revision>\n  </localPackage>\n</ns2:repository>";
+        assert_eq!(
+            emulator_package_revision(indented).as_deref(),
+            Some("37.2.12")
+        );
+        assert_eq!(
+            emulator_package_revision(&rewritten).as_deref(),
+            Some(PINNED_EMULATOR_REVISION)
+        );
+        assert_eq!(
+            emulator_package_revision(
+                "<localPackage><revision><major>37</major></revision></localPackage>"
+            )
+            .as_deref(),
+            Some("37.0.0")
+        );
+        assert_eq!(
+            emulator_package_revision("<localPackage><revision><major>x</major></revision>"),
+            None
+        );
+        assert_eq!(emulator_package_revision("garbage"), None);
+        let generated = emulator_package_xml(PINNED_EMULATOR_REVISION, None);
+        assert!(
+            generated.contains(r#"<localPackage path="emulator""#),
+            "{generated}"
+        );
+        assert!(generated.contains(pinned), "{generated}");
+        assert_eq!(
+            emulator_package_xml(PINNED_EMULATOR_REVISION, Some("garbage")),
+            generated
+        );
+        assert_eq!(PINNED_EMULATOR_ARCHIVE_SHA256.len(), 64);
+        assert!(PINNED_EMULATOR_ARCHIVE.starts_with("emulator-linux_x64-"));
+    }
+
+    /// A stored (uncompressed) zip of `files`, as `unzip` reads it.
+    fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for byte in data {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        let (mut out, mut central) = (Vec::new(), Vec::new());
+        for (name, data) in files {
+            let offset = u32::try_from(out.len()).unwrap();
+            let (size, crc) = (u32::try_from(data.len()).unwrap(), crc32(data));
+            let name_len = u16::try_from(name.len()).unwrap();
+            let mut common = Vec::new();
+            common.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            common.extend_from_slice(&crc.to_le_bytes());
+            common.extend_from_slice(&size.to_le_bytes());
+            common.extend_from_slice(&size.to_le_bytes());
+            common.extend_from_slice(&name_len.to_le_bytes());
+            common.extend_from_slice(&[0, 0]);
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            out.extend_from_slice(&common);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&[20, 3]);
+            central.extend_from_slice(&common);
+            // comment length, disk number, internal attributes
+            central.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+            central.extend_from_slice(&(0o100_755u32 << 16).to_le_bytes());
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let (central_at, central_len) = (
+            u32::try_from(out.len()).unwrap(),
+            u32::try_from(central.len()).unwrap(),
+        );
+        let count = u16::try_from(files.len()).unwrap();
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&central_len.to_le_bytes());
+        out.extend_from_slice(&central_at.to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    #[test]
+    fn a_failed_swap_says_where_the_previous_emulator_is() {
+        use std::cell::Cell;
+        let fixture = |label: &str| {
+            let sdk = sdk_fixture(label);
+            fs::create_dir_all(sdk.join("emulator")).unwrap();
+            fs::write(sdk.join("emulator/old"), "old").unwrap();
+            fs::create_dir_all(sdk.join("staging/emulator")).unwrap();
+            fs::write(sdk.join("staging/emulator/new"), "new").unwrap();
+            sdk
+        };
+        // A rename that fails on the listed calls (1-based), else renames.
+        let failing = |fail: &'static [u32]| {
+            let calls = Cell::new(0);
+            move |from: &Path, to: &Path| {
+                calls.set(calls.get() + 1);
+                if fail.contains(&calls.get()) {
+                    Err(std::io::Error::other("injected"))
+                } else {
+                    fs::rename(from, to)
+                }
+            }
+        };
+        let swap = |sdk: &Path, rename| {
+            swap_in_emulator(
+                &sdk.join("staging/emulator"),
+                &sdk.join("emulator"),
+                &sdk.join("previous"),
+                rename,
+            )
+        };
+
+        let sdk = fixture("swap-ok");
+        assert_eq!(swap(&sdk, failing(&[])), Ok(()));
+        assert!(sdk.join("emulator/new").is_file() && sdk.join("previous/old").is_file());
+
+        // Moving the old emulator aside fails: it was not touched.
+        let sdk = fixture("swap-aside");
+        let error = swap(&sdk, failing(&[1])).unwrap_err();
+        assert!(
+            error.contains("the installed emulator was not touched"),
+            "{error}"
+        );
+        assert!(sdk.join("emulator/old").is_file());
+
+        // Moving the new one in fails, moving the old one back works.
+        let sdk = fixture("swap-back");
+        let error = swap(&sdk, failing(&[2])).unwrap_err();
+        assert!(
+            error.contains("the previous emulator was moved back"),
+            "{error}"
+        );
+        assert!(sdk.join("emulator/old").is_file());
+
+        // Both fail: the error says the emulator is missing and where the old
+        // one is, never that it is intact.
+        let sdk = fixture("swap-lost");
+        let error = swap(&sdk, failing(&[2, 3])).unwrap_err();
+        assert!(
+            error.contains("moving the previous emulator back failed too (injected)"),
+            "{error}"
+        );
+        assert!(
+            error.contains("is missing and the previous emulator is at"),
+            "{error}"
+        );
+        assert!(!error.contains("moved back to"), "{error}");
+        assert!(!sdk.join("emulator").exists() && sdk.join("previous/old").is_file());
+
+        // No emulator before: nothing to move back, and the error says so.
+        let sdk = fixture("swap-none");
+        fs::remove_dir_all(sdk.join("emulator")).unwrap();
+        let error = swap(&sdk, failing(&[1])).unwrap_err();
+        assert!(
+            error.contains("there was no emulator installed before"),
+            "{error}"
+        );
+        for label in [
+            "swap-ok",
+            "swap-aside",
+            "swap-back",
+            "swap-lost",
+            "swap-none",
+        ] {
+            let _ = fs::remove_dir_all(sdk_fixture(label));
+        }
+    }
+
+    /// A filesystem whose `rename` fails onto the listed names and whose
+    /// `remove_dir_all` fails on the listed names (file names under the SDK).
+    struct FaultyFs {
+        rename_onto: &'static [&'static str],
+        remove: &'static [&'static str],
+    }
+
+    impl FaultyFs {
+        fn named(path: &Path, names: &[&str]) -> bool {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| names.contains(&name))
+        }
+    }
+
+    impl EmulatorFs for FaultyFs {
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            if Self::named(to, self.rename_onto) {
+                return Err(std::io::Error::other("injected rename failure"));
+            }
+            fs::rename(from, to)
+        }
+        fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()> {
+            if Self::named(dir, self.remove) {
+                return Err(std::io::Error::other("injected removal failure"));
+            }
+            fs::remove_dir_all(dir)
+        }
+    }
+
+    /// An installed emulator 37.3.2 marked `old`, as sdkmanager left it.
+    fn old_emulator(sdk: &Path) {
+        let old = sdk.join("emulator");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("source.properties"), "Pkg.Revision=37.3.2\n").unwrap();
+        fs::write(
+            old.join("package.xml"),
+            "<localPackage path=\"emulator\"><revision><major>37</major><minor>3</minor><micro>2</micro></revision></localPackage>",
+        )
+        .unwrap();
+        fs::write(old.join("old-marker"), "old").unwrap();
+    }
+
+    #[test]
+    fn a_rejected_emulator_never_costs_the_previous_one_across_runs() {
+        let sdk = sdk_fixture("emulator-two-runs");
+        old_emulator(&sdk);
+        let props: &[u8] = b"Pkg.Revision=9.8.7\nPkg.Path=emulator\n";
+        let good = stored_zip(&[
+            ("emulator/source.properties", props),
+            ("emulator/emulator", b"#!/bin/sh\n"),
+        ]);
+        let digest = sha256::to_hex(&sha256::sha256(&good));
+        let props_digest = sha256::to_hex(&sha256::sha256(props));
+        let launcher_digest = sha256::to_hex(&sha256::sha256(b"#!/bin/sh\n"));
+        let files = [
+            ("emulator", launcher_digest.as_str()),
+            ("source.properties", props_digest.as_str()),
+        ];
+        let pin = EmulatorPin {
+            revision: "9.8.7",
+            archive: "fake.zip",
+            size: good.len(),
+            sha256: &digest,
+            files: &files,
+        };
+        // The archive verifies but unpacks to a launcher the pin does not name.
+        let wrong = [("emulator", "0".repeat(64))];
+        let wrong: Vec<(&str, &str)> = wrong.iter().map(|(f, d)| (*f, d.as_str())).collect();
+        let unverified = EmulatorPin {
+            files: &wrong,
+            ..pin
+        };
+        let serve = |bytes: Vec<u8>| {
+            move |_: &str, dest: &Path| fs::write(dest, &bytes).map_err(|e| e.to_string())
+        };
+
+        // Run 1: the swapped-in emulator does not verify and cannot be moved
+        // out of the way either. The old one stays at .emulator-pin-previous.
+        let stuck = FaultyFs {
+            rename_onto: &[".emulator-pin-rejected"],
+            remove: &[],
+        };
+        let error =
+            install_emulator_pin_with(&sdk, &unverified, serve(good.clone()), &stuck).unwrap_err();
+        assert!(
+            error.contains("the swapped-in emulator does not verify"),
+            "{error}"
+        );
+        assert!(error.contains("the previous one is kept at"), "{error}");
+        assert!(
+            sdk.join("emulator/emulator").is_file(),
+            "the unverified one is at emulator/"
+        );
+        assert!(sdk.join(".emulator-pin-previous/old-marker").is_file());
+
+        // Run 2 (same pin), offline: the old emulator is restored before
+        // anything else, the unverified one moved to .emulator-pin-rejected
+        // and then removed; the failed fetch leaves the old one in place.
+        let error =
+            install_emulator_pin(&sdk, &unverified, |_, _| Err("offline".to_string())).unwrap_err();
+        assert_eq!(error, "offline");
+        assert!(sdk.join("emulator/old-marker").is_file());
+        assert_eq!(installed_emulator_revision(&sdk).as_deref(), Some("37.3.2"));
+        for gone in [
+            ".emulator-pin-previous",
+            ".emulator-pin-rejected",
+            ".emulator-pin-staging",
+        ] {
+            assert!(!sdk.join(gone).exists(), "{gone}");
+        }
+
+        // Same start, but the rejected emulator cannot be removed after the
+        // restore: the old one is still restored, and the leftover named.
+        fs::rename(sdk.join("emulator"), sdk.join(".emulator-pin-previous")).unwrap();
+        fs::create_dir_all(sdk.join("emulator")).unwrap();
+        fs::write(
+            sdk.join("emulator/source.properties"),
+            "Pkg.Revision=0.0.1\n",
+        )
+        .unwrap();
+        let sticky = FaultyFs {
+            rename_onto: &[],
+            remove: &[".emulator-pin-rejected"],
+        };
+        let error =
+            install_emulator_pin_with(&sdk, &pin, |_, _| Err("offline".to_string()), &sticky)
+                .unwrap_err();
+        assert!(error.contains("are not clear"), "{error}");
+        assert!(
+            error.contains(".emulator-pin-rejected could not be removed"),
+            "{error}"
+        );
+        assert_eq!(installed_emulator_revision(&sdk).as_deref(), Some("37.3.2"));
+        assert!(!sdk.join(".emulator-pin-previous").exists());
+
+        // Run 3, online: the pinned archive replaces the restored emulator.
+        let done = install_emulator_pin(&sdk, &pin, serve(good)).unwrap();
+        assert!(done.contains("in place of 37.3.2"), "{done}");
+        for gone in [
+            ".emulator-pin-previous",
+            ".emulator-pin-rejected",
+            ".emulator-pin-staging",
+        ] {
+            assert!(!sdk.join(gone).exists(), "{gone}");
+        }
+
+        // A kept emulator clears what earlier runs left beside it, the
+        // previous copy included, since a verified one is in place; one that
+        // cannot be removed is named.
+        for leftover in [
+            ".emulator-pin-previous",
+            ".emulator-pin-rejected",
+            ".emulator-pin-staging",
+        ] {
+            fs::create_dir_all(sdk.join(leftover).join("x")).unwrap();
+        }
+        let kept = install_emulator_pin(&sdk, &pin, |_, _| panic!("no fetch")).unwrap();
+        assert!(kept.contains("kept"), "{kept}");
+        assert!(!kept.contains("warning"), "{kept}");
+        for gone in [
+            ".emulator-pin-previous",
+            ".emulator-pin-rejected",
+            ".emulator-pin-staging",
+        ] {
+            assert!(!sdk.join(gone).exists(), "{gone}");
+        }
+        fs::create_dir_all(sdk.join(".emulator-pin-staging")).unwrap();
+        let stubborn = FaultyFs {
+            rename_onto: &[],
+            remove: &[".emulator-pin-staging"],
+        };
+        let kept =
+            install_emulator_pin_with(&sdk, &pin, |_, _| panic!("no fetch"), &stubborn).unwrap();
+        assert!(kept.contains("(warning: "), "{kept}");
+        assert!(
+            kept.contains(".emulator-pin-staging could not be removed"),
+            "{kept}"
+        );
+        let _ = fs::remove_dir_all(&sdk);
+    }
+
+    #[test]
+    fn restoring_the_previous_emulator_reports_each_failure() {
+        let setup = |label: &str, with_dir: bool| {
+            let sdk = sdk_fixture(label);
+            fs::create_dir_all(sdk.join(".emulator-pin-previous")).unwrap();
+            fs::write(sdk.join(".emulator-pin-previous/old-marker"), "old").unwrap();
+            if with_dir {
+                fs::create_dir_all(sdk.join("emulator")).unwrap();
+                fs::write(sdk.join("emulator/new-marker"), "new").unwrap();
+            }
+            let dirs = EmulatorDirs::new(&sdk);
+            (sdk, dirs)
+        };
+        let fine = FaultyFs {
+            rename_onto: &[],
+            remove: &[],
+        };
+
+        // Nothing kept to restore.
+        let sdk = sdk_fixture("restore-none");
+        fs::create_dir_all(sdk.join("emulator")).unwrap();
+        let error = restore_previous_emulator(&EmulatorDirs::new(&sdk), &fine).unwrap_err();
+        assert!(error.contains("no previous emulator to restore"), "{error}");
+        assert!(sdk.join("emulator").is_dir());
+
+        // A stale rejected emulator that cannot be cleared: nothing moves.
+        let (sdk, dirs) = setup("restore-clear", true);
+        fs::create_dir_all(&dirs.rejected).unwrap();
+        let sticky = FaultyFs {
+            rename_onto: &[],
+            remove: &[".emulator-pin-rejected"],
+        };
+        let error = restore_previous_emulator(&dirs, &sticky).unwrap_err();
+        assert!(error.contains("clearing"), "{error}");
+        assert!(sdk.join("emulator/new-marker").is_file());
+        assert!(sdk.join(".emulator-pin-previous/old-marker").is_file());
+
+        // The unverified emulator cannot be moved aside: nothing moves.
+        let (sdk, dirs) = setup("restore-aside", true);
+        let stuck = FaultyFs {
+            rename_onto: &[".emulator-pin-rejected"],
+            remove: &[],
+        };
+        let error = restore_previous_emulator(&dirs, &stuck).unwrap_err();
+        assert!(error.contains("moving the unverified emulator"), "{error}");
+        assert!(sdk.join("emulator/new-marker").is_file());
+        assert!(sdk.join(".emulator-pin-previous/old-marker").is_file());
+
+        // The previous emulator cannot be moved back: it is kept, and the
+        // error says emulator/ is missing.
+        let (sdk, dirs) = setup("restore-back", true);
+        let jammed = FaultyFs {
+            rename_onto: &["emulator"],
+            remove: &[],
+        };
+        let error = restore_previous_emulator(&dirs, &jammed).unwrap_err();
+        assert!(
+            error.contains("is missing and the previous emulator is kept at"),
+            "{error}"
+        );
+        assert!(!sdk.join("emulator").exists());
+        assert!(sdk.join(".emulator-pin-previous/old-marker").is_file());
+        assert!(sdk.join(".emulator-pin-rejected/new-marker").is_file());
+
+        // Restored, with and without an unverified emulator in the way.
+        for (label, with_dir) in [("restore-ok", true), ("restore-empty", false)] {
+            let (sdk, dirs) = setup(label, with_dir);
+            let done = restore_previous_emulator(&dirs, &fine).unwrap();
+            assert!(done.contains("restored"), "{done}");
+            assert!(sdk.join("emulator/old-marker").is_file());
+            assert!(!dirs.previous.exists());
+            assert_eq!(dirs.rejected.join("new-marker").is_file(), with_dir);
+        }
+        for label in [
+            "restore-none",
+            "restore-clear",
+            "restore-aside",
+            "restore-back",
+            "restore-ok",
+            "restore-empty",
+        ] {
+            let _ = fs::remove_dir_all(sdk_fixture(label));
+        }
+    }
+
+    #[test]
+    fn a_pinned_emulator_is_swapped_in_only_when_verified_and_unpacked() {
+        let sdk = sdk_fixture("emulator-swap");
+        let old_xml = r#"<ns2:repository><license id="android-sdk-license">terms</license><localPackage path="emulator" obsolete="false"><revision><major>37</major><minor>3</minor><micro>2</micro></revision><display-name>Android Emulator</display-name></localPackage></ns2:repository>"#;
+        let old = sdk.join("emulator");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("source.properties"), "Pkg.Revision=37.3.2\n").unwrap();
+        fs::write(old.join("package.xml"), old_xml).unwrap();
+        fs::write(old.join("old-marker"), "old").unwrap();
+        let old_intact = |sdk: &Path| {
+            assert_eq!(installed_emulator_revision(sdk).as_deref(), Some("37.3.2"));
+            assert!(sdk.join("emulator/old-marker").is_file());
+            assert_eq!(
+                fs::read_to_string(sdk.join("emulator/package.xml")).unwrap(),
+                old_xml
+            );
+            assert!(!sdk.join(".emulator-pin-staging").exists());
+            assert!(!sdk.join(".emulator-pin-previous").exists());
+            assert!(!sdk.join(".emulator-pin-rejected").exists());
+        };
+        let good = stored_zip(&[
+            (
+                "emulator/source.properties",
+                b"Pkg.Revision=9.8.7\nPkg.Path=emulator\n",
+            ),
+            ("emulator/emulator", b"#!/bin/sh\n"),
+        ]);
+        let digest = sha256::to_hex(&sha256::sha256(&good));
+        let hex = |bytes: &[u8]| sha256::to_hex(&sha256::sha256(bytes));
+        let files = [
+            ("emulator", hex(b"#!/bin/sh\n")),
+            (
+                "source.properties",
+                hex(b"Pkg.Revision=9.8.7\nPkg.Path=emulator\n"),
+            ),
+        ];
+        let files: Vec<(&str, &str)> = files.iter().map(|(f, d)| (*f, d.as_str())).collect();
+        let pin = EmulatorPin {
+            revision: "9.8.7",
+            archive: "fake.zip",
+            size: good.len(),
+            sha256: &digest,
+            files: &files,
+        };
+        let serve = |bytes: Vec<u8>| {
+            move |_: &str, dest: &Path| fs::write(dest, &bytes).map_err(|e| e.to_string())
+        };
+
+        // A failed fetch, a wrong SHA-256, and an archive unzip cannot read
+        // all leave the installed emulator as it was, with no staging left.
+        let error =
+            install_emulator_pin(&sdk, &pin, |_, _| Err("offline".to_string())).unwrap_err();
+        assert_eq!(error, "offline");
+        old_intact(&sdk);
+        let wrong_sha = EmulatorPin {
+            sha256: &"0".repeat(64),
+            ..pin
+        };
+        let error = install_emulator_pin(&sdk, &wrong_sha, serve(good.clone())).unwrap_err();
+        assert!(error.contains("has SHA-256"), "{error}");
+        old_intact(&sdk);
+        let garbage = vec![b'x'; 64];
+        let garbage_digest = sha256::to_hex(&sha256::sha256(&garbage));
+        let not_a_zip = EmulatorPin {
+            size: garbage.len(),
+            sha256: &garbage_digest,
+            ..pin
+        };
+        let error = install_emulator_pin(&sdk, &not_a_zip, serve(garbage)).unwrap_err();
+        assert!(error.contains("unzip"), "{error}");
+        old_intact(&sdk);
+
+        // An archive that verifies but unpacks to files the pin does not
+        // name is swapped back out: the previous emulator, kept until then,
+        // is restored.
+        let wrong_files = [("emulator", "0".repeat(64))];
+        let wrong_files: Vec<(&str, &str)> =
+            wrong_files.iter().map(|(f, d)| (*f, d.as_str())).collect();
+        let unverified = EmulatorPin {
+            files: &wrong_files,
+            ..pin
+        };
+        let error = install_emulator_pin(&sdk, &unverified, serve(good.clone())).unwrap_err();
+        assert!(
+            error.contains("the swapped-in emulator does not verify"),
+            "{error}"
+        );
+        assert!(
+            error.contains("the previous emulator was restored to"),
+            "{error}"
+        );
+        old_intact(&sdk);
+
+        // The verified archive replaces the emulator, keeping sdkmanager's
+        // package.xml with the pinned revision, and nothing is left beside it.
+        let done = install_emulator_pin(&sdk, &pin, serve(good.clone())).unwrap();
+        assert!(done.contains("in place of 37.3.2"), "{done}");
+        assert_eq!(installed_emulator_revision(&sdk).as_deref(), Some("9.8.7"));
+        assert!(sdk.join("emulator/emulator").is_file());
+        assert!(!sdk.join("emulator/old-marker").exists());
+        let xml = fs::read_to_string(sdk.join("emulator/package.xml")).unwrap();
+        assert_eq!(
+            xml,
+            old_xml.replace(
+                "<major>37</major><minor>3</minor><micro>2</micro>",
+                "<major>9</major><minor>8</minor><micro>7</micro>"
+            )
+        );
+        assert!(!sdk.join(".emulator-pin-staging").exists());
+        assert!(!sdk.join(".emulator-pin-previous").exists());
+        assert!(done.contains("SHA-256 of 2 file(s) matches"), "{done}");
+        // Now pinned, a second run verifies and keeps it without fetching.
+        let kept = install_emulator_pin(&sdk, &pin, |_, _| panic!("no fetch")).unwrap();
+        assert!(
+            kept.contains("kept, package.xml and source.properties name 9.8.7"),
+            "{kept}"
+        );
+        // A tampered file under the right revision is not kept: the
+        // verified archive is fetched again and replaces it.
+        fs::write(sdk.join("emulator/emulator"), "tampered").unwrap();
+        let mismatch = verify_installed_emulator(&sdk, &pin).unwrap_err();
+        assert!(
+            mismatch.contains("emulator/emulator has SHA-256"),
+            "{mismatch}"
+        );
+        let healed = install_emulator_pin(&sdk, &pin, serve(good)).unwrap();
+        assert!(healed.contains("in place of 9.8.7"), "{healed}");
+        assert_eq!(verify_installed_emulator(&sdk, &pin).map(|_| ()), Ok(()));
+        // The only copy of an emulator left at .emulator-pin-previous by a
+        // failed rollback is put back, never deleted, and verified as usual.
+        fs::rename(sdk.join("emulator"), sdk.join(".emulator-pin-previous")).unwrap();
+        let restored = install_emulator_pin(&sdk, &pin, |_, _| panic!("no fetch")).unwrap();
+        assert!(restored.contains("kept"), "{restored}");
+        assert!(sdk.join("emulator/emulator").is_file());
+        assert!(!sdk.join(".emulator-pin-previous").exists());
+        // A package.xml naming another revision is not kept either.
+        let xml = fs::read_to_string(sdk.join("emulator/package.xml")).unwrap();
+        fs::write(
+            sdk.join("emulator/package.xml"),
+            xml.replace("<micro>7</micro>", "<micro>8</micro>"),
+        )
+        .unwrap();
+        assert!(
+            verify_installed_emulator(&sdk, &pin)
+                .unwrap_err()
+                .contains("package.xml names revision 9.8.8")
+        );
+        let _ = fs::remove_dir_all(&sdk);
     }
 
     #[test]
@@ -4730,6 +6423,503 @@ mod tests {
                 "bleradar-core".to_string(),
                 "bleradar-jni".to_string(),
             ])
+        );
+    }
+
+    const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn fake_hashes<'a>(files: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            files
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, h)| (*h).to_string())
+        }
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_sha256sums_reads_text_and_binary_mode_lines() {
+        let text = format!("{DIGEST_A}  a.apk\n\n{DIGEST_B} *./oracle/b.so\n");
+        assert_eq!(
+            parse_sha256sums("m", &text),
+            Ok(vec![
+                (DIGEST_A.to_string(), "a.apk".to_string()),
+                (DIGEST_B.to_string(), "./oracle/b.so".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_sha256sums_rejects_malformed_escaping_and_duplicate_lines() {
+        let upper = DIGEST_A.to_ascii_uppercase();
+        let text = format!(
+            "{upper}  a\n{DIGEST_A} a\nshort  a\n{DIGEST_A}  ../x\n{DIGEST_A}  /etc/x\n{DIGEST_A}  a\n{DIGEST_B}  a\n"
+        );
+        let errors = parse_sha256sums("m", &text).unwrap_err();
+        assert_eq!(errors.len(), 6, "{errors:#?}");
+        assert!(errors[0].starts_with("m:1: not"));
+        assert!(errors[1].starts_with("m:2: not"));
+        assert!(errors[2].starts_with("m:3: not"));
+        assert!(errors[3].contains("escapes"));
+        assert!(errors[4].contains("escapes"));
+        assert!(errors[5].contains("m:7: a is listed more than once"));
+    }
+
+    #[test]
+    fn oracle_manifest_passes_when_every_file_is_pinned_and_matches() {
+        let text = format!("{DIGEST_A}  a.apk\n{DIGEST_B}  b.so\n");
+        let files = [("a.apk", DIGEST_A), ("b.so", DIGEST_B)];
+        let result = oracle_manifest_violations(
+            "oracle/SHA256SUMS",
+            &text,
+            &names(&["SHA256SUMS", "a.apk", "b.so"]),
+            &[("a.apk", DIGEST_A.to_string())],
+            fake_hashes(&files),
+        );
+        assert_eq!(result.map(|e| e.len()), Ok(2));
+    }
+
+    #[test]
+    fn oracle_manifest_fails_on_a_changed_a_missing_and_an_unpinned_file() {
+        let text = format!("{DIGEST_A}  a.apk\n{DIGEST_B}  gone.zip\n");
+        let files = [("a.apk", DIGEST_B), ("extra.bin", DIGEST_A)];
+        let errors = oracle_manifest_violations(
+            "oracle/SHA256SUMS",
+            &text,
+            &names(&["SHA256SUMS", "a.apk", "extra.bin"]),
+            &[],
+            fake_hashes(&files),
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                format!("oracle/SHA256SUMS: a.apk: expected {DIGEST_A}, observed {DIGEST_B}"),
+                "oracle/SHA256SUMS: listed oracle is missing or not a regular file: gone.zip"
+                    .to_string(),
+                "oracle/SHA256SUMS: extra.bin is in the oracle directory but not pinned"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_manifest_cannot_be_edited_to_bless_a_changed_oracle() {
+        // The file and its manifest line agree, but both moved off the gate's
+        // independent pin: that is a changed oracle, not a valid manifest.
+        let text = format!("{DIGEST_B}  a.apk\n");
+        let files = [("a.apk", DIGEST_B)];
+        let errors = oracle_manifest_violations(
+            "oracle/SHA256SUMS",
+            &text,
+            &names(&["SHA256SUMS", "a.apk"]),
+            &[
+                ("a.apk", DIGEST_A.to_string()),
+                ("lib.so", DIGEST_A.to_string()),
+            ],
+            fake_hashes(&files),
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                format!(
+                    "oracle/SHA256SUMS: lists a.apk as {DIGEST_B}, but the gate pins {DIGEST_A}"
+                ),
+                "oracle/SHA256SUMS: does not list the pinned oracle lib.so".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_manifest_rejects_an_empty_manifest_and_nested_names() {
+        let errors =
+            oracle_manifest_violations("oracle/SHA256SUMS", "", &[], &[], |_| None).unwrap_err();
+        assert_eq!(
+            errors,
+            vec!["oracle/SHA256SUMS: missing or empty manifest".to_string()]
+        );
+        let text = format!("{DIGEST_A}  sub/a.apk\n");
+        let errors = oracle_manifest_violations("oracle/SHA256SUMS", &text, &[], &[], |_| {
+            Some(DIGEST_A.to_string())
+        })
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                "oracle/SHA256SUMS: sub/a.apk is not a plain file name in this directory"
+                    .to_string()
+            ]
+        );
+    }
+
+    fn listing_of(files: &[(&str, &str)]) -> Vec<String> {
+        files.iter().map(|(name, _)| (*name).to_string()).collect()
+    }
+
+    fn digest_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(d, n)| ((*d).to_string(), (*n).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_manifest_requires_matching_files_and_canonical_copies() {
+        let text = format!(
+            "{DIGEST_A}  ./README.md\n{DIGEST_A}  ./oracle/copy.apk\n{DIGEST_B}  ./oracle/other.so\n{DIGEST_B}  ./git-history.bundle\n"
+        );
+        let files = [
+            ("README.md", DIGEST_A),
+            ("oracle/copy.apk", DIGEST_A),
+            ("oracle/other.so", DIGEST_B),
+            ("git-history.bundle", DIGEST_B),
+        ];
+        let copies = [
+            ("oracle/copy.apk", "a.apk"),
+            ("oracle/other.so", "b.so"),
+            ("git-history.bundle", "git-history.bundle"),
+        ];
+        assert_eq!(
+            snapshot_manifest_violations(
+                "s",
+                &text,
+                &listing_of(&files),
+                &copies,
+                &digest_pairs(&[
+                    (DIGEST_A, "a.apk"),
+                    (DIGEST_B, "b.so"),
+                    (DIGEST_B, "git-history.bundle")
+                ]),
+                fake_hashes(&files)
+            ),
+            Vec::<String>::new()
+        );
+        let errors = snapshot_manifest_violations(
+            "s",
+            &text,
+            &listing_of(&files[..2]),
+            &copies,
+            &digest_pairs(&[(DIGEST_A, "a.apk"), (DIGEST_A, "git-history.bundle")]),
+            fake_hashes(&files[..2]),
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "s: listed file is missing: ./oracle/other.so".to_string(),
+                "s: ./oracle/other.so is a copy of oracle/b.so, which oracle/ does not pin"
+                    .to_string(),
+                "s: listed file is missing: ./git-history.bundle".to_string(),
+                format!(
+                    "s: ./git-history.bundle is listed as {DIGEST_B}, but its canonical counterpart oracle/git-history.bundle is {DIGEST_A}"
+                ),
+            ]
+        );
+        assert_eq!(
+            snapshot_manifest_violations("s", "", &[], &[], &[], |_| None),
+            vec!["s: missing or empty manifest".to_string()]
+        );
+    }
+
+    #[test]
+    fn snapshot_manifest_rejects_the_apk_copy_carrying_the_dex_bytes_with_its_line_updated() {
+        // Review finding M1: the snapshot's APK copy replaced by the bytes of
+        // classes.dex, and its own manifest line updated to match. Its digest
+        // is a canonical oracle's digest, just not the APK's, so it must fail.
+        const DEX: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        const SO: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let canonical = digest_pairs(&[
+            (DIGEST_A, "BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk"),
+            (DEX, "classes.dex"),
+            (SO, "libbleradar_core.so"),
+            (DIGEST_B, "git-history.bundle"),
+        ]);
+        let manifest = |apk_copy: &str| {
+            format!(
+                "{apk_copy}  ./oracle/BLE-Radar-v0.3.0-original.apk\n{DEX}  ./oracle/classes.dex\n{SO}  ./oracle/libbleradar_core.so\n{DIGEST_B}  ./git-history.bundle\n"
+            )
+        };
+        let files = |apk_copy: &'static str| {
+            [
+                ("oracle/BLE-Radar-v0.3.0-original.apk", apk_copy),
+                ("oracle/classes.dex", DEX),
+                ("oracle/libbleradar_core.so", SO),
+                ("git-history.bundle", DIGEST_B),
+            ]
+        };
+        let intact = files(DIGEST_A);
+        assert_eq!(
+            snapshot_manifest_violations(
+                "s",
+                &manifest(DIGEST_A),
+                &listing_of(&intact),
+                SNAPSHOT_ORACLE_COPIES,
+                &canonical,
+                fake_hashes(&intact)
+            ),
+            Vec::<String>::new()
+        );
+        let swapped = files(DEX);
+        assert_eq!(
+            snapshot_manifest_violations(
+                "s",
+                &manifest(DEX),
+                &listing_of(&swapped),
+                SNAPSHOT_ORACLE_COPIES,
+                &canonical,
+                fake_hashes(&swapped)
+            ),
+            vec![format!(
+                "s: ./oracle/BLE-Radar-v0.3.0-original.apk is listed as {DEX}, but its canonical counterpart oracle/BLE-Radar-Standalone-Android-ARM64-v0.3.0.apk is {DIGEST_A}"
+            )]
+        );
+    }
+
+    #[test]
+    fn snapshot_manifest_rejects_unmapped_oracle_copies_and_a_dropped_copy() {
+        // An extra copy carrying a real canonical digest is still not one of
+        // the mapped copies, and dropping a mapped copy together with its
+        // manifest line does not make it optional.
+        let text = format!(
+            "{DIGEST_A}  ./oracle/evil.so\n{DIGEST_B}  ./docs/git-history.bundle\n{DIGEST_A}  ./README.md\n"
+        );
+        let files = [
+            ("oracle/evil.so", DIGEST_A),
+            ("docs/git-history.bundle", DIGEST_B),
+            ("README.md", DIGEST_A),
+        ];
+        let errors = snapshot_manifest_violations(
+            "s",
+            &text,
+            &listing_of(&files),
+            &[("oracle/a.apk", "a.apk")],
+            &digest_pairs(&[(DIGEST_A, "a.apk"), (DIGEST_B, "git-history.bundle")]),
+            fake_hashes(&files),
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "s: ./oracle/evil.so is not a mapped copy of a canonical oracle in oracle/"
+                    .to_string(),
+                "s: ./docs/git-history.bundle is not a mapped copy of a canonical oracle in oracle/"
+                    .to_string(),
+                "s: does not list ./oracle/a.apk, the copy of oracle/a.apk".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_manifest_rejects_an_unlisted_file_anywhere_in_the_snapshot() {
+        // Review finding L3: `sha256sum -c` semantics alone let an extra file
+        // such as `oracle/evil.so` sit in the snapshot unpinned.
+        let text = format!("{DIGEST_A}  ./README.md\n");
+        let files = [("README.md", DIGEST_A)];
+        let errors = snapshot_manifest_violations(
+            "dir/SHA256SUMS",
+            &text,
+            &names(&[
+                "README.md",
+                "SHA256SUMS",
+                "crates/x/src/extra.rs",
+                "oracle/evil.so",
+            ]),
+            &[],
+            &[],
+            fake_hashes(&files),
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "dir/SHA256SUMS: ./crates/x/src/extra.rs is in the snapshot but not listed"
+                    .to_string(),
+                "dir/SHA256SUMS: ./oracle/evil.so is in the snapshot but not listed".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_listing_skips_build_output_but_counts_files_git_tracks_in_the_build_dir() {
+        // A file force-added under the snapshot's gitignored `target/`
+        // (`git add -f`) is committed content, not build output: it must be
+        // in the listing, so an unlisted one fails `check-oracle-integrity`.
+        let dir = unique_temp_dir("snapshot_listing_counts_tracked_build_dir_files");
+        let snap = dir.join("snap");
+        fs::create_dir_all(snap.join("target/debug")).unwrap();
+        fs::write(dir.join(".gitignore"), b"/snap/target\n").unwrap();
+        fs::write(snap.join("README.md"), b"r").unwrap();
+        fs::write(snap.join("target/debug/build-output.bin"), b"b").unwrap();
+        fs::write(snap.join("target/forced.bin"), b"f").unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-f", "snap/target/forced.bin"]);
+        assert_eq!(
+            snapshot_tree_listing(&snap).unwrap(),
+            vec!["README.md", "target/forced.bin"]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tree_listing_recurses_never_follows_symlinks_and_skips_only_top_level_names() {
+        let dir = unique_temp_dir("tree_listing_recurses_and_skips_top_level_names");
+        fs::create_dir_all(dir.join("crates/a/target")).unwrap();
+        fs::create_dir_all(dir.join("target/debug")).unwrap();
+        fs::create_dir_all(dir.join("empty")).unwrap();
+        fs::write(dir.join("README.md"), b"r").unwrap();
+        fs::write(dir.join("crates/a/lib.rs"), b"l").unwrap();
+        fs::write(dir.join("crates/a/target/kept.bin"), b"k").unwrap();
+        fs::write(dir.join("target/debug/skipped.bin"), b"s").unwrap();
+        std::os::unix::fs::symlink(dir.join("crates"), dir.join("crates-link")).unwrap();
+        assert_eq!(
+            list_tree_file_names(&dir, &["target"]).unwrap(),
+            vec![
+                "README.md",
+                "crates-link",
+                "crates/a/lib.rs",
+                "crates/a/target/kept.bin",
+            ]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_snapshot_oracle_copy_maps_to_a_distinct_committed_canonical_oracle() {
+        let root = repo_root_from(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("repo root");
+        let text = fs::read_to_string(root.join(ORACLE_DIR).join(ORACLE_MANIFEST_NAME))
+            .expect("oracle/SHA256SUMS is committed");
+        let canonical = parse_sha256sums("oracle/SHA256SUMS", &text).expect("manifest parses");
+        let mut counterparts: Vec<&str> = SNAPSHOT_ORACLE_COPIES.iter().map(|(_, c)| *c).collect();
+        counterparts.sort_unstable();
+        counterparts.dedup();
+        assert_eq!(
+            counterparts.len(),
+            SNAPSHOT_ORACLE_COPIES.len(),
+            "two snapshot copies share one counterpart"
+        );
+        for counterpart in counterparts {
+            assert!(
+                canonical.iter().any(|(_, name)| name == counterpart),
+                "{counterpart} is not pinned by oracle/SHA256SUMS"
+            );
+        }
+        assert_eq!(
+            file_name_of(ORACLE_APK_PATH),
+            SNAPSHOT_ORACLE_COPIES[0].1,
+            "the snapshot's APK copy maps to the canonical APK"
+        );
+    }
+
+    #[test]
+    fn oracle_listing_and_hashing_reject_directories_and_symlinks() {
+        let dir = unique_temp_dir("oracle_listing_rejects_directories_and_symlinks");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.bin"), b"abc").unwrap();
+        std::os::unix::fs::symlink(dir.join("a.bin"), dir.join("link.bin")).unwrap();
+        let listing = list_entry_names(&dir).unwrap();
+        assert_eq!(listing, vec!["a.bin", "link.bin", "sub"]);
+        assert_eq!(
+            hash_file_if_present(&dir.join("a.bin")),
+            Some(sha256::to_hex(&sha256::sha256(b"abc")))
+        );
+        assert_eq!(hash_file_if_present(&dir.join("link.bin")), None);
+        assert_eq!(hash_file_if_present(&dir.join("sub")), None);
+        let digest = sha256::to_hex(&sha256::sha256(b"abc"));
+        let text = format!("{digest}  a.bin\n{digest}  link.bin\n");
+        let errors = oracle_manifest_violations("o/SHA256SUMS", &text, &listing, &[], |name| {
+            hash_file_if_present(&dir.join(name))
+        })
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                "o/SHA256SUMS: listed oracle is missing or not a regular file: link.bin"
+                    .to_string(),
+                "o/SHA256SUMS: sub is in the oracle directory but not pinned".to_string(),
+            ]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn committed_oracle_paths_are_canonical_and_pinned_by_the_committed_manifest() {
+        for path in [ORACLE_APK_PATH, MIGRATION_ZIP_PATH] {
+            assert!(
+                path.starts_with("oracle/"),
+                "{path} is outside the canonical oracle directory"
+            );
+            assert!(
+                !path.contains(' ') && !path.contains("(1)"),
+                "{path:?} is not a clean file name"
+            );
+        }
+        let root = repo_root_from(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("repo root");
+        let text = fs::read_to_string(root.join(ORACLE_DIR).join(ORACLE_MANIFEST_NAME))
+            .expect("oracle/SHA256SUMS is committed");
+        let entries = parse_sha256sums("oracle/SHA256SUMS", &text).expect("manifest parses");
+        for (name, pinned) in [
+            (file_name_of(MIGRATION_ZIP_PATH), MIGRATION_ZIP_SHA256),
+            (file_name_of(ORACLE_SO_ZIP_ENTRY), ORACLE_SO_SHA256),
+        ] {
+            assert!(
+                entries.iter().any(|(d, n)| n == name && d == pinned),
+                "oracle/SHA256SUMS does not pin {name} at {pinned}"
+            );
+        }
+    }
+
+    #[test]
+    fn independent_pins_cover_every_committed_canonical_oracle_at_its_digest() {
+        // Review finding L2: the DEX and the history bundle had no pin of
+        // their own, so editing both manifests together blessed a change.
+        let root = repo_root_from(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("repo root");
+        let text = fs::read_to_string(root.join(ORACLE_DIR).join(ORACLE_MANIFEST_NAME))
+            .expect("oracle/SHA256SUMS is committed");
+        let input_sha = fs::read_to_string(root.join("docs/INPUT_SHA256.txt"))
+            .expect("docs/INPUT_SHA256.txt is committed");
+        let apk_sha = find_sha256_after_label(&input_sha, "Original APK SHA-256:");
+        assert!(apk_sha.is_some(), "docs/INPUT_SHA256.txt pins the APK");
+        let mut pinned = independent_oracle_pins(apk_sha);
+        pinned.sort();
+        let mut listed: Vec<(&str, String)> = parse_sha256sums("oracle/SHA256SUMS", &text)
+            .expect("manifest parses")
+            .iter()
+            .map(|(digest, name)| {
+                let name = [
+                    ORACLE_APK_PATH,
+                    MIGRATION_ZIP_PATH,
+                    ORACLE_SO_ZIP_ENTRY,
+                    ORACLE_DEX_PATH,
+                    ORACLE_HISTORY_BUNDLE_PATH,
+                ]
+                .into_iter()
+                .map(file_name_of)
+                .find(|known| known == name)
+                .unwrap_or("<not a known oracle>");
+                (name, digest.clone())
+            })
+            .collect();
+        listed.sort();
+        assert_eq!(pinned, listed);
+        assert_eq!(
+            independent_oracle_pins(None).len(),
+            4,
+            "an unparsable APK record drops only the APK pin"
         );
     }
 
@@ -5559,5 +7749,84 @@ struct JNINativeInterface_ {
 
         assert!(find_files_with_extension(&root, "java").unwrap().is_empty());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Set only in the child process that
+    /// `parity_drift_check_ignores_git_redirects_inherited_from_the_environment`
+    /// re-runs itself as: the repository whose parity report has drifted.
+    const HOSTILE_GIT_ENV_CHILD_PARITY_REPO: &str = "XTASK_TEST_HOSTILE_GIT_ENV_PARITY_REPO";
+
+    #[test]
+    fn parity_drift_check_ignores_git_redirects_inherited_from_the_environment() {
+        // git honours GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE from the
+        // caller's environment. Pointed at another repository or work tree,
+        // or at an index that does not exist, `git diff --exit-code
+        // docs/PARITY_COVERAGE.md` finds nothing to compare and exits 0, so
+        // a drifted parity report passed `gates`. The inherited environment
+        // can only be set safely in a new process, so this test re-runs
+        // itself (and only itself) with each variable set.
+        if let Some(repo) = env::var_os(HOSTILE_GIT_ENV_CHILD_PARITY_REPO) {
+            let out = parity_coverage_drift_check(Path::new(&repo))
+                .output()
+                .expect("git runs");
+            assert_eq!(
+                out.status.code(),
+                Some(1),
+                "the drifted report must fail the check:\n{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        let dir = unique_temp_dir("parity_drift_check_ignores_git_redirects");
+        let repo = dir.join("repo");
+        let decoy = dir.join("decoy");
+        fs::create_dir_all(repo.join("docs")).unwrap();
+        fs::create_dir_all(&decoy).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = git_in(dir).args(args).output().expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        fs::write(repo.join("docs/PARITY_COVERAGE.md"), b"committed\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "docs/PARITY_COVERAGE.md"]);
+        fs::write(repo.join("docs/PARITY_COVERAGE.md"), b"regenerated\n").unwrap();
+        git(&decoy, &["init", "-q"]);
+        let decoy_git_dir = decoy.join(".git");
+        let missing_index = dir.join("no-such-index");
+        let hostile = [
+            ("GIT_INDEX_FILE", missing_index.as_path()),
+            ("GIT_DIR", decoy_git_dir.as_path()),
+            ("GIT_WORK_TREE", decoy.as_path()),
+        ];
+        let mut cases: Vec<Vec<(&str, &Path)>> = vec![vec![]];
+        cases.extend(hostile.iter().map(|&var| vec![var]));
+        cases.push(hostile.to_vec());
+        let mut failures = Vec::new();
+        for case in cases {
+            let out = Command::new(env::current_exe().expect("test binary path"))
+                .args([
+                    "tests::parity_drift_check_ignores_git_redirects_inherited_from_the_environment",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(HOSTILE_GIT_ENV_CHILD_PARITY_REPO, &repo)
+                .envs(case.iter().copied())
+                .output()
+                .expect("the test binary re-runs");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !(out.status.success() && stdout.contains("1 passed")) {
+                failures.push(format!(
+                    "with {case:?} in the environment:\n{stdout}{}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+        }
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
