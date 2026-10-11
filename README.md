@@ -568,6 +568,7 @@ cargo xtask                        # list subcommands
 cargo xtask parity-report          # regenerate docs/PARITY_COVERAGE.md
 cargo xtask check-dependency-policy
 cargo xtask check-oracle-integrity # oracle/ and v0.3.0 snapshot pins (a gates step); needs git on PATH and a git checkout, fails otherwise
+cargo xtask check-crate-boundary     # radar modules, bleradar-jni and bleradar-compat never reach the non-radar engines (docs/CRATE_BOUNDARY_PLAN.md)
 cargo xtask capability             # read-only: the seed_v0() capability ledger's derived status and corroboration/regression health per technique, counts_by_status() and verified_count() (bleradar-core); writes only stdout
 cargo xtask apk-inventory <apk>
 cargo xtask native-abi <lib.so>
