@@ -20,10 +20,10 @@ bleradar-jni    v0.2.0  ── bleradar-core v0.6.10
 
 | Crate | Kind | Role | Depends on |
 |---|---|---|---|
-| `bleradar-core` | `rlib` + `cdylib` | every rule and engine, 25,180 lines in 24 source files, flat re-exports at the crate root (18 `pub use` blocks) | nothing |
+| `bleradar-core` | `rlib` + `cdylib` | every rule and engine, 25,855 lines in 25 source files, flat re-exports at the crate root (19 `pub use` blocks) | nothing |
 | `bleradar-jni` | `cdylib` + `lib` | the JNI façade loaded by the app as `libbleradar_jni.so` | `bleradar-core` |
 | `bleradar-compat` | `lib` | native-ABI census, parity registry, executed-oracle differential tests | `bleradar-core` (its tests only) |
-| `xtask` | bin, **its own workspace** | dev tooling and gates; depends on no workspace crate | nothing |
+| `xtask` | bin, **its own workspace** | dev tooling and gates; third-party-free (path dependency on bleradar-core only) | `bleradar-core` (path) |
 | `migration/critically-enhanced-v0.3.0` | excluded from the workspace | frozen v0.3.0 snapshot | n/a |
 
 Outside this repository, HSE depends on `bleradar-core` through a pinned git
@@ -31,21 +31,24 @@ Outside this repository, HSE depends on `bleradar-core` through a pinned git
 
 ### `bleradar-core` modules, by layer
 
-The layer is recorded in `xtask/src/boundary.rs` (`LAYERS`).
+The layer is recorded in `xtask/src/boundary.rs` (`LAYERS`), and
+`cargo xtask check-crate-boundary` fails if this table's module set for any
+layer differs from `LAYERS`.
 
 | Layer | Modules (lines) | Total |
 |---|---|---|
-| **Radar**: what the app and HSE use, plus the radar's own scheduling and capability records | crate root `lib.rs` (433: Wi-Fi channel/band/distance/security), `adv` (1,129), `update` (1,410), `identity` (725), `tracking` (585), `sweep` (555), `history` (435), `signal` (384), `registry` (384), `scan` (274), `runtime` (217), `geo` (122) | 6,653 (26%) |
-| **HseModel**: the HSE entity model | `entity` (2,013), `coords` (691), `tags` (198) | 2,902 (12%) |
-| **Engine**: the non-radar engines from the v0.3.0 reconstruction | `evidence` (3,824), `infrastructure` (2,713), `website` (2,581), `osint` (1,786), `verification` (1,694), `advancement` (1,107), `fusion` (1,058), `pipeline` (834), `validation` (28, shared helper) | 15,625 (62%) |
+| **Radar**: what the app and HSE use, plus the radar's own scheduling and capability records | crate root `lib.rs` (438: Wi-Fi channel/band/distance/security), `adv` (1,129), `update` (1,410), `identity` (725), `capability` (670: ATT&CK coverage-claims ledger), `tracking` (585), `sweep` (555), `history` (435), `signal` (384), `registry` (384), `scan` (274), `runtime` (217), `geo` (122) | 7,328 (28%) |
+| **HseModel**: the HSE entity model | `entity` (2,013), `coords` (691), `tags` (198) | 2,902 (11%) |
+| **Engine**: the non-radar engines from the v0.3.0 reconstruction | `evidence` (3,824), `infrastructure` (2,713), `website` (2,581), `osint` (1,786), `verification` (1,694), `advancement` (1,107), `fusion` (1,058), `pipeline` (834), `validation` (28, shared helper) | 15,625 (60%) |
 
 ### Who depends on whom (non-test code; comments and intra-doc links excluded)
 
-This is the output of `cargo xtask check-crate-boundary` at `d0b1e8d`:
+This is the output of `cargo xtask check-crate-boundary` at `cc20db5`:
 
 ```
 (crate root) [Radar]  -> (none)
 adv          [Radar]  -> (none)
+capability   [Radar]  -> (none)
 geo          [Radar]  -> (none)
 history      [Radar]  -> (none)
 identity     [Radar]  -> adv, sweep
@@ -237,8 +240,9 @@ and it is outside this plan's scope.
 
 - It moves no code and changes no crate's manifest, so the native library
   doesn't change and the committed APK doesn't need a rebuild.
-- It doesn't use `cargo metadata` or a `syn` parse. `xtask` is dependency-free
-  by policy (`check-dependency-policy`), so the check is a small lexer:
+- It doesn't use `cargo metadata` or a `syn` parse. `xtask` is
+  third-party-free (path dependency on bleradar-core only) by policy
+  (`check-dependency-policy`), so the check is a small lexer:
   comments and literals are blanked, `#[cfg(test)] mod` bodies are dropped,
   and `use` groups are read with aliases. Unit tests cover each of those, and
   any path it can't resolve fails the gate instead of being skipped.

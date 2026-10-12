@@ -4,8 +4,8 @@
 //!
 //! Every module `crates/bleradar-core/src/lib.rs` declares is assigned one
 //! [`Layer`] in [`LAYERS`]. The check reads the sources (it is textual and
-//! dependency-free, like the rest of xtask; it never builds or links the
-//! crate) and fails when:
+//! third-party-free (path dependency on bleradar-core only), like the rest of
+//! xtask; it never builds or links the crate) and fails when:
 //!
 //! - a module is declared but unclassified, or classified but not declared;
 //! - a `Radar` or `HseModel` module (or the crate root's own items) reaches an
@@ -16,7 +16,10 @@
 //! - what `bleradar-jni` or `bleradar-compat` imports from `bleradar_core`
 //!   transitively reaches an `Engine` module;
 //! - a `crate::`/`bleradar_core::` path names something the check cannot
-//!   resolve to a module (it fails loudly rather than miss an edge).
+//!   resolve to a module (it fails loudly rather than miss an edge);
+//! - the "modules, by layer" table in `docs/CRATE_BOUNDARY_PLAN.md` lists a
+//!   different module set for any layer than [`LAYERS`] (so the plan cannot
+//!   drift from the authority again).
 //!
 //! Comments and `#[cfg(test)] mod` blocks are not dependencies of the shipped
 //! code and are ignored; integration tests under `bleradar-core/tests` are not
@@ -642,6 +645,54 @@ fn read_rust_sources(dir: &Path) -> Result<Vec<(String, String)>, String> {
     Ok(files)
 }
 
+/// The plan document whose layer table must match [`LAYERS`].
+pub const PLAN_DOC: &str = "docs/CRATE_BOUNDARY_PLAN.md";
+
+/// Compares the plan's "modules, by layer" table with `layers`. Each table
+/// row starts `| **<Layer>**`; its second column names modules in backticks
+/// (`lib.rs` there means [`CRATE_ROOT`]). Returns one message per mismatch.
+pub fn doc_layer_drift(doc: &str, layers: &[(&str, Layer)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for layer in [Layer::Radar, Layer::HseModel, Layer::Engine] {
+        let marker = format!("| **{layer:?}**");
+        let rows: Vec<&str> = doc.lines().filter(|l| l.starts_with(&marker)).collect();
+        if rows.len() != 1 {
+            problems.push(format!(
+                "{PLAN_DOC}: expected one `{marker}` table row, found {}",
+                rows.len()
+            ));
+            continue;
+        }
+        let modules_col = rows[0].split('|').nth(2).unwrap_or("");
+        let in_doc: BTreeSet<String> = modules_col
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(|m| {
+                if m == "lib.rs" {
+                    CRATE_ROOT.to_string()
+                } else {
+                    m.to_string()
+                }
+            })
+            .collect();
+        let in_layers: BTreeSet<String> = layers
+            .iter()
+            .filter(|(_, l)| *l == layer)
+            .map(|(m, _)| (*m).to_string())
+            .collect();
+        for m in in_layers.difference(&in_doc) {
+            problems.push(format!("{PLAN_DOC}: {layer:?} row omits `{m}` (in LAYERS)"));
+        }
+        for m in in_doc.difference(&in_layers) {
+            problems.push(format!(
+                "{PLAN_DOC}: {layer:?} row lists `{m}`, not a {layer:?} module in LAYERS"
+            ));
+        }
+    }
+    problems
+}
+
 /// The dependency graph as found in the tree at `root`.
 pub struct Graph {
     /// Declared modules.
@@ -699,13 +750,16 @@ pub fn graph_at(root: &Path) -> Result<Graph, String> {
 /// `cargo xtask check-crate-boundary`.
 pub fn cmd_check_crate_boundary(root: &Path) -> Result<(), String> {
     let graph = graph_at(root)?;
-    let found = violations(
+    let mut found = violations(
         &graph.modules,
         &graph.edges,
         &graph.consumers,
         LAYERS,
         ALLOWED_RADAR_TO_HSE_MODEL,
     );
+    let doc =
+        fs::read_to_string(root.join(PLAN_DOC)).map_err(|e| format!("reading {PLAN_DOC}: {e}"))?;
+    found.extend(doc_layer_drift(&doc, LAYERS));
     for (module, targets) in &graph.edges {
         let layer =
             layer_of(LAYERS, module).map_or("unclassified".to_string(), |l| format!("{l:?}"));
@@ -741,6 +795,34 @@ pub fn cmd_check_crate_boundary(root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doc_layer_table_must_match_layers() {
+        let layers: &[(&str, Layer)] = &[
+            (CRATE_ROOT, Layer::Radar),
+            ("capability", Layer::Radar),
+            ("entity", Layer::HseModel),
+            ("osint", Layer::Engine),
+        ];
+        let good = "| **Radar**: x | crate root `lib.rs` (1), `capability` (2) | 3 |\n\
+                    | **HseModel**: y | `entity` (1) | 1 |\n\
+                    | **Engine**: z | `osint` (1) | 1 |\n";
+        assert!(doc_layer_drift(good, layers).is_empty());
+        let dropped = good.replace(", `capability` (2)", "");
+        let found = doc_layer_drift(&dropped, layers);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("omits `capability`"), "{found:?}");
+        let extra = good.replace("`osint` (1)", "`osint` (1), `geo` (1)");
+        assert!(doc_layer_drift(&extra, layers)[0].contains("lists `geo`"));
+        assert!(doc_layer_drift("", layers).len() == 3);
+    }
+
+    #[test]
+    fn repository_plan_doc_matches_layers() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let doc = fs::read_to_string(root.join(PLAN_DOC)).expect("plan doc");
+        assert_eq!(doc_layer_drift(&doc, LAYERS), Vec::<String>::new());
+    }
 
     const LIB: &str = "\
 //! Doc mentioning crate::osint, which is not a dependency.
