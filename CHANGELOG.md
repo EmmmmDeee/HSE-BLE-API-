@@ -58,8 +58,9 @@ for what that release contains).
   moment), so a launch before it took hold could have gone direct. The proof
   now installs a guest `iptables`/`ip6tables` egress guard for the app's and
   `DownloadManager`'s UIDs right after the proof build is installed: only
-  loopback and the host alias `10.0.2.2` (the stand-in's proxy) are allowed,
-  everything else is rejected, so such a check fails closed. The acceptance
+  loopback, the host alias `10.0.2.2` (the stand-in's proxy) and name
+  resolution (port 53, which Android attributes to the asking UID) are
+  allowed, and everything else is rejected, so such a check fails closed. The acceptance
   signal is the stand-in's traffic, not the proxy-setting line in the
   report: the run fails if anything reached the stand-in before the launch,
   if the stand-in answered any request beyond the three the proof asks for,

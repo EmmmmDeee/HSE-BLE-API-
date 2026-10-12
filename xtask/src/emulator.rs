@@ -2507,7 +2507,7 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
     // them whether or not the global proxy has taken hold (fails closed).
     let guarded = install_egress_guard(adb)?;
     report.push(format!(
-        "egress guard: UIDs {} (the app, {DOWNLOADS_PROVIDER}) limited to loopback and {GUEST_HOST_ALIAS} before the first check — anything else rejected in the guest, IPv4 and IPv6",
+        "egress guard: UIDs {} (the app, {DOWNLOADS_PROVIDER}) limited to loopback, {GUEST_HOST_ALIAS} and name resolution before the first check — anything else rejected in the guest, IPv4 and IPv6",
         guarded
             .iter()
             .map(u32::to_string)
@@ -2546,7 +2546,7 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
     // The guard's counters while the proxy is still set: what the guest
     // tried to reach beyond loopback and the host during the proof. The
     // guard itself stays in place to the end of the run.
-    let rejected = egress_rejections(adb, guarded.len());
+    let guard = egress_reading(adb, guarded.len());
     // The proxy setting must not outlive the stand-in, whatever happened;
     // the stand-in's logs are complete only once it has stopped.
     let _ = adb.shell_lenient("settings put global http_proxy :0");
@@ -2554,8 +2554,8 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
     outcome.map_err(|error| {
         format!(
             "{error}\n-- the guest egress guard --\n{}\n-- the stand-in's requests --\n{}\n-- its tunnels --\n{}",
-            match &rejected {
-                Ok(packets) => format!("{packets} packet(s) rejected"),
+            match &guard {
+                Ok((_, listing)) => listing.clone(),
                 Err(error) => error.clone(),
             },
             requests.join("\n"),
@@ -2597,10 +2597,11 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
             requests.join(" | ")
         ));
     }
-    let rejected = rejected?;
-    if rejected != 0 {
+    let (guard, listing) = guard?;
+    if guard.rejected != 0 {
         return Err(format!(
-            "the guest egress guard rejected {rejected} packet(s): the app or {DOWNLOADS_PROVIDER} tried to reach something other than loopback and the host (the real {RELEASE_HOST} among the candidates) — the proxy did not carry all of the proof's traffic"
+            "the guest egress guard rejected {} packet(s): the app or {DOWNLOADS_PROVIDER} tried to reach something other than loopback, the host and a resolver (the real {RELEASE_HOST} among the candidates) — the proxy did not carry all of the proof's traffic:\n{listing}",
+            guard.rejected
         ));
     }
     // The guest's global proxy also carries the platform's own traffic (its
@@ -2615,8 +2616,9 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
         ));
     }
     report.push(format!(
-        "acceptance: the stand-in {RELEASE_HOST} received no unexpected traffic ({} request(s), each one the proof asked for) and the guest egress guard rejected 0 packets (no path to the real {RELEASE_HOST})",
-        requests.len()
+        "acceptance: the stand-in {RELEASE_HOST} received no unexpected traffic ({} request(s), each one the proof asked for) and the guest egress guard rejected 0 packets (no path to the real {RELEASE_HOST}; {} name-resolution packet(s) let through to a resolver)",
+        requests.len(),
+        guard.resolver
     ));
     report.push(format!(
         "stand-in {RELEASE_HOST}: {} tunnel(s) relayed ({RELEASE_HOST}:443 only), {} request(s) — {}; {} other request(s) from the guest refused by the proxy ({}: the platform's own traffic, which the global proxy carries too)",
@@ -2646,20 +2648,22 @@ fn install_egress_guard(adb: &Adb) -> Result<Vec<u32>, String> {
         }
     }
     let listing = adb.shell(&updateproof::guest_egress_guard_script(&uids))?;
-    let rejected = updateproof::guest_egress_rejections(&listing, uids.len())?;
-    if rejected != 0 {
+    let reading = updateproof::guest_egress_reading(&listing, uids.len())?;
+    if reading.rejected != 0 {
         return Err(format!(
-            "the guest egress guard counted {rejected} rejected packet(s) as it was installed:\n{listing}"
+            "the guest egress guard counted {} rejected packet(s) as it was installed:\n{listing}",
+            reading.rejected
         ));
     }
     Ok(uids)
 }
 
-/// The guard's rejected-packet count now (see
-/// [`updateproof::guest_egress_rejections`]).
-fn egress_rejections(adb: &Adb, uids: usize) -> Result<u64, String> {
+/// The guard's counters now, with the listing they were read from (for a
+/// failure's message).
+fn egress_reading(adb: &Adb, uids: usize) -> Result<(updateproof::GuardReading, String), String> {
     let listing = adb.shell(&updateproof::guest_egress_listing())?;
-    updateproof::guest_egress_rejections(&listing, uids)
+    let reading = updateproof::guest_egress_reading(&listing, uids)?;
+    Ok((reading, listing))
 }
 
 /// Mobile data off, Wi-Fi on, and the guest's default network unmetered
@@ -2802,10 +2806,11 @@ fn upgrade_through(
             before.relayed
         ));
     }
-    let rejected = egress_rejections(adb, guarded)?;
-    if rejected != 0 {
+    let (guard, listing) = egress_reading(adb, guarded)?;
+    if guard.rejected != 0 {
         return Err(format!(
-            "the guest egress guard rejected {rejected} packet(s) before the first check was launched"
+            "the guest egress guard rejected {} packet(s) before the first check was launched:\n{listing}",
+            guard.rejected
         ));
     }
     println!("== am start -W {ACTIVITY}: the fresh install's first check, against the stand-in ==");

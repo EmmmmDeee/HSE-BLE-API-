@@ -299,21 +299,34 @@ pub fn tunnel_summary(tunnels: &[String]) -> TunnelSummary {
 
 /// The guest-side egress guard of the upgrade proof: an `iptables` /
 /// `ip6tables` chain the app's and `DownloadManager`'s UIDs jump to, which
-/// lets their packets out only over loopback (the API `adb forward` reaches)
-/// and to [`GUEST_HOST_ALIAS`] (the host, where the only `github.com` is the
-/// stand-in behind the proxy), and rejects everything else. The global HTTP
-/// proxy setting reaches the guest's network stack asynchronously and on API
-/// 34 nothing observable marks the moment, so without the guard a check that
-/// ran before it took hold would go to the real `github.com`; with it, that
-/// check fails closed (refused at the guest) and the rejected packets are
-/// counted, which [`guest_egress_rejections`] reads.
+/// lets their packets out only over loopback (the API `adb forward` reaches),
+/// to [`GUEST_HOST_ALIAS`] (the host, where the only `github.com` is the
+/// stand-in behind the proxy) and to port 53 (name resolution: Android's
+/// resolver attributes a lookup's packets to the UID that asked, and a lookup
+/// reaches the network's resolver, never `github.com`), and rejects
+/// everything else. The global HTTP proxy setting reaches the guest's network
+/// stack asynchronously and on API 34 nothing observable marks the moment,
+/// so without the guard a check that ran before it took hold would go to the
+/// real `github.com`; with it, that connection is refused in the guest (the
+/// check fails closed) and counted, which [`guest_egress_reading`] reads.
 pub const GUEST_EGRESS_CHAIN: &str = "hse_upgrade_egress";
+
+/// The guard's rules after the loopback (and, IPv4, host) exemptions: the
+/// name-resolution exemptions, then the rejections — split by port so a
+/// non-zero count says what was tried, and ending in a catch-all.
+const GUEST_EGRESS_TAIL: [&str; 5] = [
+    "-p udp --dport 53 -j RETURN",
+    "-p tcp --dport 53 -j RETURN",
+    "-p tcp --dport 443 -j REJECT",
+    "-p tcp --dport 80 -j REJECT",
+    "-j REJECT",
+];
 
 /// The shell script that installs [`GUEST_EGRESS_CHAIN`] (flushed first if
 /// a previous run left it) for each of `uids`, IPv4 and IPv6, every step
 /// `&&`-chained so a missing `iptables`, owner match or `REJECT` target
 /// fails the script instead of leaving the guest open. Ends by listing the
-/// chain with its counters, for [`guest_egress_rejections`].
+/// chain with its counters, for [`guest_egress_reading`].
 pub fn guest_egress_guard_script(uids: &[u32]) -> String {
     let chain = GUEST_EGRESS_CHAIN;
     let mut steps = Vec::new();
@@ -331,7 +344,9 @@ pub fn guest_egress_guard_script(uids: &[u32]) -> String {
         if let Some(rule) = &host_rule {
             steps.push(format!("{table} -w -A {chain} {rule}"));
         }
-        steps.push(format!("{table} -w -A {chain} -j REJECT"));
+        for rule in GUEST_EGRESS_TAIL {
+            steps.push(format!("{table} -w -A {chain} {rule}"));
+        }
         for uid in uids {
             steps.push(format!(
                 "{table} -w -I OUTPUT 1 -m owner --uid-owner {uid} -j {chain}"
@@ -348,16 +363,29 @@ pub fn guest_egress_listing() -> String {
     format!("iptables -w -L {chain} -v -n -x && ip6tables -w -L {chain} -v -n -x")
 }
 
-/// What the guard's listing says: how many packets its `REJECT` rules
-/// turned away (summed over both families) — the guest trying to reach
-/// anything but loopback and the host. `Err` when the listing does not show
-/// the guard installed as [`guest_egress_guard_script`] built it (a chain
-/// header per family, each referenced at least `uids` times, a `REJECT` rule
-/// in each): an unreadable guard is never read as a clean one.
-pub fn guest_egress_rejections(listing: &str, uids: usize) -> Result<u64, String> {
+/// What the guard's counters say.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GuardReading {
+    /// Packets its `REJECT` rules turned away, both families: the guarded
+    /// UIDs trying to reach something other than loopback, the host and a
+    /// resolver. Must be 0.
+    pub rejected: u64,
+    /// Name-resolution packets let through (reported, not failed).
+    pub resolver: u64,
+}
+
+/// Reads a [`guest_egress_listing`]. `Err` when the listing does not show
+/// the guard installed as [`guest_egress_guard_script`] built it — a chain
+/// header per family, each referenced at least `uids` times, each ending in
+/// a catch-all `REJECT` (protocol `all`): an unreadable guard is never read
+/// as a clean one.
+pub fn guest_egress_reading(listing: &str, uids: usize) -> Result<GuardReading, String> {
     let mut chains = 0;
-    let mut rejects = 0;
-    let mut rejected = 0u64;
+    let mut catch_alls = 0;
+    let mut reading = GuardReading {
+        rejected: 0,
+        resolver: 0,
+    };
     for line in listing.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.first() == Some(&"Chain") && fields.get(1) == Some(&GUEST_EGRESS_CHAIN) {
@@ -372,20 +400,30 @@ pub fn guest_egress_rejections(listing: &str, uids: usize) -> Result<u64, String
                 ));
             }
             chains += 1;
-        } else if fields.get(2) == Some(&"REJECT") {
-            let packets = fields[0]
-                .parse::<u64>()
-                .map_err(|_| format!("the guard's REJECT counter is unreadable: `{line}`"))?;
-            rejects += 1;
-            rejected += packets;
+            continue;
+        }
+        let target = fields.get(2).copied();
+        if target != Some("REJECT") && target != Some("RETURN") {
+            continue;
+        }
+        let packets = fields[0]
+            .parse::<u64>()
+            .map_err(|_| format!("the guard's counter is unreadable: `{line}`"))?;
+        if target == Some("REJECT") {
+            reading.rejected += packets;
+            if fields.get(3) == Some(&"all") {
+                catch_alls += 1;
+            }
+        } else if fields.contains(&"dpt:53") {
+            reading.resolver += packets;
         }
     }
-    if chains != 2 || rejects != 2 {
+    if chains != 2 || catch_alls != 2 {
         return Err(format!(
-            "the guest egress guard is not installed in both families ({chains} chain(s), {rejects} REJECT rule(s)):\n{listing}"
+            "the guest egress guard is not installed in both families ({chains} chain(s), {catch_alls} catch-all REJECT rule(s)):\n{listing}"
         ));
     }
-    Ok(rejected)
+    Ok(reading)
 }
 
 /// The UID a `cmd package list packages -U <package>` answer gives
@@ -1247,20 +1285,22 @@ mod tests {
     }
 
     #[test]
-    fn the_guest_egress_guard_rejects_all_but_loopback_and_the_host_for_each_uid() {
+    fn the_guest_egress_guard_rejects_all_but_loopback_the_host_and_resolvers_for_each_uid() {
         let script = guest_egress_guard_script(&[10190, 10045]);
         for table in ["iptables", "ip6tables"] {
-            assert!(script.contains(&format!(
-                "{table} -w -A {GUEST_EGRESS_CHAIN} -o lo -j RETURN"
-            )));
-            assert!(script.contains(&format!("{table} -w -A {GUEST_EGRESS_CHAIN} -j REJECT")));
+            for rule in ["-o lo -j RETURN"].iter().chain(GUEST_EGRESS_TAIL.iter()) {
+                assert!(
+                    script.contains(&format!("{table} -w -A {GUEST_EGRESS_CHAIN} {rule}")),
+                    "{table} {rule}"
+                );
+            }
             for uid in [10190, 10045] {
                 assert!(script.contains(&format!(
                     "{table} -w -I OUTPUT 1 -m owner --uid-owner {uid} -j {GUEST_EGRESS_CHAIN}"
                 )));
             }
         }
-        // The host is reachable over IPv4 only; IPv6 has no exemption.
+        // The host is reachable over IPv4 only; IPv6 has no host exemption.
         assert!(script.contains(&format!(
             "iptables -w -A {GUEST_EGRESS_CHAIN} -d 10.0.2.2/32 -j RETURN"
         )));
@@ -1269,46 +1309,65 @@ mod tests {
         assert!(!script.contains(';'));
         assert!(!script.contains("|| true"));
         assert!(script.ends_with(&guest_egress_listing()));
-        // The REJECT comes after both exemptions.
-        let v4_reject = script
+        // HTTPS and HTTP are rejected, and the catch-all REJECT is the last
+        // rule of each family, after every exemption.
+        assert_eq!(GUEST_EGRESS_TAIL.last(), Some(&"-j REJECT"));
+        assert!(GUEST_EGRESS_TAIL.contains(&"-p tcp --dport 443 -j REJECT"));
+        let v4_catch_all = script
             .find("iptables -w -A hse_upgrade_egress -j REJECT")
             .unwrap();
-        assert!(script.find("-o lo -j RETURN").unwrap() < v4_reject);
-        assert!(script.find("-d 10.0.2.2/32 -j RETURN").unwrap() < v4_reject);
+        assert!(script.find("-o lo -j RETURN").unwrap() < v4_catch_all);
+        assert!(script.find("-d 10.0.2.2/32 -j RETURN").unwrap() < v4_catch_all);
+        assert!(script.find("--dport 53 -j RETURN").unwrap() < v4_catch_all);
     }
 
     const GUARD_LISTING: &str = "Chain hse_upgrade_egress (2 references)\n\
         \x20   pkts      bytes target     prot opt in     out     source               destination\n\
         \x20     12      720 RETURN     all  --  *      lo      0.0.0.0/0            0.0.0.0/0\n\
         \x20     40     4800 RETURN     all  --  *      *       0.0.0.0/0            10.0.2.2\n\
-        \x20 REJECTED_V4        0 REJECT     all  --  *      *       0.0.0.0/0            0.0.0.0/0            reject-with icmp-port-unreachable\n\
+        \x20      6      360 RETURN     udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53\n\
+        \x20      0        0 RETURN     tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:53\n\
+        \x20 HTTPS_V4        0 REJECT     tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:443 reject-with icmp-port-unreachable\n\
+        \x20      0        0 REJECT     tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:80 reject-with icmp-port-unreachable\n\
+        \x20      0        0 REJECT     all  --  *      *       0.0.0.0/0            0.0.0.0/0            reject-with icmp-port-unreachable\n\
         Chain hse_upgrade_egress (2 references)\n\
         \x20   pkts      bytes target     prot opt in     out     source               destination\n\
         \x20      0        0 RETURN     all      *      lo      ::/0                 ::/0\n\
-        \x20 REJECTED_V6        0 REJECT     all      *      *       ::/0                 ::/0                 reject-with icmp6-port-unreachable\n";
+        \x20      3      240 RETURN     udp      *      *       ::/0                 ::/0                 udp dpt:53\n\
+        \x20      0        0 RETURN     tcp      *      *       ::/0                 ::/0                 tcp dpt:53\n\
+        \x20      0        0 REJECT     tcp      *      *       ::/0                 ::/0                 tcp dpt:443 reject-with icmp6-port-unreachable\n\
+        \x20      0        0 REJECT     tcp      *      *       ::/0                 ::/0                 tcp dpt:80 reject-with icmp6-port-unreachable\n\
+        \x20 OTHER_V6        0 REJECT     all      *      *       ::/0                 ::/0                 reject-with icmp6-port-unreachable\n";
+
+    fn guard_listing(https_v4: u64, other_v6: u64) -> String {
+        GUARD_LISTING
+            .replace("HTTPS_V4", &https_v4.to_string())
+            .replace("OTHER_V6", &other_v6.to_string())
+    }
 
     #[test]
     fn a_clean_guard_reads_zero_and_any_packet_to_the_real_internet_is_counted() {
-        let clean = GUARD_LISTING
-            .replace("REJECTED_V4", "0")
-            .replace("REJECTED_V6", "0");
-        assert_eq!(guest_egress_rejections(&clean, 2), Ok(0));
+        assert_eq!(
+            guest_egress_reading(&guard_listing(0, 0), 2),
+            Ok(GuardReading {
+                rejected: 0,
+                resolver: 9
+            })
+        );
         // A guest that went for the real github.com before the proxy took
         // hold: refused at the guard, and the run must not read as green.
-        let leaked = GUARD_LISTING
-            .replace("REJECTED_V4", "3")
-            .replace("REJECTED_V6", "1");
-        assert_eq!(guest_egress_rejections(&leaked, 2), Ok(4));
+        assert_eq!(
+            guest_egress_reading(&guard_listing(3, 1), 2).map(|r| r.rejected),
+            Ok(4)
+        );
     }
 
     #[test]
     fn a_guard_that_is_missing_or_unreferenced_is_never_read_as_clean() {
-        let clean = GUARD_LISTING
-            .replace("REJECTED_V4", "0")
-            .replace("REJECTED_V6", "0");
-        assert!(guest_egress_rejections("", 2).is_err());
+        let clean = guard_listing(0, 0);
+        assert!(guest_egress_reading("", 2).is_err());
         assert!(
-            guest_egress_rejections("iptables: No chain/target/match by that name.\n", 2).is_err()
+            guest_egress_reading("iptables: No chain/target/match by that name.\n", 2).is_err()
         );
         // Only one family installed.
         let v4_only: String = clean
@@ -1316,13 +1375,16 @@ mod tests {
             .take(2)
             .collect::<Vec<_>>()
             .join("Chain");
-        assert!(guest_egress_rejections(&v4_only, 2).is_err());
+        assert!(guest_egress_reading(&v4_only, 2).is_err());
         // A chain no UID jumps to guards nothing.
         let unreferenced = clean.replace("(2 references)", "(0 references)");
-        assert!(guest_egress_rejections(&unreferenced, 2).is_err());
-        // No REJECT rule: everything would be let out.
-        let no_reject = clean.replace("REJECT ", "ACCEPT ");
-        assert!(guest_egress_rejections(&no_reject, 2).is_err());
+        assert!(guest_egress_reading(&unreferenced, 2).is_err());
+        // No catch-all REJECT: everything but HTTP(S) would be let out.
+        let no_catch_all = clean.replace("REJECT     all", "ACCEPT     all");
+        assert!(guest_egress_reading(&no_catch_all, 2).is_err());
+        // An unreadable counter.
+        let garbled = clean.replacen("      0        0 REJECT", "      ?        0 REJECT", 1);
+        assert!(guest_egress_reading(&garbled, 2).is_err());
     }
 
     #[test]
