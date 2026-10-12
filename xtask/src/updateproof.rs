@@ -297,6 +297,174 @@ pub fn tunnel_summary(tunnels: &[String]) -> TunnelSummary {
     summary
 }
 
+/// The guest-side egress guard of the upgrade proof: an `iptables` /
+/// `ip6tables` chain the app's and `DownloadManager`'s UIDs jump to, which
+/// lets their packets out only over loopback (the API `adb forward` reaches),
+/// to [`GUEST_HOST_ALIAS`] (the host, where the only `github.com` is the
+/// stand-in behind the proxy) and to port 53 (name resolution: Android's
+/// resolver attributes a lookup's packets to the UID that asked, and a lookup
+/// reaches the network's resolver, never `github.com`), and rejects
+/// everything else. The global HTTP proxy setting reaches the guest's network
+/// stack asynchronously and on API 34 nothing observable marks the moment,
+/// so without the guard a check that ran before it took hold would go to the
+/// real `github.com`; with it, that connection is refused in the guest (the
+/// check fails closed) and counted, which [`guest_egress_reading`] reads.
+pub const GUEST_EGRESS_CHAIN: &str = "hse_upgrade_egress";
+
+/// The guard's rules after the loopback (and, IPv4, host) exemptions: the
+/// name-resolution exemptions, then the rejections — split by port so a
+/// non-zero count says what was tried, and ending in a catch-all.
+const GUEST_EGRESS_TAIL: [&str; 5] = [
+    "-p udp --dport 53 -j RETURN",
+    "-p tcp --dport 53 -j RETURN",
+    "-p tcp --dport 443 -j REJECT",
+    "-p tcp --dport 80 -j REJECT",
+    "-j REJECT",
+];
+
+/// The shell script that installs [`GUEST_EGRESS_CHAIN`] (flushed first if
+/// a previous run left it) for each of `uids`, IPv4 and IPv6, every step
+/// `&&`-chained so a missing `iptables`, owner match or `REJECT` target
+/// fails the script instead of leaving the guest open. Ends by listing the
+/// chain with its counters, for [`guest_egress_reading`].
+pub fn guest_egress_guard_script(uids: &[u32]) -> String {
+    let chain = GUEST_EGRESS_CHAIN;
+    let mut steps = Vec::new();
+    for (table, host_rule) in [
+        (
+            "iptables",
+            Some(format!("-d {GUEST_HOST_ALIAS}/32 -j RETURN")),
+        ),
+        ("ip6tables", None),
+    ] {
+        steps.push(format!(
+            "({table} -w -N {chain} 2>/dev/null || {table} -w -F {chain})"
+        ));
+        steps.push(format!("{table} -w -A {chain} -o lo -j RETURN"));
+        if let Some(rule) = &host_rule {
+            steps.push(format!("{table} -w -A {chain} {rule}"));
+        }
+        for rule in GUEST_EGRESS_TAIL {
+            steps.push(format!("{table} -w -A {chain} {rule}"));
+        }
+        for uid in uids {
+            steps.push(format!(
+                "{table} -w -I OUTPUT 1 -m owner --uid-owner {uid} -j {chain}"
+            ));
+        }
+    }
+    steps.push(guest_egress_listing());
+    steps.join(" && ")
+}
+
+/// Lists [`GUEST_EGRESS_CHAIN`] in both families with exact counters.
+pub fn guest_egress_listing() -> String {
+    let chain = GUEST_EGRESS_CHAIN;
+    format!("iptables -w -L {chain} -v -n -x && ip6tables -w -L {chain} -v -n -x")
+}
+
+/// What the guard's counters say.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GuardReading {
+    /// Packets its `REJECT` rules turned away, both families: the guarded
+    /// UIDs trying to reach something other than loopback, the host and a
+    /// resolver. Must be 0.
+    pub rejected: u64,
+    /// Name-resolution packets let through (reported, not failed).
+    pub resolver: u64,
+}
+
+/// Reads a [`guest_egress_listing`]. `Err` when the listing does not show
+/// the guard installed as [`guest_egress_guard_script`] built it — a chain
+/// header per family, each referenced at least `uids` times, each ending in
+/// a catch-all `REJECT` (protocol `all`): an unreadable guard is never read
+/// as a clean one.
+pub fn guest_egress_reading(listing: &str, uids: usize) -> Result<GuardReading, String> {
+    let mut chains = 0;
+    let mut catch_alls = 0;
+    let mut reading = GuardReading {
+        rejected: 0,
+        resolver: 0,
+    };
+    for line in listing.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first() == Some(&"Chain") && fields.get(1) == Some(&GUEST_EGRESS_CHAIN) {
+            let references = fields
+                .get(2)
+                .and_then(|n| n.strip_prefix('('))
+                .and_then(|n| n.parse::<usize>().ok())
+                .ok_or_else(|| format!("the guard's chain header is unreadable: `{line}`"))?;
+            if references < uids {
+                return Err(format!(
+                    "the guard's chain is referenced {references} time(s), not by each of the {uids} guarded UID(s): `{line}`"
+                ));
+            }
+            chains += 1;
+            continue;
+        }
+        let target = fields.get(2).copied();
+        if target != Some("REJECT") && target != Some("RETURN") {
+            continue;
+        }
+        let packets = fields[0]
+            .parse::<u64>()
+            .map_err(|_| format!("the guard's counter is unreadable: `{line}`"))?;
+        if target == Some("REJECT") {
+            reading.rejected += packets;
+            if fields.get(3) == Some(&"all") {
+                catch_alls += 1;
+            }
+        } else if fields.contains(&"dpt:53") {
+            reading.resolver += packets;
+        }
+    }
+    if chains != 2 || catch_alls != 2 {
+        return Err(format!(
+            "the guest egress guard is not installed in both families ({chains} chain(s), {catch_alls} catch-all REJECT rule(s)):\n{listing}"
+        ));
+    }
+    Ok(reading)
+}
+
+/// Whether the guest's `ConnectivityService` has applied the proof's global
+/// proxy: `settings get global global_http_proxy_host` / `_port` (as
+/// answered, trailing newline and all) name [`GUEST_HOST_ALIAS`] and `port`.
+pub fn global_proxy_applied(host: &str, port: &str, want_port: u16) -> bool {
+    host.trim() == GUEST_HOST_ALIAS && port.trim().parse::<u16>().ok() == Some(want_port)
+}
+
+/// The UID a `cmd package list packages -U <package>` answer gives
+/// `package` (the listing filters by substring, so the exact name is
+/// matched).
+pub fn package_uid(listing: &str, package: &str) -> Option<u32> {
+    listing.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()?.strip_prefix("package:")? != package {
+            return None;
+        }
+        fields
+            .find_map(|field| field.strip_prefix("uid:"))?
+            .split(',')
+            .next()?
+            .parse()
+            .ok()
+    })
+}
+
+/// The stand-in's requests that are not one of `expected` (its request
+/// lines, `request GET /path -> status`): anything else reaching the
+/// stand-in — another path, another status, another method — is traffic the
+/// proof did not ask for. The upgrade proof's acceptance signal is that this
+/// is empty and the guest's guard rejected nothing, not any line the proof
+/// prints about the proxy setting.
+pub fn unexpected_requests<'a>(requests: &'a [String], expected: &[String]) -> Vec<&'a str> {
+    requests
+        .iter()
+        .filter(|line| !expected.contains(line))
+        .map(String::as_str)
+        .collect()
+}
+
 /// The guest's default network as `dumpsys connectivity` reports it: the id
 /// on the `Active default network:` line, and the transports and
 /// capabilities of that network's `NetworkAgentInfo` line.
@@ -408,6 +576,13 @@ impl ReleaseHost {
     /// the first one proves the guest's global proxy setting is live.
     pub fn tunnel_count(&self) -> usize {
         self.tunnels.lock().map_or(0, |t| t.len())
+    }
+
+    /// The proxy's log so far (the stand-in's own request lines are only
+    /// complete after [`stop`](Self::stop); a relayed tunnel is logged as it
+    /// opens, so this is how traffic to the stand-in is seen while it runs).
+    pub fn tunnels_so_far(&self) -> Vec<String> {
+        self.tunnels.lock().map(|t| t.clone()).unwrap_or_default()
     }
 
     /// Compiles and starts the stand-in on `anchor`'s key, then the proxy.
@@ -1114,5 +1289,161 @@ mod tests {
             Some("com.hse.bleradar/.MainActivity")
         );
         assert_eq!(resumed_activity("no such line"), None);
+    }
+
+    #[test]
+    fn the_guest_egress_guard_rejects_all_but_loopback_the_host_and_resolvers_for_each_uid() {
+        let script = guest_egress_guard_script(&[10190, 10045]);
+        for table in ["iptables", "ip6tables"] {
+            for rule in ["-o lo -j RETURN"].iter().chain(GUEST_EGRESS_TAIL.iter()) {
+                assert!(
+                    script.contains(&format!("{table} -w -A {GUEST_EGRESS_CHAIN} {rule}")),
+                    "{table} {rule}"
+                );
+            }
+            for uid in [10190, 10045] {
+                assert!(script.contains(&format!(
+                    "{table} -w -I OUTPUT 1 -m owner --uid-owner {uid} -j {GUEST_EGRESS_CHAIN}"
+                )));
+            }
+        }
+        // The host is reachable over IPv4 only; IPv6 has no host exemption.
+        assert!(script.contains(&format!(
+            "iptables -w -A {GUEST_EGRESS_CHAIN} -d 10.0.2.2/32 -j RETURN"
+        )));
+        assert!(!script.contains("ip6tables -w -A hse_upgrade_egress -d"));
+        // Fail closed: every step chained, nothing `;`-separated or `|| true`.
+        assert!(!script.contains(';'));
+        assert!(!script.contains("|| true"));
+        assert!(script.ends_with(&guest_egress_listing()));
+        // HTTPS and HTTP are rejected, and the catch-all REJECT is the last
+        // rule of each family, after every exemption.
+        assert_eq!(GUEST_EGRESS_TAIL.last(), Some(&"-j REJECT"));
+        assert!(GUEST_EGRESS_TAIL.contains(&"-p tcp --dport 443 -j REJECT"));
+        let v4_catch_all = script
+            .find("iptables -w -A hse_upgrade_egress -j REJECT")
+            .unwrap();
+        assert!(script.find("-o lo -j RETURN").unwrap() < v4_catch_all);
+        assert!(script.find("-d 10.0.2.2/32 -j RETURN").unwrap() < v4_catch_all);
+        assert!(script.find("--dport 53 -j RETURN").unwrap() < v4_catch_all);
+    }
+
+    const GUARD_LISTING: &str = "Chain hse_upgrade_egress (2 references)\n\
+        \x20   pkts      bytes target     prot opt in     out     source               destination\n\
+        \x20     12      720 RETURN     all  --  *      lo      0.0.0.0/0            0.0.0.0/0\n\
+        \x20     40     4800 RETURN     all  --  *      *       0.0.0.0/0            10.0.2.2\n\
+        \x20      6      360 RETURN     udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53\n\
+        \x20      0        0 RETURN     tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:53\n\
+        \x20 HTTPS_V4        0 REJECT     tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:443 reject-with icmp-port-unreachable\n\
+        \x20      0        0 REJECT     tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:80 reject-with icmp-port-unreachable\n\
+        \x20      0        0 REJECT     all  --  *      *       0.0.0.0/0            0.0.0.0/0            reject-with icmp-port-unreachable\n\
+        Chain hse_upgrade_egress (2 references)\n\
+        \x20   pkts      bytes target     prot opt in     out     source               destination\n\
+        \x20      0        0 RETURN     all      *      lo      ::/0                 ::/0\n\
+        \x20      3      240 RETURN     udp      *      *       ::/0                 ::/0                 udp dpt:53\n\
+        \x20      0        0 RETURN     tcp      *      *       ::/0                 ::/0                 tcp dpt:53\n\
+        \x20      0        0 REJECT     tcp      *      *       ::/0                 ::/0                 tcp dpt:443 reject-with icmp6-port-unreachable\n\
+        \x20      0        0 REJECT     tcp      *      *       ::/0                 ::/0                 tcp dpt:80 reject-with icmp6-port-unreachable\n\
+        \x20 OTHER_V6        0 REJECT     all      *      *       ::/0                 ::/0                 reject-with icmp6-port-unreachable\n";
+
+    fn guard_listing(https_v4: u64, other_v6: u64) -> String {
+        GUARD_LISTING
+            .replace("HTTPS_V4", &https_v4.to_string())
+            .replace("OTHER_V6", &other_v6.to_string())
+    }
+
+    #[test]
+    fn a_clean_guard_reads_zero_and_any_packet_to_the_real_internet_is_counted() {
+        assert_eq!(
+            guest_egress_reading(&guard_listing(0, 0), 2),
+            Ok(GuardReading {
+                rejected: 0,
+                resolver: 9
+            })
+        );
+        // A guest that went for the real github.com before the proxy took
+        // hold: refused at the guard, and the run must not read as green.
+        assert_eq!(
+            guest_egress_reading(&guard_listing(3, 1), 2).map(|r| r.rejected),
+            Ok(4)
+        );
+    }
+
+    #[test]
+    fn a_guard_that_is_missing_or_unreferenced_is_never_read_as_clean() {
+        let clean = guard_listing(0, 0);
+        assert!(guest_egress_reading("", 2).is_err());
+        assert!(
+            guest_egress_reading("iptables: No chain/target/match by that name.\n", 2).is_err()
+        );
+        // Only one family installed.
+        let v4_only: String = clean
+            .split("Chain")
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("Chain");
+        assert!(guest_egress_reading(&v4_only, 2).is_err());
+        // A chain no UID jumps to guards nothing.
+        let unreferenced = clean.replace("(2 references)", "(0 references)");
+        assert!(guest_egress_reading(&unreferenced, 2).is_err());
+        // No catch-all REJECT: everything but HTTP(S) would be let out.
+        let no_catch_all = clean.replace("REJECT     all", "ACCEPT     all");
+        assert!(guest_egress_reading(&no_catch_all, 2).is_err());
+        // An unreadable counter.
+        let garbled = clean.replacen("      0        0 REJECT", "      ?        0 REJECT", 1);
+        assert!(guest_egress_reading(&garbled, 2).is_err());
+    }
+
+    #[test]
+    fn the_global_proxy_counts_as_applied_only_when_both_settings_name_the_stand_in_proxy() {
+        assert!(global_proxy_applied("10.0.2.2\n", "43381\n", 43381));
+        assert!(!global_proxy_applied("null\n", "null\n", 43381));
+        assert!(!global_proxy_applied("10.0.2.2\n", "null\n", 43381));
+        assert!(!global_proxy_applied("10.0.2.2\n", "8080\n", 43381));
+        assert!(!global_proxy_applied("10.0.2.20\n", "43381\n", 43381));
+        assert!(!global_proxy_applied("", "", 43381));
+    }
+
+    #[test]
+    fn package_uids_are_read_for_the_exact_package() {
+        let listing =
+            "package:com.hse.bleradar.other uid:10300\npackage:com.hse.bleradar uid:10190\n";
+        assert_eq!(package_uid(listing, "com.hse.bleradar"), Some(10190));
+        assert_eq!(
+            package_uid(
+                "package:com.android.providers.downloads uid:10045,10046\n",
+                "com.android.providers.downloads"
+            ),
+            Some(10045)
+        );
+        assert_eq!(package_uid("", "com.hse.bleradar"), None);
+        assert_eq!(
+            package_uid("package:com.hse.bleradar\n", "com.hse.bleradar"),
+            None
+        );
+    }
+
+    #[test]
+    fn any_stand_in_request_beyond_the_expected_three_is_unexpected() {
+        let expected: Vec<String> = [
+            "request GET /o/r/releases/latest/download/release_manifest.txt -> 302",
+            "request GET /o/r/releases/download/v1.0.1/release_manifest.txt -> 200",
+            "request GET /o/r/releases/download/v1.0.1/app.apk -> 200",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert!(unexpected_requests(&expected, &expected).is_empty());
+        let mut seen = expected.clone();
+        seen.push("request GET /o/r/releases/download/v1.0.1/app.apk -> 200".to_string());
+        assert!(unexpected_requests(&seen, &expected).is_empty());
+        seen.push("request GET /favicon.ico -> 404".to_string());
+        seen.push("request HEAD /o/r/releases/download/v1.0.1/app.apk -> 200".to_string());
+        assert_eq!(
+            unexpected_requests(&seen, &expected),
+            [
+                "request GET /favicon.ico -> 404",
+                "request HEAD /o/r/releases/download/v1.0.1/app.apk -> 200"
+            ]
+        );
     }
 }

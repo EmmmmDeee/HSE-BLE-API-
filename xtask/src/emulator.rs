@@ -37,7 +37,11 @@
 //!   `DownloadManager` fetches the artifact, the core verifies its size and
 //!   SHA-256, the service hands it to the package installer, the proof taps
 //!   the installer's button, and the successor's `versionCode` is installed
-//!   and answers on the API;
+//!   and answers on the API. Before that first check, a guest egress guard
+//!   limits the app and `DownloadManager` to loopback and the host, so the
+//!   real `github.com` is unreachable whether or not the global proxy has
+//!   taken hold; the proof passes only if the stand-in received no traffic
+//!   it did not ask for and the guard rejected nothing;
 //! * the crash and main logs carry no Java or native crash of the app.
 //!
 //! Needs KVM (the emulator is started with `-accel on`), so it runs in CI's
@@ -194,6 +198,10 @@ const UPGRADE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long the upgrade proof lets the guest apply the global proxy: one run
 /// that launched about 2 s after the setting fetched with no proxy yet.
 const PROXY_SETTLE: Duration = Duration::from_secs(20);
+/// How long the guest's `ConnectivityService` may take to apply the global
+/// proxy setting (its `global_http_proxy_host`/`_port`); past it the first
+/// check is not launched.
+const PROXY_APPLY_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the package installer may take once its button is tapped.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the installer may take to show its confirmation.
@@ -2498,6 +2506,18 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default()
     ));
+    // Before anything can run a check: the app and DownloadManager may reach
+    // only loopback and the host, so the real github.com is unreachable from
+    // them whether or not the global proxy has taken hold (fails closed).
+    let guarded = install_egress_guard(adb)?;
+    report.push(format!(
+        "egress guard: UIDs {} (the app, {DOWNLOADS_PROVIDER}) limited to loopback, {GUEST_HOST_ALIAS} and name resolution before the first check — anything else rejected in the guest, IPv4 and IPv6",
+        guarded
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
 
     let work = crate::xtask_temp_dir("verify-android-emulator-upgrade");
     crate::recreate_dirs(&[&work])?;
@@ -2520,19 +2540,28 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
     let outcome = upgrade_through(
         adb,
         port,
+        guarded.len(),
         &host,
         &anchor,
         &release_manifest_url,
         proof,
         report,
     );
+    // The guard's counters while the proxy is still set: what the guest
+    // tried to reach beyond loopback and the host during the proof. The
+    // guard itself stays in place to the end of the run.
+    let guard = egress_reading(adb, guarded.len());
     // The proxy setting must not outlive the stand-in, whatever happened;
     // the stand-in's logs are complete only once it has stopped.
     let _ = adb.shell_lenient("settings put global http_proxy :0");
     let (requests, tunnels) = host.stop();
     outcome.map_err(|error| {
         format!(
-            "{error}\n-- the stand-in's requests --\n{}\n-- its tunnels --\n{}",
+            "{error}\n-- the guest egress guard --\n{}\n-- the stand-in's requests --\n{}\n-- its tunnels --\n{}",
+            match &guard {
+                Ok((_, listing)) => listing.clone(),
+                Err(error) => error.clone(),
+            },
             requests.join("\n"),
             tunnels.join("\n")
         )
@@ -2559,6 +2588,26 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
                 )
             })?;
     }
+    // The acceptance signal, not the proxy-setting lines above: the stand-in
+    // github.com received nothing but the three answers the proof asked for,
+    // and the guest's guard rejected nothing — the app and DownloadManager
+    // never tried to reach the real github.com (or anything else off the
+    // host).
+    let unexpected = updateproof::unexpected_requests(&requests, &expected);
+    if !unexpected.is_empty() {
+        return Err(format!(
+            "the stand-in {RELEASE_HOST} received traffic the proof did not ask for: {} — all requests: {}",
+            unexpected.join(" | "),
+            requests.join(" | ")
+        ));
+    }
+    let (guard, listing) = guard?;
+    if guard.rejected != 0 {
+        return Err(format!(
+            "the guest egress guard rejected {} packet(s): the app or {DOWNLOADS_PROVIDER} tried to reach something other than loopback, the host and a resolver (the real {RELEASE_HOST} among the candidates) — the proxy did not carry all of the proof's traffic:\n{listing}",
+            guard.rejected
+        ));
+    }
     // The guest's global proxy also carries the platform's own traffic (its
     // connectivity probes), which the proxy refuses as it must: reported by
     // host, never a failure. Only a tunnel the stand-in itself turned away, or
@@ -2570,6 +2619,11 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
             summary.other.join(" | ")
         ));
     }
+    report.push(format!(
+        "acceptance: the stand-in {RELEASE_HOST} received no unexpected traffic ({} request(s), each one the proof asked for) and the guest egress guard rejected 0 packets (no path to the real {RELEASE_HOST}; {} name-resolution packet(s) let through to a resolver)",
+        requests.len(),
+        guard.resolver
+    ));
     report.push(format!(
         "stand-in {RELEASE_HOST}: {} tunnel(s) relayed ({RELEASE_HOST}:443 only), {} request(s) — {}; {} other request(s) from the guest refused by the proxy ({}: the platform's own traffic, which the global proxy carries too)",
         summary.relayed,
@@ -2583,6 +2637,37 @@ fn upgrade_phase(adb: &Adb, config: &Config, port: u16, report: &mut Report) -> 
         }
     ));
     Ok(())
+}
+
+/// Installs [`updateproof::GUEST_EGRESS_CHAIN`] for the app's and
+/// `DownloadManager`'s UIDs and checks it reads clean; returns the UIDs.
+fn install_egress_guard(adb: &Adb) -> Result<Vec<u32>, String> {
+    let mut uids = Vec::new();
+    for package in [PACKAGE, DOWNLOADS_PROVIDER] {
+        let listing = adb.shell(&format!("cmd package list packages -U {package}"))?;
+        let uid = updateproof::package_uid(&listing, package)
+            .ok_or_else(|| format!("no UID for {package} in `{}`", listing.trim()))?;
+        if !uids.contains(&uid) {
+            uids.push(uid);
+        }
+    }
+    let listing = adb.shell(&updateproof::guest_egress_guard_script(&uids))?;
+    let reading = updateproof::guest_egress_reading(&listing, uids.len())?;
+    if reading.rejected != 0 {
+        return Err(format!(
+            "the guest egress guard counted {} rejected packet(s) as it was installed:\n{listing}",
+            reading.rejected
+        ));
+    }
+    Ok(uids)
+}
+
+/// The guard's counters now, with the listing they were read from (for a
+/// failure's message).
+fn egress_reading(adb: &Adb, uids: usize) -> Result<(updateproof::GuardReading, String), String> {
+    let listing = adb.shell(&updateproof::guest_egress_listing())?;
+    let reading = updateproof::guest_egress_reading(&listing, uids)?;
+    Ok((reading, listing))
 }
 
 /// Mobile data off, Wi-Fi on, and the guest's default network unmetered
@@ -2617,35 +2702,58 @@ fn wait_for_unmetered_network(adb: &Adb) -> Result<updateproof::ActiveNetwork, S
     }
 }
 
-/// Lets the global proxy setting reach the guest's network stack before the
-/// launch, and says how long that was. Nothing observable marks the moment on
-/// API 34: `dumpsys connectivity` does not print a global proxy (run
-/// 36606105502), and the platform's own traffic reaches the stand-in's proxy
-/// only after the launch (run 36607081595). So this settles for
-/// [`PROXY_SETTLE`], returning early should the proxy already have seen a
-/// guest connection.
-fn wait_for_global_proxy(host: &updateproof::ReleaseHost) -> String {
+/// Proxy before the first check: waits until the guest's
+/// `ConnectivityService` has applied the global proxy — it turns the
+/// `http_proxy` setting into `global_http_proxy_host`/`_port` as it installs
+/// the proxy every process started afterwards binds with — and fails, without
+/// launching, if that is not seen within [`PROXY_APPLY_TIMEOUT`]. Then lets
+/// the network stack settle for what is left of [`PROXY_SETTLE`], returning
+/// early should the proxy already have seen a guest connection. (A fixed wait
+/// alone was not enough: run 38187267311 launched after the full 20 s and
+/// the check still resolved github.com directly.)
+fn wait_for_global_proxy(adb: &Adb, host: &updateproof::ReleaseHost) -> Result<String, String> {
     let started = Instant::now();
+    let applied = loop {
+        let applied_host = adb.shell_lenient("settings get global global_http_proxy_host");
+        let applied_port = adb.shell_lenient("settings get global global_http_proxy_port");
+        if updateproof::global_proxy_applied(&applied_host, &applied_port, host.proxy_port) {
+            break started.elapsed();
+        }
+        if started.elapsed() > PROXY_APPLY_TIMEOUT {
+            return Err(format!(
+                "the guest did not apply the global proxy {GUEST_HOST_ALIAS}:{} within {}s (global_http_proxy_host `{}`, global_http_proxy_port `{}`): the first check is not launched without it",
+                host.proxy_port,
+                PROXY_APPLY_TIMEOUT.as_secs(),
+                applied_host.trim(),
+                applied_port.trim()
+            ));
+        }
+        thread::sleep(Duration::from_millis(250));
+    };
     while started.elapsed() < PROXY_SETTLE {
         if host.tunnel_count() > 0 {
-            return format!(
-                "proxy applied: the guest's first connection reached it {:.1}s after the setting",
+            return Ok(format!(
+                "proxy applied by ConnectivityService {:.1}s after the setting; the guest's first connection reached it {:.1}s after the setting",
+                applied.as_secs_f64(),
                 started.elapsed().as_secs_f64()
-            );
+            ));
         }
         thread::sleep(Duration::from_millis(250));
     }
-    format!(
-        "proxy setting given {}s to reach the network stack before the launch (not observable earlier on this platform)",
-        PROXY_SETTLE.as_secs()
-    )
+    Ok(format!(
+        "proxy applied by ConnectivityService {:.1}s after the setting; launched {:.1}s after it",
+        applied.as_secs_f64(),
+        started.elapsed().as_secs_f64()
+    ))
 }
 
 /// The guest side of [`upgrade_phase`], with the stand-in up: trust, proxy,
 /// launch, the pathway's milestones from the service's log, the installer.
+#[allow(clippy::too_many_arguments)]
 fn upgrade_through(
     adb: &Adb,
     port: u16,
+    guarded: usize,
     host: &updateproof::ReleaseHost,
     anchor: &updateproof::TrustAnchor,
     release_manifest_url: &str,
@@ -2709,10 +2817,30 @@ fn upgrade_through(
     ));
     // The setting is applied to the network asynchronously: a launch right
     // after it once resolved github.com directly and fell back to the bundled
-    // manifest (UnknownHostException, no proxy yet). Wait until the proxy
-    // sees the guest's first connection before launching.
-    report.push(wait_for_global_proxy(host));
+    // manifest (UnknownHostException, no proxy yet). Wait until the guest
+    // has applied it, and fail closed if it never does.
+    report.push(wait_for_global_proxy(adb, host)?);
+    // The first check's process must bind after the proxy was applied: no
+    // process of the app may predate it.
+    adb.shell(&format!("am force-stop {PACKAGE}"))?;
 
+    // Proxy before the first check: nothing may have reached the stand-in
+    // yet (a relayed tunnel before the launch is traffic the proof did not
+    // start), and the guard must still read clean.
+    let before = updateproof::tunnel_summary(&host.tunnels_so_far());
+    if before.relayed != 0 {
+        return Err(format!(
+            "{} tunnel(s) reached the stand-in {RELEASE_HOST} before the first check was launched",
+            before.relayed
+        ));
+    }
+    let (guard, listing) = egress_reading(adb, guarded)?;
+    if guard.rejected != 0 {
+        return Err(format!(
+            "the guest egress guard rejected {} packet(s) before the first check was launched:\n{listing}",
+            guard.rejected
+        ));
+    }
     println!("== am start -W {ACTIVITY}: the fresh install's first check, against the stand-in ==");
     // Only this launch's lines: logcat since the guest's clock now.
     let since = adb.shell("date '+%m-%d %H:%M:%S.000'")?.trim().to_string();
