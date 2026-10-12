@@ -198,6 +198,10 @@ const UPGRADE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long the upgrade proof lets the guest apply the global proxy: one run
 /// that launched about 2 s after the setting fetched with no proxy yet.
 const PROXY_SETTLE: Duration = Duration::from_secs(20);
+/// How long the guest's `ConnectivityService` may take to apply the global
+/// proxy setting (its `global_http_proxy_host`/`_port`); past it the first
+/// check is not launched.
+const PROXY_APPLY_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the package installer may take once its button is tapped.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the installer may take to show its confirmation.
@@ -2698,28 +2702,49 @@ fn wait_for_unmetered_network(adb: &Adb) -> Result<updateproof::ActiveNetwork, S
     }
 }
 
-/// Lets the global proxy setting reach the guest's network stack before the
-/// launch, and says how long that was. Nothing observable marks the moment on
-/// API 34: `dumpsys connectivity` does not print a global proxy (run
-/// 36606105502), and the platform's own traffic reaches the stand-in's proxy
-/// only after the launch (run 36607081595). So this settles for
-/// [`PROXY_SETTLE`], returning early should the proxy already have seen a
-/// guest connection.
-fn wait_for_global_proxy(host: &updateproof::ReleaseHost) -> String {
+/// Proxy before the first check: waits until the guest's
+/// `ConnectivityService` has applied the global proxy — it turns the
+/// `http_proxy` setting into `global_http_proxy_host`/`_port` as it installs
+/// the proxy every process started afterwards binds with — and fails, without
+/// launching, if that is not seen within [`PROXY_APPLY_TIMEOUT`]. Then lets
+/// the network stack settle for what is left of [`PROXY_SETTLE`], returning
+/// early should the proxy already have seen a guest connection. (A fixed wait
+/// alone was not enough: run 38187267311 launched after the full 20 s and
+/// the check still resolved github.com directly.)
+fn wait_for_global_proxy(adb: &Adb, host: &updateproof::ReleaseHost) -> Result<String, String> {
     let started = Instant::now();
+    let applied = loop {
+        let applied_host = adb.shell_lenient("settings get global global_http_proxy_host");
+        let applied_port = adb.shell_lenient("settings get global global_http_proxy_port");
+        if updateproof::global_proxy_applied(&applied_host, &applied_port, host.proxy_port) {
+            break started.elapsed();
+        }
+        if started.elapsed() > PROXY_APPLY_TIMEOUT {
+            return Err(format!(
+                "the guest did not apply the global proxy {GUEST_HOST_ALIAS}:{} within {}s (global_http_proxy_host `{}`, global_http_proxy_port `{}`): the first check is not launched without it",
+                host.proxy_port,
+                PROXY_APPLY_TIMEOUT.as_secs(),
+                applied_host.trim(),
+                applied_port.trim()
+            ));
+        }
+        thread::sleep(Duration::from_millis(250));
+    };
     while started.elapsed() < PROXY_SETTLE {
         if host.tunnel_count() > 0 {
-            return format!(
-                "proxy applied: the guest's first connection reached it {:.1}s after the setting",
+            return Ok(format!(
+                "proxy applied by ConnectivityService {:.1}s after the setting; the guest's first connection reached it {:.1}s after the setting",
+                applied.as_secs_f64(),
                 started.elapsed().as_secs_f64()
-            );
+            ));
         }
         thread::sleep(Duration::from_millis(250));
     }
-    format!(
-        "proxy setting given {}s to reach the network stack before the launch (not observable earlier on this platform)",
-        PROXY_SETTLE.as_secs()
-    )
+    Ok(format!(
+        "proxy applied by ConnectivityService {:.1}s after the setting; launched {:.1}s after it",
+        applied.as_secs_f64(),
+        started.elapsed().as_secs_f64()
+    ))
 }
 
 /// The guest side of [`upgrade_phase`], with the stand-in up: trust, proxy,
@@ -2792,9 +2817,12 @@ fn upgrade_through(
     ));
     // The setting is applied to the network asynchronously: a launch right
     // after it once resolved github.com directly and fell back to the bundled
-    // manifest (UnknownHostException, no proxy yet). Wait until the proxy
-    // sees the guest's first connection before launching.
-    report.push(wait_for_global_proxy(host));
+    // manifest (UnknownHostException, no proxy yet). Wait until the guest
+    // has applied it, and fail closed if it never does.
+    report.push(wait_for_global_proxy(adb, host)?);
+    // The first check's process must bind after the proxy was applied: no
+    // process of the app may predate it.
+    adb.shell(&format!("am force-stop {PACKAGE}"))?;
 
     // Proxy before the first check: nothing may have reached the stand-in
     // yet (a relayed tunnel before the launch is traffic the proof did not

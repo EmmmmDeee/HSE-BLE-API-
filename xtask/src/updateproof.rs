@@ -426,6 +426,13 @@ pub fn guest_egress_reading(listing: &str, uids: usize) -> Result<GuardReading, 
     Ok(reading)
 }
 
+/// Whether the guest's `ConnectivityService` has applied the proof's global
+/// proxy: `settings get global global_http_proxy_host` / `_port` (as
+/// answered, trailing newline and all) name [`GUEST_HOST_ALIAS`] and `port`.
+pub fn global_proxy_applied(host: &str, port: &str, want_port: u16) -> bool {
+    host.trim() == GUEST_HOST_ALIAS && port.trim().parse::<u16>().ok() == Some(want_port)
+}
+
 /// The UID a `cmd package list packages -U <package>` answer gives
 /// `package` (the listing filters by substring, so the exact name is
 /// matched).
@@ -1385,6 +1392,16 @@ mod tests {
         // An unreadable counter.
         let garbled = clean.replacen("      0        0 REJECT", "      ?        0 REJECT", 1);
         assert!(guest_egress_reading(&garbled, 2).is_err());
+    }
+
+    #[test]
+    fn the_global_proxy_counts_as_applied_only_when_both_settings_name_the_stand_in_proxy() {
+        assert!(global_proxy_applied("10.0.2.2\n", "43381\n", 43381));
+        assert!(!global_proxy_applied("null\n", "null\n", 43381));
+        assert!(!global_proxy_applied("10.0.2.2\n", "null\n", 43381));
+        assert!(!global_proxy_applied("10.0.2.2\n", "8080\n", 43381));
+        assert!(!global_proxy_applied("10.0.2.20\n", "43381\n", 43381));
+        assert!(!global_proxy_applied("", "", 43381));
     }
 
     #[test]
