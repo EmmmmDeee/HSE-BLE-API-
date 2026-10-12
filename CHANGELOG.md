@@ -52,6 +52,18 @@ for what that release contains).
 
 ### Fixed
 
+- The emulator's upgrade proof no longer leaves a path to the real
+  `github.com` open before its first check. The global HTTP proxy reaches
+  the guest's network stack asynchronously (and on API 34 nothing marks the
+  moment), so a launch before it took hold could have gone direct. The proof
+  now installs a guest `iptables`/`ip6tables` egress guard for the app's and
+  `DownloadManager`'s UIDs right after the proof build is installed: only
+  loopback and the host alias `10.0.2.2` (the stand-in's proxy) are allowed,
+  everything else is rejected, so such a check fails closed. The acceptance
+  signal is the stand-in's traffic, not the proxy-setting line in the
+  report: the run fails if anything reached the stand-in before the launch,
+  if the stand-in answered any request beyond the three the proof asks for,
+  or if the guard rejected any packet.
 - `android-sdk-install --emulator` now verifies the emulator that sdkmanager
   installed. It keeps the emulator only when its `package.xml` and
   `source.properties` name 37.2.12 and the SHA-256 of seven of its files
